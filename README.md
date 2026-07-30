@@ -75,7 +75,7 @@ workflow above and always use support files from the same immutable revision.
 
 The reusable Slack workflow preserves the notification payloads used by the
 Durable Execution SDK repositories. Each consuming repository needs only one
-notification workflow for pull request, issue, and release events.
+notification workflow for pull request, issue, discussion, and release events.
 
 Add `.github/workflows/notify.yml` to the consuming repository:
 
@@ -87,6 +87,8 @@ on:
     types: [opened, reopened, ready_for_review]
   issues:
     types: [opened, reopened]
+  discussion:
+    types: [created]
   release:
     types: [published]
 
@@ -98,6 +100,7 @@ jobs:
     secrets:
       SLACK_WEBHOOK_URL_PR: ${{ secrets.SLACK_WEBHOOK_URL_PR }}
       SLACK_WEBHOOK_URL_ISSUE: ${{ secrets.SLACK_WEBHOOK_URL_ISSUE }}
+      SLACK_WEBHOOK_URL_DISCUSSION: ${{ secrets.SLACK_WEBHOOK_URL_DISCUSSION }}
       SLACK_WEBHOOK_URL_RELEASE: ${{ secrets.SLACK_WEBHOOK_URL_RELEASE }}
 ```
 
@@ -107,13 +110,17 @@ or execute pull request code. The shared workflow selects the event-specific
 webhook and populates the `package_name` payload field from the caller's
 `github.repository`.
 
+The discussion webhook is optional. Repositories that do not notify on
+discussions can omit both the `discussion` trigger and
+`SLACK_WEBHOOK_URL_DISCUSSION` secret mapping.
+
 The release notification is now independent of package publication. Remove
 the old `notify-release` job from Python's `pypi-publish.yml` and JavaScript's
 `npm-publish.yml`.
 
 Once all references have been replaced, the consuming repository's old
-`notify-pr.yml`, `notify-issues.yml`, and `notify-release.yml` files can be
-removed.
+`notify-pr.yml`, `notify-issues.yml`, `notify-discussions.yml`, and
+`notify-release.yml` files can be removed where present.
 
 Replace `<full-commit-sha>` with the 40-character commit SHA to use.
 
