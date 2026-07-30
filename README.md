@@ -27,11 +27,10 @@ jobs:
       contents: read
       id-token: write
       pull-requests: write
-    uses: aws/aws-durable-execution-ci/.github/workflows/ai-pr-review.yml@main
+    uses: aws/aws-durable-execution-ci/.github/workflows/ai-pr-review.yml@<full-commit-sha>
 ```
 
-Pin the `uses` reference to a release tag or full commit SHA when one is
-available.
+Replace `<full-commit-sha>` with the 40-character commit SHA to use.
 
 ### Custom prompt
 
@@ -39,7 +38,7 @@ The shared prompt is used by default. To override it, add a prompt file to the
 consuming repository and pass its repository-relative path:
 
 ```yaml
-    uses: aws/aws-durable-execution-ci/.github/workflows/ai-pr-review.yml@main
+    uses: aws/aws-durable-execution-ci/.github/workflows/ai-pr-review.yml@<full-commit-sha>
     with:
       prompt-path: .github/prompts/ai-pr-review.md
 ```
@@ -71,6 +70,52 @@ and pass it explicitly from the caller:
 The shared workflow loads its scripts and prompts from
 `job.workflow_repository` at `job.workflow_sha`, so callers only need the
 workflow above and always use support files from the same immutable revision.
+
+## Slack notifications
+
+The reusable Slack workflow preserves the notification payloads used by the
+Durable Execution SDK repositories. Each consuming repository needs only one
+notification workflow for pull request, issue, and release events.
+
+Add `.github/workflows/notify.yml` to the consuming repository:
+
+```yaml
+name: Notify Slack
+
+on:
+  pull_request_target:
+    types: [opened, reopened, ready_for_review]
+  issues:
+    types: [opened, reopened]
+  release:
+    types: [published]
+
+permissions: {}
+
+jobs:
+  notify:
+    uses: aws/aws-durable-execution-ci/.github/workflows/notify.yml@<full-commit-sha>
+    secrets:
+      SLACK_WEBHOOK_URL_PR: ${{ secrets.SLACK_WEBHOOK_URL_PR }}
+      SLACK_WEBHOOK_URL_ISSUE: ${{ secrets.SLACK_WEBHOOK_URL_ISSUE }}
+      SLACK_WEBHOOK_URL_RELEASE: ${{ secrets.SLACK_WEBHOOK_URL_RELEASE }}
+```
+
+Draft pull requests are skipped. Using `pull_request_target` makes the webhook
+available for pull requests from forks; the shared workflow does not check out
+or execute pull request code. The shared workflow selects the event-specific
+webhook and populates the `package_name` payload field from the caller's
+`github.repository`.
+
+The release notification is now independent of package publication. Remove
+the old `notify-release` job from Python's `pypi-publish.yml` and JavaScript's
+`npm-publish.yml`.
+
+Once all references have been replaced, the consuming repository's old
+`notify-pr.yml`, `notify-issues.yml`, and `notify-release.yml` files can be
+removed.
+
+Replace `<full-commit-sha>` with the 40-character commit SHA to use.
 
 ## Security
 
