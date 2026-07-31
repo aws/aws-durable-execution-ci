@@ -28,9 +28,12 @@ jobs:
       id-token: write
       pull-requests: write
     uses: aws/aws-durable-execution-ci/.github/workflows/ai-pr-review.yml@<full-commit-sha>
+    secrets: inherit
 ```
 
-Replace `<full-commit-sha>` with the 40-character commit SHA to use.
+Replace `<full-commit-sha>` with the 40-character commit SHA to use. Pinning is
+especially important because `secrets: inherit` grants the reusable workflow
+access to secrets available to the caller.
 
 ### Custom prompt
 
@@ -41,6 +44,7 @@ consuming repository and pass its repository-relative path:
     uses: aws/aws-durable-execution-ci/.github/workflows/ai-pr-review.yml@<full-commit-sha>
     with:
       prompt-path: .github/prompts/ai-pr-review.md
+    secrets: inherit
 ```
 
 The prompt is loaded from the trusted base revision. It must be a readable,
@@ -55,21 +59,20 @@ Create these environments in each consuming repository:
 - `ai-pr-review-runtime`: Add the `BEDROCK_ROLE_ARN` secret containing the IAM
   role that GitHub's OIDC provider can assume.
 
+Keep `BEDROCK_ROLE_ARN` in `ai-pr-review-runtime`. The caller must still specify
+`secrets: inherit` for GitHub to resolve environment-scoped secrets inside
+cross-repository reusable jobs. The called review jobs remain bound to
+`ai-pr-review-runtime`, including its protection rules and branch policies.
+
 Trusted, non-draft branches in the same repository are reviewed automatically.
 The runtime role is restricted to the model APIs by inline session policies in
 the shared workflow.
 
-Alternatively, store `BEDROCK_ROLE_ARN` as a repository or organization secret
-and pass it explicitly from the caller:
-
-```yaml
-    secrets:
-      BEDROCK_ROLE_ARN: ${{ secrets.BEDROCK_ROLE_ARN }}
-```
-
 The shared workflow loads its scripts and prompts from
 `job.workflow_repository` at `job.workflow_sha`, so callers only need the
 workflow above and always use support files from the same immutable revision.
+It also listens for pull requests in this repository, so changes to the shared
+CI implementation receive the same AI review directly.
 
 ## Slack notifications
 
