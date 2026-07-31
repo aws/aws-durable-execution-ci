@@ -104,13 +104,13 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: bash .ai-review-toolkit/scripts/prepare_ai_review_context.sh
 
-      - name: Prepare shared review inputs
+      - name: Prepare review inputs
         id: review-inputs
         env:
           REVIEW_PROMPT_PATH: ${{ steps.review-prompt.outputs.path }}
         run: |
-          inline_marker="<!-- ai-pr-review:inline:claude:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}:primary -->"
-          retry_inline_marker="<!-- ai-pr-review:inline:claude:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}:retry -->"
+          inline_marker="[ai-pr-review-inline-claude-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-primary]: #"
+          retry_inline_marker="[ai-pr-review-inline-claude-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-retry]: #"
           {
             echo 'prompt<<AI_REVIEW_PROMPT'
             cat "$REVIEW_PROMPT_PATH"
@@ -123,8 +123,6 @@ jobs:
               "$retry_inline_marker"
             echo 'AI_REVIEW_RETRY_PROMPT'
             echo "schema=$(jq -c . .ai-review-toolkit/.github/prompts/ai-pr-review-schema.json)"
-            echo "inline_marker=$inline_marker"
-            echo "retry_inline_marker=$retry_inline_marker"
           } >> "$GITHUB_OUTPUT"
 
       - name: Prepare unprivileged Claude user
@@ -163,6 +161,27 @@ jobs:
           mask-aws-account-id: true
           output-env-credentials: true
 
+      - name: Snapshot previous Claude inline comments
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PREVIOUS_INLINE_COMMENTS_FILE: ${{ runner.temp }}/previous-claude-inline-comments
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          bash .ai-review-toolkit/scripts/snapshot_ai_review_inline_comments.sh \
+            claude \
+            "$PREVIOUS_INLINE_COMMENTS_FILE"
+
+      - name: Snapshot Claude inline comment baseline
+        env:
+          BEFORE_INLINE_COMMENTS_FILE: ${{ runner.temp }}/before-claude-inline-comments
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          bash .ai-review-toolkit/scripts/snapshot_ai_review_inline_comments.sh \
+            claude \
+            "$BEFORE_INLINE_COMMENTS_FILE" \
+            all
+
       - name: Review pull request with Claude on Amazon Bedrock
         id: review
         continue-on-error: true
@@ -184,6 +203,33 @@ jobs:
             --allowedTools "Read,Grep,Glob,mcp__github_inline_comment__create_inline_comment"
             --disallowedTools "Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch"
             --json-schema '${{ steps.review-inputs.outputs.schema }}'
+
+      - name: Capture failed Claude attempt inline comments
+        if: steps.review.outcome == 'failure'
+        env:
+          BEFORE_INLINE_COMMENTS_FILE: ${{ runner.temp }}/before-claude-inline-comments
+          FAILED_INLINE_COMMENTS_FILE: ${{ runner.temp }}/failed-claude-inline-comments
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PREVIOUS_INLINE_COMMENTS_FILE: ${{ runner.temp }}/previous-claude-inline-comments
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          bash .ai-review-toolkit/scripts/snapshot_ai_review_inline_comments.sh \
+            claude \
+            "$FAILED_INLINE_COMMENTS_FILE" \
+            all
+
+          if [[ -r "$BEFORE_INLINE_COMMENTS_FILE" && -r "$FAILED_INLINE_COMMENTS_FILE" ]]; then
+            comm -13 \
+              <(sort -u "$BEFORE_INLINE_COMMENTS_FILE") \
+              <(sort -u "$FAILED_INLINE_COMMENTS_FILE") \
+              >> "$PREVIOUS_INLINE_COMMENTS_FILE"
+            sort -u \
+              -o "$PREVIOUS_INLINE_COMMENTS_FILE" \
+              "$PREVIOUS_INLINE_COMMENTS_FILE"
+            mv "$FAILED_INLINE_COMMENTS_FILE" "$BEFORE_INLINE_COMMENTS_FILE"
+          else
+            echo "::warning::Failed to capture inline comments from the primary Claude attempt."
+          fi
 
       - name: Retry pull request review with Claude on Amazon Bedrock
         id: review-retry
@@ -207,17 +253,25 @@ jobs:
             --disallowedTools "Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch"
             --json-schema '${{ steps.review-inputs.outputs.schema }}'
 
-      - name: Post review summary
+      - name: Snapshot current Claude inline comments
         env:
-          EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          CURRENT_INLINE_COMMENTS_FILE: ${{ runner.temp }}/current-claude-inline-comments
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
-          CURRENT_INLINE_COMMENT_MARKER: >-
-            ${{
-              steps.review.outcome == 'success' &&
-              steps.review-inputs.outputs.inline_marker ||
-              steps.review-inputs.outputs.retry_inline_marker
-            }}
+        run: |
+          bash .ai-review-toolkit/scripts/snapshot_ai_review_inline_comments.sh \
+            claude \
+            "$CURRENT_INLINE_COMMENTS_FILE" \
+            all
+
+      - name: Post review summary
+        env:
+          BEFORE_INLINE_COMMENTS_FILE: ${{ runner.temp }}/before-claude-inline-comments
+          CURRENT_INLINE_COMMENTS_FILE: ${{ runner.temp }}/current-claude-inline-comments
+          EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PREVIOUS_INLINE_COMMENTS_FILE: ${{ runner.temp }}/previous-claude-inline-comments
+          PR_NUMBER: ${{ github.event.pull_request.number }}
           REVIEW_OUTPUT: >-
             ${{
               steps.review.outcome == 'success' &&
