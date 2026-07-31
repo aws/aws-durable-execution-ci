@@ -32,15 +32,9 @@ esac
 : "${GITHUB_SERVER_URL:?GITHUB_SERVER_URL must be set}"
 : "${PR_NUMBER:?PR_NUMBER must be set}"
 
-current_inline_comment_marker="${CURRENT_INLINE_COMMENT_MARKER:-}"
-inline_comment_marker_pattern="^<!-- ai-pr-review:inline:${reviewer}:[0-9]+:[0-9]+:(primary|retry) -->$"
-if [[
-  -n "$current_inline_comment_marker" &&
-  ! "$current_inline_comment_marker" =~ $inline_comment_marker_pattern
-]]; then
-  echo "invalid current inline comment marker: $current_inline_comment_marker" >&2
-  exit 2
-fi
+previous_inline_comments_file="${PREVIOUS_INLINE_COMMENTS_FILE:-}"
+before_inline_comments_file="${BEFORE_INLINE_COMMENTS_FILE:-}"
+current_inline_comments_file="${CURRENT_INLINE_COMMENTS_FILE:-}"
 
 if [[ ! -r "$summary_file" ]]; then
   echo "AI review summary is not readable: $summary_file" >&2
@@ -62,9 +56,42 @@ if [[ "$current_head_sha" != "$expected_head_sha" ]]; then
 fi
 
 run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+inline_comment_metadata=""
+if [[
+  -n "$previous_inline_comments_file" &&
+  -r "$previous_inline_comments_file" &&
+  -n "$before_inline_comments_file" &&
+  -r "$before_inline_comments_file" &&
+  -n "$current_inline_comments_file" &&
+  -r "$current_inline_comments_file"
+]]; then
+  inline_comment_metadata="<!-- ai-pr-review:inline-comments:${reviewer} -->"$'\n'
+  while IFS= read -r comment_id; do
+    [[ -n "$comment_id" ]] || continue
+
+    if [[ "$comment_id" =~ ^[A-Za-z0-9_=/+-]+$ ]]; then
+      inline_comment_metadata+="<!-- ai-pr-review:inline-comment:${reviewer}:${comment_id} -->"$'\n'
+    else
+      echo "::warning::Ignored an invalid current $title inline comment ID."
+    fi
+  done < <(
+    {
+      sort -u "$previous_inline_comments_file"
+      comm -13 \
+        <(sort -u "$before_inline_comments_file") \
+        <(sort -u "$current_inline_comments_file")
+    } | sort -u
+  )
+fi
+
 # shellcheck disable=SC2016 # Markdown backticks are intentionally literal.
-printf -v body '%s\n## %s\n\n%s\n\nReviewed commit `%s`. [Workflow run](%s)' \
-  "$marker" "$title" "$summary" "$expected_head_sha" "$run_url"
+printf -v body '%s\n%s## %s\n\n%s\n\nReviewed commit `%s`. [Workflow run](%s)' \
+  "$marker" \
+  "$inline_comment_metadata" \
+  "$title" \
+  "$summary" \
+  "$expected_head_sha" \
+  "$run_url"
 
 new_comment_id="$(
   gh api \
@@ -81,12 +108,8 @@ fi
 owner="${GITHUB_REPOSITORY%%/*}"
 repository="${GITHUB_REPOSITORY#*/}"
 comments_file="$(mktemp "${RUNNER_TEMP:-/tmp}/ai-review-comments.XXXXXX")"
-inline_comments_file=""
 cleanup_temp_files() {
   rm -f "$comments_file"
-  if [[ -n "$inline_comments_file" ]]; then
-    rm -f "$inline_comments_file"
-  fi
 }
 trap cleanup_temp_files EXIT
 
@@ -180,55 +203,12 @@ else
   echo "Minimized $previous_comment_count previous $title comment(s)."
 fi
 
-if [[ -z "$current_inline_comment_marker" ]]; then
+if [[ -z "$previous_inline_comments_file" ]]; then
   exit 0
 fi
 
-inline_comments_file="$(
-  mktemp "${RUNNER_TEMP:-/tmp}/ai-review-inline-comments.XXXXXX"
-)"
-
-# shellcheck disable=SC2016 # GraphQL variables are intentionally literal.
-if ! gh api graphql \
-  --paginate \
-  -F owner="$owner" \
-  -F repository="$repository" \
-  -F number="$PR_NUMBER" \
-  -f query='
-    query(
-      $owner: String!,
-      $repository: String!,
-      $number: Int!,
-      $endCursor: String
-    ) {
-      repository(owner: $owner, name: $repository) {
-        pullRequest(number: $number) {
-          reviewThreads(first: 100, after: $endCursor) {
-            nodes {
-              comments(first: 1) {
-                nodes {
-                  id
-                  body
-                  isMinimized
-                  replyTo {
-                    id
-                  }
-                  author {
-                    login
-                  }
-                }
-              }
-            }
-            pageInfo {
-              hasNextPage
-              endCursor
-            }
-          }
-        }
-      }
-    }
-  ' > "$inline_comments_file"; then
-  echo "::warning::Failed to list previous $title inline comments for cleanup."
+if [[ ! -r "$previous_inline_comments_file" ]]; then
+  echo "::warning::Previous $title inline comment snapshot is not readable."
   exit 0
 fi
 
@@ -241,23 +221,6 @@ while IFS= read -r comment_id; do
   else
     echo "::warning::Failed to minimize previous $title inline comment ($comment_id)."
   fi
-done < <(
-  jq -rs \
-    --arg current_marker "$current_inline_comment_marker" \
-    --arg marker_pattern "$inline_comment_marker_pattern" \
-    '
-      .[]
-      | .data.repository.pullRequest.reviewThreads.nodes[]
-      | .comments.nodes[]
-      | select(.replyTo == null)
-      | select(.isMinimized == false)
-      | select(.author.login == "github-actions")
-      | (.body | split("\n")[0]) as $first_line
-      | select($first_line != $current_marker)
-      | select($first_line | test($marker_pattern))
-      | .id
-    ' \
-    "$inline_comments_file"
-)
+done < "$previous_inline_comments_file"
 
 echo "Minimized $previous_inline_comment_count previous $title inline comment(s)."
