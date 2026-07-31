@@ -9,6 +9,12 @@ through Amazon Bedrock. It checks out only the pull request's trusted base
 revision, builds a SHA-anchored review context through the GitHub API, and runs
 both reviewers as unprivileged, read-only users.
 
+Codex generation and comment publication run in separate reusable workflows.
+The generation workflow has read-only GitHub access (plus OIDC access for
+Amazon Bedrock) and passes its validated output through a workflow artifact.
+Only the publication workflow receives `pull-requests: write`; it does not
+receive AWS credentials or run Codex.
+
 Add this caller as `.github/workflows/ai-pr-review.yml` in a consuming
 repository:
 
@@ -61,7 +67,7 @@ Create these environments in each consuming repository:
 
 Keep `BEDROCK_ROLE_ARN` in `ai-pr-review-runtime`. The caller must still specify
 `secrets: inherit` for GitHub to resolve environment-scoped secrets inside
-cross-repository reusable jobs. The called review jobs remain bound to
+cross-repository reusable jobs. The model-generation jobs remain bound to
 `ai-pr-review-runtime`, including its protection rules and branch policies.
 
 Trusted, non-draft branches in the same repository are reviewed automatically.

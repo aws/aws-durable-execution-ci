@@ -1,0 +1,230 @@
+name: Generate Codex PR Review
+
+on:
+  workflow_call:
+    inputs:
+      prompt-path:
+        description: Optional prompt file relative to the caller repository
+        required: false
+        type: string
+        default: ""
+    secrets:
+      BEDROCK_ROLE_ARN:
+        description: IAM role used to invoke Codex on Amazon Bedrock
+        required: false
+
+permissions: {}
+
+jobs:
+  generate:
+    name: Generate Codex review
+    runs-on: ubuntu-latest
+    environment: ai-pr-review-runtime
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: read
+
+    steps:
+      # pull_request_target exposes repository secrets, so only check out the
+      # exact trusted base revision. The PR's code is never checked out.
+      - name: Check out base branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.base.sha }}
+
+      - name: Reserve AI review toolkit path
+        run: |
+          if [[ -e .ai-review-toolkit ]]; then
+            echo "::error::The trusted base contains the reserved AI review toolkit path."
+            exit 1
+          fi
+
+      # Load support files from the same immutable revision as this workflow.
+      - name: Check out AI review toolkit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .ai-review-toolkit
+          sparse-checkout: |
+            .github/prompts
+            scripts
+          persist-credentials: false
+
+      - name: Resolve AI review prompt
+        id: review-prompt
+        env:
+          CUSTOM_PROMPT_PATH: ${{ inputs['prompt-path'] }}
+        run: |
+          prompt_path="$(
+            bash .ai-review-toolkit/scripts/resolve_ai_review_prompt.sh \
+              "$CUSTOM_PROMPT_PATH"
+          )"
+          echo "path=$prompt_path" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare pull request review context
+        env:
+          EXPECTED_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: bash .ai-review-toolkit/scripts/prepare_ai_review_context.sh
+
+      - name: Prepare unprivileged Codex user
+        run: |
+          bash .ai-review-toolkit/scripts/prepare_ai_review_user.sh codex-review
+
+          # Codex runs through sudo, so preserve its AWS SDK credential chain.
+          sudo sh -c \
+            'printf "%s\n" \
+              "Defaults:runner env_keep += \"AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_REGION AWS_DEFAULT_REGION\"" \
+              > /etc/sudoers.d/codex-review-env'
+          sudo chmod 440 /etc/sudoers.d/codex-review-env
+          sudo visudo -cf /etc/sudoers.d/codex-review-env
+
+          current_userns="$(
+            sysctl -n kernel.unprivileged_userns_clone 2>/dev/null || true
+          )"
+          if [[ -n "$current_userns" && "$current_userns" != "1" ]]; then
+            sudo sysctl -w kernel.unprivileged_userns_clone=1
+          fi
+
+          current_apparmor="$(
+            sysctl -n kernel.apparmor_restrict_unprivileged_userns \
+              2>/dev/null || true
+          )"
+          if [[ -n "$current_apparmor" && "$current_apparmor" != "0" ]]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+
+      - name: Set up Node.js
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: "24"
+
+      - name: Install Codex CLI
+        run: npm install -g "@openai/codex@0.145.0"
+
+      - name: Configure AWS credentials for Codex
+        id: aws-credentials
+        uses: aws-actions/configure-aws-credentials@517a711dbcd0e402f90c77e7e2f81e849156e31d # v6.2.2
+        with:
+          role-to-assume: ${{ secrets.BEDROCK_ROLE_ARN }}
+          role-session-name: codex-pr-review-${{ github.run_id }}
+          aws-region: us-east-1
+          inline-session-policy: |
+            {
+              "Version": "2012-10-17",
+              "Statement": [{
+                "Effect": "Allow",
+                "Action": [
+                  "bedrock-mantle:CreateInference",
+                  "bedrock-mantle:GetProject",
+                  "bedrock-mantle:ListProjects",
+                  "bedrock-mantle:ListTagsForResources"
+                ],
+                "Resource": "*"
+              }]
+            }
+          mask-aws-account-id: true
+          output-credentials: true
+          output-env-credentials: false
+
+      - name: Review pull request with Codex on Amazon Bedrock
+        env:
+          AWS_ACCESS_KEY_ID: ${{ steps.aws-credentials.outputs.aws-access-key-id }}
+          AWS_SECRET_ACCESS_KEY: ${{ steps.aws-credentials.outputs.aws-secret-access-key }}
+          AWS_SESSION_TOKEN: ${{ steps.aws-credentials.outputs.aws-session-token }}
+          AWS_REGION: us-east-1
+          AWS_DEFAULT_REGION: us-east-1
+          REVIEW_PROMPT_PATH: ${{ steps.review-prompt.outputs.path }}
+        run: |
+          set -euo pipefail
+
+          codex_bin="$(command -v codex)"
+          output_dir="$(
+            sudo -u codex-review mktemp -d -t codex-review.XXXXXX
+          )"
+          output_file="${output_dir}/review.json"
+          output_schema="${GITHUB_WORKSPACE}/.ai-review-toolkit/.github/prompts/ai-pr-review-schema.json"
+          trap 'sudo rm -rf "$output_dir"' EXIT
+
+          sudo -u codex-review -- sh -c '
+            : "${AWS_ACCESS_KEY_ID:?AWS_ACCESS_KEY_ID was not preserved by sudo}"
+            : "${AWS_SECRET_ACCESS_KEY:?AWS_SECRET_ACCESS_KEY was not preserved by sudo}"
+            : "${AWS_SESSION_TOKEN:?AWS_SESSION_TOKEN was not preserved by sudo}"
+            : "${AWS_REGION:?AWS_REGION was not preserved by sudo}"
+          '
+
+          review_ready=false
+          for attempt in 1 2; do
+            sudo -u codex-review -- rm -f "$output_file"
+
+            # Keep enough of the job budget for a complete second attempt.
+            if sudo -u codex-review -- timeout \
+              --signal=TERM \
+              --kill-after=30s \
+              20m \
+              env \
+              CODEX_HOME=/home/codex-review/.codex \
+              "$codex_bin" exec \
+              --skip-git-repo-check \
+              --cd "$GITHUB_WORKSPACE" \
+              --output-last-message "$output_file" \
+              --output-schema "$output_schema" \
+              --color never \
+              --model openai.gpt-5.6-sol \
+              --config 'model_reasoning_effort="xhigh"' \
+              --config 'model_provider="amazon-bedrock"' \
+              --config 'default_permissions=":read-only"' \
+              --ephemeral < "$REVIEW_PROMPT_PATH"
+            then
+              if sudo -u codex-review -- jq -se '
+                length == 1 and
+                (
+                  .[0] |
+                  type == "object" and
+                  keys == ["summary"] and
+                  (
+                    .summary |
+                    type == "string" and
+                    length <= 4000 and
+                    test("[^[:space:]]")
+                  )
+                )
+              ' "$output_file" > /dev/null
+              then
+                review_ready=true
+                break
+              fi
+
+              echo "::warning::Codex attempt ${attempt} returned invalid review output."
+            else
+              echo "::warning::Codex attempt ${attempt} failed."
+            fi
+          done
+
+          if [[ "$review_ready" != "true" ]]; then
+            echo "::error::Codex did not return a valid review after two attempts."
+            exit 1
+          fi
+
+          sudo install \
+            -m 600 \
+            -o runner \
+            -g runner \
+            "$output_file" \
+            "${RUNNER_TEMP}/codex-review.json"
+
+      - name: Upload Codex review
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: codex-review-${{ github.run_id }}
+          path: ${{ runner.temp }}/codex-review.json
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 1
