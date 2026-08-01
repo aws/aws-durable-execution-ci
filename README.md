@@ -11,9 +11,16 @@ both reviewers as unprivileged, read-only users.
 
 Codex generation and comment publication run in separate reusable workflows.
 The generation workflow has read-only GitHub access (plus OIDC access for
-Amazon Bedrock) and passes its validated output through a workflow artifact.
-Only the publication workflow receives `pull-requests: write`; it does not
-receive AWS credentials or run Codex.
+Amazon Bedrock) and passes its output through a short-lived workflow artifact.
+Claude uses the same read-only generation and trusted-publication boundary in
+the parent workflow. Only publication jobs receive `pull-requests: write`; they
+receive no AWS credentials and run neither model.
+
+Both reviewers return structured findings. The publication jobs re-check the
+pull request revision, validate every requested path and right-side line range
+against GitHub's diff, and then publish inline comments. Small, unambiguous
+fixes include GitHub `suggestion` blocks so a maintainer can apply them
+directly; the AI reviewers never edit the branch.
 
 Add this caller as `.github/workflows/ai-pr-review.yml` in a consuming
 repository:
@@ -54,7 +61,9 @@ consuming repository and pass its repository-relative path:
 ```
 
 The prompt is loaded from the trusted base revision. It must be a readable,
-non-empty file inside the consuming repository.
+non-empty file inside the consuming repository. The shared workflow appends its
+trusted structured-output contract to custom prompts. Inline comments are
+limited to changed diff hunks and must include at least one added line.
 
 ### Repository setup
 

@@ -188,7 +188,7 @@ jobs:
                 (
                   .[0] |
                   type == "object" and
-                  keys == ["summary"] and
+                  keys == ["comments", "summary"] and
                   (
                     .summary |
                     type == "string" and

@@ -110,7 +110,7 @@ gh() {
                   "comments": {
                     "nodes": [{
                       "id": "PRRC_safe_marker",
-                      "body": "[ai-pr-review-inline-claude-123-1-primary]: #\\nsafe",
+                      "body": "[ai-pr-review-inline-claude-123-1-published]: #\\nsafe",
                       "isMinimized": false,
                       "replyTo": null,
                       "author": {"login": "github-actions"}
@@ -170,7 +170,7 @@ gh() {
   fi
 
   if [[ "$joined" == *"repos/example/repository/pulls/42"* ]]; then
-    printf '%s\n' "head-sha"
+    printf '%s\t%s\n' "base-sha" "head-sha"
     return
   fi
 
@@ -217,6 +217,14 @@ actual_snapshot="$(tr '\n' ' ' < "$snapshot_file")"
 [[ "$actual_snapshot" == "PRRC_old_a PRRC_old_b PRRC_safe_marker " ]] ||
   fail "unexpected primary snapshot: $actual_snapshot"
 
+codex_snapshot_file="$test_dir/codex-inline-comments"
+bash "$repo_root/scripts/snapshot_ai_review_inline_comments.sh" \
+  codex \
+  "$codex_snapshot_file"
+
+[[ ! -s "$codex_snapshot_file" ]] ||
+  fail "Codex claimed legacy Claude inline comments"
+
 SNAPSHOT_INCLUDE_FAILED_ATTEMPT=true \
   bash "$repo_root/scripts/snapshot_ai_review_inline_comments.sh" \
     claude \
@@ -231,24 +239,14 @@ actual_retry_snapshot="$(tr '\n' ' ' < "$snapshot_file")"
 summary_file="$test_dir/summary.md"
 printf '%s\n' "No actionable findings." > "$summary_file"
 current_snapshot_file="$test_dir/current-inline-comments"
-before_snapshot_file="$test_dir/before-inline-comments"
 printf '%s\n' \
-  PRRC_old_a \
-  PRRC_old_b \
-  PRRC_failed_primary \
-  PRRC_unrelated > "$before_snapshot_file"
-printf '%s\n' \
-  PRRC_old_a \
-  PRRC_old_b \
-  PRRC_failed_primary \
-  PRRC_unrelated \
   PRRC_current_retry > "$current_snapshot_file"
-export BEFORE_INLINE_COMMENTS_FILE="$before_snapshot_file"
-export CURRENT_INLINE_COMMENTS_FILE="$current_snapshot_file"
+export NEW_INLINE_COMMENTS_FILE="$current_snapshot_file"
 export PREVIOUS_INLINE_COMMENTS_FILE="$snapshot_file"
 
 bash "$repo_root/scripts/post_ai_review_summary.sh" \
   claude \
+  base-sha \
   head-sha \
   "$summary_file"
 

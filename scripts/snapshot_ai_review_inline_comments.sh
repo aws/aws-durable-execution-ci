@@ -39,7 +39,7 @@ esac
 
 owner="${GITHUB_REPOSITORY%%/*}"
 repository="${GITHUB_REPOSITORY#*/}"
-inline_marker_pattern="^\\[ai-pr-review-inline-${reviewer}-[0-9]+-[0-9]+-(primary|retry)\\]: #$"
+inline_marker_pattern="^\\[ai-pr-review-inline-${reviewer}-[0-9]+-[0-9]+-(primary|retry|published)\\]: #$"
 comments_file="$(mktemp "${RUNNER_TEMP:-/tmp}/ai-review-inline-comments.XXXXXX")"
 legacy_ids_file="$(mktemp "${RUNNER_TEMP:-/tmp}/ai-review-legacy-inline-ids.XXXXXX")"
 marked_ids_file="$(mktemp "${RUNNER_TEMP:-/tmp}/ai-review-marked-inline-ids.XXXXXX")"
@@ -209,21 +209,25 @@ if ! jq -rs \
   exit 0
 fi
 
-if ! jq -rs \
-  '
-    .[]
-    | .data.repository.pullRequest.reviewThreads.nodes[]
-    | .comments.nodes[]
-    | select(.replyTo == null)
-    | select(.isMinimized == false)
-    | select(.author.login == "github-actions")
-    | ((.body // "") | split("\n")[0]) as $first_line
-    | select($first_line == "")
-    | .id
-  ' \
-  "$comments_file" > "$legacy_ids_file"; then
-  echo "::warning::Failed to parse legacy $title inline comments."
-  exit 0
+if [[ "$reviewer" == "claude" ]]; then
+  if ! jq -rs \
+    '
+      .[]
+      | .data.repository.pullRequest.reviewThreads.nodes[]
+      | .comments.nodes[]
+      | select(.replyTo == null)
+      | select(.isMinimized == false)
+      | select(.author.login == "github-actions")
+      | ((.body // "") | split("\n")[0]) as $first_line
+      | select($first_line == "")
+      | .id
+    ' \
+    "$comments_file" > "$legacy_ids_file"; then
+    echo "::warning::Failed to parse legacy $title inline comments."
+    exit 0
+  fi
+else
+  : > "$legacy_ids_file"
 fi
 
 if ! jq -rs \

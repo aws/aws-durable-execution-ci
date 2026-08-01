@@ -9,6 +9,8 @@ fi
 
 custom_prompt_path="$1"
 default_prompt_path="${GITHUB_WORKSPACE}/.ai-review-toolkit/.github/prompts/ai-pr-review.md"
+output_prompt_path="${GITHUB_WORKSPACE}/.ai-review-toolkit/.github/prompts/ai-pr-review-output.md"
+combined_prompt_path="${GITHUB_WORKSPACE}/.ai-review-toolkit/.generated-ai-review-prompt.md"
 
 if [[ -z "$custom_prompt_path" ]]; then
   prompt_path="$default_prompt_path"
@@ -45,4 +47,15 @@ if [[ ! -f "$prompt_path" || ! -r "$prompt_path" || ! -s "$prompt_path" ]]; then
   exit 1
 fi
 
-printf '%s\n' "$prompt_path"
+if [[ ! -f "$output_prompt_path" || ! -r "$output_prompt_path" || ! -s "$output_prompt_path" ]]; then
+  echo "::error::The trusted AI review output instructions are unavailable." >&2
+  exit 1
+fi
+
+{
+  cat "$prompt_path"
+  printf '\n'
+  cat "$output_prompt_path"
+} > "$combined_prompt_path"
+
+printf '%s\n' "$combined_prompt_path"

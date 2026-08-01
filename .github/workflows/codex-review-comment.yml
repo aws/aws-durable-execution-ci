@@ -34,40 +34,14 @@ jobs:
 
       - name: Post Codex review
         env:
-          CODEX_REVIEW_FILE: ${{ runner.temp }}/codex-review/codex-review.json
+          EXPECTED_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          REVIEW_FILE: ${{ runner.temp }}/codex-review/codex-review.json
         run: |
-          set -euo pipefail
-
-          CODEX_REVIEW="$(
-            jq -ser '
-              select(length == 1) |
-              .[0] |
-              select(type == "object" and keys == ["summary"]) |
-              .summary |
-              select(
-                type == "string" and
-                length <= 4000 and
-                test("[^[:space:]]")
-              )
-            ' "$CODEX_REVIEW_FILE"
-          )"
-          CODEX_REVIEW="$(
-            sed -E \
-              -e '1{/^## (Claude|Codex) AI review$/d;}' \
-              -e '/[^[:space:]]/,$!d' \
-              <<< "$CODEX_REVIEW"
-          )"
-          if [[ -z "${CODEX_REVIEW//[[:space:]]/}" ]]; then
-            echo "::error::Codex returned an empty review."
-            exit 1
-          fi
-
-          summary_file="${RUNNER_TEMP}/codex-review-summary.md"
-          printf '%s' "$CODEX_REVIEW" > "$summary_file"
-          bash .ai-review-toolkit/scripts/post_ai_review_summary.sh \
+          bash .ai-review-toolkit/scripts/post_ai_review.sh \
             codex \
+            "$EXPECTED_BASE_SHA" \
             "$EXPECTED_HEAD_SHA" \
-            "$summary_file"
+            "$REVIEW_FILE"

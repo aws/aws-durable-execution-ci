@@ -2,14 +2,15 @@
 
 set -euo pipefail
 
-if [[ "$#" -ne 3 ]]; then
-  echo "usage: $0 <claude|codex> <expected-head-sha> <summary-file>" >&2
+if [[ "$#" -ne 4 ]]; then
+  echo "usage: $0 <claude|codex> <expected-base-sha> <expected-head-sha> <summary-file>" >&2
   exit 2
 fi
 
 reviewer="$1"
-expected_head_sha="$2"
-summary_file="$3"
+expected_base_sha="$2"
+expected_head_sha="$3"
+summary_file="$4"
 
 case "$reviewer" in
   claude)
@@ -33,8 +34,7 @@ esac
 : "${PR_NUMBER:?PR_NUMBER must be set}"
 
 previous_inline_comments_file="${PREVIOUS_INLINE_COMMENTS_FILE:-}"
-before_inline_comments_file="${BEFORE_INLINE_COMMENTS_FILE:-}"
-current_inline_comments_file="${CURRENT_INLINE_COMMENTS_FILE:-}"
+new_inline_comments_file="${NEW_INLINE_COMMENTS_FILE:-}"
 
 if [[ ! -r "$summary_file" ]]; then
   echo "AI review summary is not readable: $summary_file" >&2
@@ -47,10 +47,16 @@ if [[ -z "${summary//[[:space:]]/}" ]]; then
   exit 1
 fi
 
-current_head_sha="$(
-  gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq .head.sha
+current_revision="$(
+  gh api \
+    "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" \
+    --jq '.base.sha + "\t" + .head.sha'
 )"
-if [[ "$current_head_sha" != "$expected_head_sha" ]]; then
+IFS=$'\t' read -r current_base_sha current_head_sha <<< "$current_revision"
+if [[
+  "$current_base_sha" != "$expected_base_sha" ||
+  "$current_head_sha" != "$expected_head_sha"
+]]; then
   echo "::error::The PR changed while it was being reviewed."
   exit 1
 fi
@@ -60,10 +66,8 @@ inline_comment_metadata=""
 if [[
   -n "$previous_inline_comments_file" &&
   -r "$previous_inline_comments_file" &&
-  -n "$before_inline_comments_file" &&
-  -r "$before_inline_comments_file" &&
-  -n "$current_inline_comments_file" &&
-  -r "$current_inline_comments_file"
+  -n "$new_inline_comments_file" &&
+  -r "$new_inline_comments_file"
 ]]; then
   inline_comment_metadata="<!-- ai-pr-review:inline-comments:${reviewer} -->"$'\n'
   while IFS= read -r comment_id; do
@@ -77,9 +81,7 @@ if [[
   done < <(
     {
       sort -u "$previous_inline_comments_file"
-      comm -13 \
-        <(sort -u "$before_inline_comments_file") \
-        <(sort -u "$current_inline_comments_file")
+      sort -u "$new_inline_comments_file"
     } | sort -u
   )
 fi
