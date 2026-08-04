@@ -36,7 +36,7 @@ jobs:
         run: echo "Approved review of ${{ github.event.pull_request.head.sha }}"
 
   claude-review:
-    name: Generate Claude review
+    name: Claude review
     needs: approve_review
     if: >-
       always() &&
@@ -51,25 +51,14 @@ jobs:
     permissions:
       contents: read
       id-token: write
-      pull-requests: read
+      pull-requests: write
     uses: ./.github/workflows/claude-review.yml
     with:
       prompt-path: ${{ inputs['prompt-path'] }}
     secrets: inherit
 
-  claude-review-comment:
-    name: Post Claude review
-    needs: claude-review
-    if: >-
-      always() &&
-      needs.claude-review.result == 'success'
-    permissions:
-      contents: read
-      pull-requests: write
-    uses: ./.github/workflows/claude-review-comment.yml
-
   codex-review:
-    name: Generate Codex review
+    name: Codex review
     needs: approve_review
     if: >-
       always() &&
@@ -84,19 +73,8 @@ jobs:
     permissions:
       contents: read
       id-token: write
-      pull-requests: read
+      pull-requests: write
     uses: ./.github/workflows/codex-review.yml
     with:
       prompt-path: ${{ inputs['prompt-path'] }}
     secrets: inherit
-
-  codex-review-comment:
-    name: Post Codex review
-    needs: codex-review
-    if: >-
-      always() &&
-      needs.codex-review.result == 'success'
-    permissions:
-      contents: read
-      pull-requests: write
-    uses: ./.github/workflows/codex-review-comment.yml

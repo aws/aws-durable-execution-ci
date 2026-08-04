@@ -5,11 +5,11 @@ through Amazon Bedrock. It checks out only the pull request's trusted base
 revision, builds a SHA-anchored review context through the GitHub API, and runs
 both reviewers as unprivileged, read-only users.
 
-Claude and Codex generation and comment publication each run in separate
-reusable workflows. The generation workflows have read-only GitHub access
+Claude and Codex each run in one reusable workflow with separate generation and
+comment publication jobs. The generation jobs have read-only GitHub access
 (plus OIDC access for Amazon Bedrock) and pass their output through short-lived
-workflow artifacts. Only publication workflows receive `pull-requests: write`;
-they receive no AWS credentials and run neither model.
+workflow artifacts. Only publication jobs receive `pull-requests: write`; they
+receive no AWS credentials and run neither model.
 
 Both reviewers return structured findings. The publication jobs re-check the
 pull request revision, validate every requested path and right-side line range
