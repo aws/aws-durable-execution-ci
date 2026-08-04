@@ -60,6 +60,9 @@ jobs:
   claude-review-comment:
     name: Post Claude review
     needs: claude-review
+    if: >-
+      always() &&
+      needs.claude-review.result == 'success'
     permissions:
       contents: read
       pull-requests: write
@@ -90,6 +93,9 @@ jobs:
   codex-review-comment:
     name: Post Codex review
     needs: codex-review
+    if: >-
+      always() &&
+      needs.codex-review.result == 'success'
     permissions:
       contents: read
       pull-requests: write
