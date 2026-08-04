@@ -20,6 +20,26 @@ on:
         required: false
         type: boolean
         default: true
+      claude-model:
+        description: Claude model ID to use through Amazon Bedrock
+        required: false
+        type: string
+        default: us.anthropic.claude-opus-4-8
+      claude-reasoning-effort:
+        description: Optional Claude reasoning effort
+        required: false
+        type: string
+        default: ""
+      codex-model:
+        description: Codex model ID to use through Amazon Bedrock
+        required: false
+        type: string
+        default: openai.gpt-5.6-sol
+      codex-reasoning-effort:
+        description: Codex reasoning effort
+        required: false
+        type: string
+        default: xhigh
     secrets:
       BEDROCK_ROLE_ARN:
         description: IAM role used to invoke the AI review models
@@ -74,6 +94,8 @@ jobs:
     uses: ./.github/workflows/claude-review.yml
     with:
       prompt-path: ${{ inputs['prompt-path'] }}
+      model: ${{ inputs['claude-model'] || 'us.anthropic.claude-opus-4-8' }}
+      reasoning-effort: ${{ inputs['claude-reasoning-effort'] }}
     secrets: inherit
 
   codex-review:
@@ -97,4 +119,6 @@ jobs:
     uses: ./.github/workflows/codex-review.yml
     with:
       prompt-path: ${{ inputs['prompt-path'] }}
+      model: ${{ inputs['codex-model'] || 'openai.gpt-5.6-sol' }}
+      reasoning-effort: ${{ inputs['codex-reasoning-effort'] || 'xhigh' }}
     secrets: inherit

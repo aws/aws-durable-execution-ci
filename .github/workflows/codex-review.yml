@@ -8,6 +8,16 @@ on:
         required: false
         type: string
         default: ""
+      model:
+        description: Codex model ID to use through Amazon Bedrock
+        required: false
+        type: string
+        default: openai.gpt-5.6-sol
+      reasoning-effort:
+        description: Codex reasoning effort
+        required: false
+        type: string
+        default: xhigh
     secrets:
       BEDROCK_ROLE_ARN:
         description: IAM role used to invoke Codex on Amazon Bedrock
@@ -27,6 +37,31 @@ jobs:
       pull-requests: read
 
     steps:
+      - name: Validate Codex review configuration
+        id: review-config
+        env:
+          CODEX_MODEL: ${{ inputs['model'] }}
+          CODEX_REASONING_EFFORT: ${{ inputs['reasoning-effort'] }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$CODEX_MODEL" =~ ^[A-Za-z0-9][A-Za-z0-9._:/-]*$ ]]; then
+            echo "::error::Codex model must be a non-empty model ID."
+            exit 1
+          fi
+
+          case "$CODEX_REASONING_EFFORT" in
+            none|minimal|low|medium|high|xhigh|max)
+              ;;
+            *)
+              echo "::error::Codex reasoning effort must be none, minimal, low, medium, high, xhigh, or max."
+              exit 1
+              ;;
+          esac
+
+          echo "model=$CODEX_MODEL" >> "$GITHUB_OUTPUT"
+          echo "reasoning_effort=$CODEX_REASONING_EFFORT" >> "$GITHUB_OUTPUT"
+
       # pull_request_target exposes repository secrets, so only check out the
       # exact trusted base revision. The PR's code is never checked out.
       - name: Check out base branch
@@ -141,6 +176,9 @@ jobs:
           AWS_SESSION_TOKEN: ${{ steps.aws-credentials.outputs.aws-session-token }}
           AWS_REGION: us-east-1
           AWS_DEFAULT_REGION: us-east-1
+          CODEX_MODEL: ${{ steps.review-config.outputs.model }}
+          CODEX_REASONING_EFFORT: >-
+            ${{ steps.review-config.outputs.reasoning_effort }}
           REVIEW_PROMPT_PATH: ${{ steps.review-prompt.outputs.path }}
         run: |
           set -euo pipefail
@@ -177,8 +215,8 @@ jobs:
               --output-last-message "$output_file" \
               --output-schema "$output_schema" \
               --color never \
-              --model openai.gpt-5.6-sol \
-              --config 'model_reasoning_effort="xhigh"' \
+              --model "$CODEX_MODEL" \
+              --config "model_reasoning_effort=\"${CODEX_REASONING_EFFORT}\"" \
               --config 'model_provider="amazon-bedrock"' \
               --config 'default_permissions=":read-only"' \
               --ephemeral < "$REVIEW_PROMPT_PATH"

@@ -8,6 +8,16 @@ on:
         required: false
         type: string
         default: ""
+      model:
+        description: Claude model ID to use through Amazon Bedrock
+        required: false
+        type: string
+        default: us.anthropic.claude-opus-4-8
+      reasoning-effort:
+        description: Optional Claude reasoning effort
+        required: false
+        type: string
+        default: ""
     secrets:
       BEDROCK_ROLE_ARN:
         description: IAM role used to invoke Claude on Amazon Bedrock
@@ -27,6 +37,34 @@ jobs:
       pull-requests: read
 
     steps:
+      - name: Validate Claude review configuration
+        id: review-config
+        env:
+          CLAUDE_MODEL: ${{ inputs['model'] }}
+          CLAUDE_REASONING_EFFORT: ${{ inputs['reasoning-effort'] }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$CLAUDE_MODEL" =~ ^[A-Za-z0-9][A-Za-z0-9._:/-]*$ ]]; then
+            echo "::error::Claude model must be a non-empty model ID."
+            exit 1
+          fi
+
+          case "$CLAUDE_REASONING_EFFORT" in
+            "")
+              ;;
+            low|medium|high|xhigh|max)
+              echo "effort_arg=--effort ${CLAUDE_REASONING_EFFORT}" \
+                >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "::error::Claude reasoning effort must be empty, low, medium, high, xhigh, or max."
+              exit 1
+              ;;
+          esac
+
+          echo "model=$CLAUDE_MODEL" >> "$GITHUB_OUTPUT"
+
       # pull_request_target exposes repository secrets, so only check out the
       # exact trusted base revision. The PR's code is never checked out.
       - name: Check out base branch
@@ -139,7 +177,8 @@ jobs:
           classify_inline_comments: "false"
           prompt: ${{ steps.review-inputs.outputs.prompt }}
           claude_args: |
-            --model us.anthropic.claude-opus-4-8
+            --model ${{ steps.review-config.outputs.model }}
+            ${{ steps.review-config.outputs.effort_arg }}
             --max-turns 20
             --allowedTools "Read,Grep,Glob"
             --disallowedTools "Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch"
@@ -162,7 +201,8 @@ jobs:
           classify_inline_comments: "false"
           prompt: ${{ steps.review-inputs.outputs.prompt }}
           claude_args: |
-            --model us.anthropic.claude-opus-4-8
+            --model ${{ steps.review-config.outputs.model }}
+            ${{ steps.review-config.outputs.effort_arg }}
             --max-turns 20
             --allowedTools "Read,Grep,Glob"
             --disallowedTools "Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch"
