@@ -10,6 +10,16 @@ on:
         required: false
         type: string
         default: ""
+      run-claude:
+        description: Run the Claude pull request review
+        required: false
+        type: boolean
+        default: true
+      run-codex:
+        description: Run the Codex pull request review
+        required: false
+        type: boolean
+        default: true
     secrets:
       BEDROCK_ROLE_ARN:
         description: IAM role used to invoke the AI review models
@@ -35,11 +45,14 @@ jobs:
       - name: Record approval
         run: echo "Approved review of ${{ github.event.pull_request.head.sha }}"
 
+  # Direct pull_request_target runs have no workflow_call inputs. Formatting
+  # distinguishes a missing value from an explicit false supplied by a caller.
   claude-review:
     name: Claude review
     needs: approve_review
     if: >-
       always() &&
+      format('{0}', inputs['run-claude']) != 'false' &&
       (
         (
           github.event.pull_request.user.login != 'dependabot[bot]' &&
@@ -62,6 +75,7 @@ jobs:
     needs: approve_review
     if: >-
       always() &&
+      format('{0}', inputs['run-codex']) != 'false' &&
       (
         (
           github.event.pull_request.user.login != 'dependabot[bot]' &&

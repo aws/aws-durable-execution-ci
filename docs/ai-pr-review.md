@@ -45,6 +45,19 @@ Replace `<full-commit-sha>` with the 40-character commit SHA to use. Pinning is
 especially important because `secrets: inherit` grants the reusable workflow
 access to secrets available to the caller.
 
+## Select reviewers
+
+Claude and Codex run by default. To run only one reviewer, disable the other
+one:
+
+```yaml
+    uses: aws/aws-durable-execution-ci/.github/workflows/ai-pr-review.yml@<full-commit-sha>
+    with:
+      run-claude: false
+      run-codex: true
+    secrets: inherit
+```
+
 ## Custom prompt
 
 The shared prompt is used by default. To override it, add a prompt file to the
