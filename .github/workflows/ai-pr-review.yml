@@ -54,7 +54,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
-      pull-requests: write
+      pull-requests: read
 
     steps:
       # pull_request_target exposes repository secrets, so only check out the
@@ -104,27 +104,16 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: bash .ai-review-toolkit/scripts/prepare_ai_review_context.sh
 
-      - name: Prepare shared review inputs
+      - name: Prepare review inputs
         id: review-inputs
         env:
           REVIEW_PROMPT_PATH: ${{ steps.review-prompt.outputs.path }}
         run: |
-          inline_marker="<!-- ai-pr-review:inline:claude:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}:primary -->"
-          retry_inline_marker="<!-- ai-pr-review:inline:claude:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}:retry -->"
           {
             echo 'prompt<<AI_REVIEW_PROMPT'
             cat "$REVIEW_PROMPT_PATH"
-            printf '\nFor every inline comment, the first line of the comment body must be exactly:\n%s\nPut the finding text on the following lines. Do not include this marker in the final response.\n' \
-              "$inline_marker"
             echo 'AI_REVIEW_PROMPT'
-            echo 'retry_prompt<<AI_REVIEW_RETRY_PROMPT'
-            cat "$REVIEW_PROMPT_PATH"
-            printf '\nFor every inline comment, the first line of the comment body must be exactly:\n%s\nPut the finding text on the following lines. Do not include this marker in the final response.\n' \
-              "$retry_inline_marker"
-            echo 'AI_REVIEW_RETRY_PROMPT'
             echo "schema=$(jq -c . .ai-review-toolkit/.github/prompts/ai-pr-review-schema.json)"
-            echo "inline_marker=$inline_marker"
-            echo "retry_inline_marker=$retry_inline_marker"
           } >> "$GITHUB_OUTPUT"
 
       - name: Prepare unprivileged Claude user
@@ -137,7 +126,7 @@ jobs:
             'printf "%s\n" \
               "Defaults:runner env_keep += \"AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_REGION AWS_DEFAULT_REGION AWS_BEARER_TOKEN_BEDROCK\"" \
               "Defaults:runner env_keep += \"ANTHROPIC_BEDROCK_BASE_URL CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_ACTION CLAUDE_CODE_ATTRIBUTION_HEADER\"" \
-              "Defaults:runner env_keep += \"CLAUDE_CODE_SUBPROCESS_ENV_SCRUB CLAUDE_CODE_SCRIPT_CAPS DETAILED_PERMISSION_MESSAGES MCP_TIMEOUT MCP_TOOL_TIMEOUT MAX_MCP_OUTPUT_TOKENS\"" \
+              "Defaults:runner env_keep += \"CLAUDE_CODE_SUBPROCESS_ENV_SCRUB CLAUDE_CODE_SCRIPT_CAPS DETAILED_PERMISSION_MESSAGES\"" \
               > /etc/sudoers.d/claude-review-env'
           sudo chmod 440 /etc/sudoers.d/claude-review-env
           sudo visudo -cf /etc/sudoers.d/claude-review-env
@@ -181,7 +170,7 @@ jobs:
           claude_args: |
             --model us.anthropic.claude-opus-4-8
             --max-turns 20
-            --allowedTools "Read,Grep,Glob,mcp__github_inline_comment__create_inline_comment"
+            --allowedTools "Read,Grep,Glob"
             --disallowedTools "Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch"
             --json-schema '${{ steps.review-inputs.outputs.schema }}'
 
@@ -199,67 +188,96 @@ jobs:
           # This also keeps the token out of the git remote configured by the action.
           allowed_non_write_users: ${{ github.actor }}
           classify_inline_comments: "false"
-          prompt: ${{ steps.review-inputs.outputs.retry_prompt }}
+          prompt: ${{ steps.review-inputs.outputs.prompt }}
           claude_args: |
             --model us.anthropic.claude-opus-4-8
             --max-turns 20
-            --allowedTools "Read,Grep,Glob,mcp__github_inline_comment__create_inline_comment"
+            --allowedTools "Read,Grep,Glob"
             --disallowedTools "Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch"
             --json-schema '${{ steps.review-inputs.outputs.schema }}'
 
-      - name: Post review summary
+      - name: Save Claude review
         env:
-          EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          CURRENT_INLINE_COMMENT_MARKER: >-
+          CLAUDE_EXECUTION_FILE: >-
             ${{
               steps.review.outcome == 'success' &&
-              steps.review-inputs.outputs.inline_marker ||
-              steps.review-inputs.outputs.retry_inline_marker
-            }}
-          REVIEW_OUTPUT: >-
-            ${{
-              steps.review.outcome == 'success' &&
-              steps.review.outputs.structured_output ||
-              steps.review-retry.outputs.structured_output
+              steps.review.outputs.execution_file ||
+              steps.review-retry.outputs.execution_file
             }}
         run: |
           set -euo pipefail
 
-          summary="$(
-            jq -ser '
-              select(length == 1) |
-              .[0] |
-              select(type == "object" and keys == ["summary"]) |
-              .summary |
-              select(
-                type == "string" and
-                length <= 4000 and
-                test("[^[:space:]]")
-              )
-            ' <<< "$REVIEW_OUTPUT"
-          )"
-          summary="$(
-            sed -E \
-              -e '1{/^## (Claude|Codex) AI review$/d;}' \
-              -e '/[^[:space:]]/,$!d' \
-              <<< "$summary"
-          )"
-          if [[ -z "${summary//[[:space:]]/}" ]]; then
-            echo "::error::Claude returned an empty review body."
+          if [[ ! -r "$CLAUDE_EXECUTION_FILE" ]]; then
+            echo "::error::Claude execution output is not readable."
             exit 1
           fi
 
-          summary_file="${RUNNER_TEMP}/claude-review-summary.md"
-          printf '%s' "$summary" > "$summary_file"
-          bash .ai-review-toolkit/scripts/post_ai_review_summary.sh \
+          jq -e '
+            [
+              .[]
+              | select(.type == "result" and has("structured_output"))
+              | .structured_output
+            ] as $reviews
+            | if (
+                ($reviews | length) == 1 and
+                ($reviews[0] | type == "object" and keys == ["comments", "summary"])
+              ) then
+                $reviews[0]
+            else
+              error("Claude returned invalid structured review output")
+            end
+          ' "$CLAUDE_EXECUTION_FILE" > "${RUNNER_TEMP}/claude-review.json"
+
+      - name: Upload Claude review
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: claude-review-${{ github.run_id }}
+          path: ${{ runner.temp }}/claude-review.json
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 1
+
+  claude-review-comment:
+    name: Post Claude review
+    needs: claude-review
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: Download Claude review
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: claude-review-${{ github.run_id }}
+          path: ${{ runner.temp }}/claude-review
+
+      - name: Check out AI review toolkit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .ai-review-toolkit
+          sparse-checkout: scripts
+          persist-credentials: false
+
+      - name: Post Claude review
+        env:
+          EXPECTED_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REVIEW_FILE: ${{ runner.temp }}/claude-review/claude-review.json
+        run: |
+          bash .ai-review-toolkit/scripts/post_ai_review.sh \
             claude \
+            "$EXPECTED_BASE_SHA" \
             "$EXPECTED_HEAD_SHA" \
-            "$summary_file"
+            "$REVIEW_FILE"
 
   codex-review:
-    name: Codex review
+    name: Generate Codex review
     needs: approve_review
     if: >-
       always() &&
@@ -271,244 +289,19 @@ jobs:
         ) ||
         needs.approve_review.result == 'success'
       )
-    runs-on: ubuntu-latest
-    environment: ai-pr-review-runtime
-    timeout-minutes: 45
     permissions:
       contents: read
       id-token: write
+      pull-requests: read
+    uses: ./.github/workflows/codex-review.yml
+    with:
+      prompt-path: ${{ inputs['prompt-path'] }}
+    secrets: inherit
+
+  codex-review-comment:
+    name: Post Codex review
+    needs: codex-review
+    permissions:
+      contents: read
       pull-requests: write
-
-    steps:
-      # pull_request_target exposes repository secrets, so only check out the
-      # exact trusted base revision. The PR's code is never checked out.
-      - name: Check out base branch
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 1
-          persist-credentials: false
-          ref: ${{ github.event.pull_request.base.sha }}
-
-      - name: Reserve AI review toolkit path
-        run: |
-          if [[ -e .ai-review-toolkit ]]; then
-            echo "::error::The trusted base contains the reserved AI review toolkit path."
-            exit 1
-          fi
-
-      # Load support files from the same immutable revision as this workflow.
-      - name: Check out AI review toolkit
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: ${{ job.workflow_repository }}
-          ref: ${{ job.workflow_sha }}
-          path: .ai-review-toolkit
-          sparse-checkout: |
-            .github/prompts
-            scripts
-          persist-credentials: false
-
-      - name: Resolve AI review prompt
-        id: review-prompt
-        env:
-          CUSTOM_PROMPT_PATH: ${{ inputs['prompt-path'] }}
-        run: |
-          prompt_path="$(
-            bash .ai-review-toolkit/scripts/resolve_ai_review_prompt.sh \
-              "$CUSTOM_PROMPT_PATH"
-          )"
-          echo "path=$prompt_path" >> "$GITHUB_OUTPUT"
-
-      - name: Prepare pull request review context
-        env:
-          EXPECTED_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: bash .ai-review-toolkit/scripts/prepare_ai_review_context.sh
-
-      - name: Prepare unprivileged Codex user
-        run: |
-          bash .ai-review-toolkit/scripts/prepare_ai_review_user.sh codex-review
-
-          # Codex runs through sudo, so preserve its AWS SDK credential chain.
-          sudo sh -c \
-            'printf "%s\n" \
-              "Defaults:runner env_keep += \"AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_REGION AWS_DEFAULT_REGION\"" \
-              > /etc/sudoers.d/codex-review-env'
-          sudo chmod 440 /etc/sudoers.d/codex-review-env
-          sudo visudo -cf /etc/sudoers.d/codex-review-env
-
-          current_userns="$(
-            sysctl -n kernel.unprivileged_userns_clone 2>/dev/null || true
-          )"
-          if [[ -n "$current_userns" && "$current_userns" != "1" ]]; then
-            sudo sysctl -w kernel.unprivileged_userns_clone=1
-          fi
-
-          current_apparmor="$(
-            sysctl -n kernel.apparmor_restrict_unprivileged_userns \
-              2>/dev/null || true
-          )"
-          if [[ -n "$current_apparmor" && "$current_apparmor" != "0" ]]; then
-            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          fi
-
-      - name: Set up Node.js
-        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
-        with:
-          node-version: "24"
-
-      - name: Install Codex CLI
-        run: npm install -g "@openai/codex@0.145.0"
-
-      - name: Configure AWS credentials for Codex
-        id: aws-credentials
-        uses: aws-actions/configure-aws-credentials@517a711dbcd0e402f90c77e7e2f81e849156e31d # v6.2.2
-        with:
-          role-to-assume: ${{ secrets.BEDROCK_ROLE_ARN }}
-          role-session-name: codex-pr-review-${{ github.run_id }}
-          aws-region: us-east-1
-          inline-session-policy: |
-            {
-              "Version": "2012-10-17",
-              "Statement": [{
-                "Effect": "Allow",
-                "Action": [
-                  "bedrock-mantle:CreateInference",
-                  "bedrock-mantle:GetProject",
-                  "bedrock-mantle:ListProjects",
-                  "bedrock-mantle:ListTagsForResources"
-                ],
-                "Resource": "*"
-              }]
-            }
-          mask-aws-account-id: true
-          output-credentials: true
-          output-env-credentials: false
-
-      - name: Review pull request with Codex on Amazon Bedrock
-        env:
-          AWS_ACCESS_KEY_ID: ${{ steps.aws-credentials.outputs.aws-access-key-id }}
-          AWS_SECRET_ACCESS_KEY: ${{ steps.aws-credentials.outputs.aws-secret-access-key }}
-          AWS_SESSION_TOKEN: ${{ steps.aws-credentials.outputs.aws-session-token }}
-          AWS_REGION: us-east-1
-          AWS_DEFAULT_REGION: us-east-1
-          REVIEW_PROMPT_PATH: ${{ steps.review-prompt.outputs.path }}
-        run: |
-          set -euo pipefail
-
-          codex_bin="$(command -v codex)"
-          output_dir="$(
-            sudo -u codex-review mktemp -d -t codex-review.XXXXXX
-          )"
-          output_file="${output_dir}/review.json"
-          output_schema="${GITHUB_WORKSPACE}/.ai-review-toolkit/.github/prompts/ai-pr-review-schema.json"
-          trap 'sudo rm -rf "$output_dir"' EXIT
-
-          sudo -u codex-review -- sh -c '
-            : "${AWS_ACCESS_KEY_ID:?AWS_ACCESS_KEY_ID was not preserved by sudo}"
-            : "${AWS_SECRET_ACCESS_KEY:?AWS_SECRET_ACCESS_KEY was not preserved by sudo}"
-            : "${AWS_SESSION_TOKEN:?AWS_SESSION_TOKEN was not preserved by sudo}"
-            : "${AWS_REGION:?AWS_REGION was not preserved by sudo}"
-          '
-
-          review_ready=false
-          for attempt in 1 2; do
-            sudo -u codex-review -- rm -f "$output_file"
-
-            # Keep enough of the job budget for a complete second attempt.
-            if sudo -u codex-review -- timeout \
-              --signal=TERM \
-              --kill-after=30s \
-              20m \
-              env \
-              CODEX_HOME=/home/codex-review/.codex \
-              "$codex_bin" exec \
-              --skip-git-repo-check \
-              --cd "$GITHUB_WORKSPACE" \
-              --output-last-message "$output_file" \
-              --output-schema "$output_schema" \
-              --color never \
-              --model openai.gpt-5.6-sol \
-              --config 'model_reasoning_effort="xhigh"' \
-              --config 'model_provider="amazon-bedrock"' \
-              --config 'default_permissions=":read-only"' \
-              --ephemeral < "$REVIEW_PROMPT_PATH"
-            then
-              if sudo -u codex-review -- jq -se '
-                length == 1 and
-                (
-                  .[0] |
-                  type == "object" and
-                  keys == ["summary"] and
-                  (
-                    .summary |
-                    type == "string" and
-                    length <= 4000 and
-                    test("[^[:space:]]")
-                  )
-                )
-              ' "$output_file" > /dev/null
-              then
-                review_ready=true
-                break
-              fi
-
-              echo "::warning::Codex attempt ${attempt} returned invalid review output."
-            else
-              echo "::warning::Codex attempt ${attempt} failed."
-            fi
-          done
-
-          if [[ "$review_ready" != "true" ]]; then
-            echo "::error::Codex did not return a valid review after two attempts."
-            exit 1
-          fi
-
-          sudo install \
-            -m 600 \
-            -o runner \
-            -g runner \
-            "$output_file" \
-            "${RUNNER_TEMP}/codex-review.json"
-
-      - name: Post Codex review
-        env:
-          CODEX_REVIEW_FILE: ${{ runner.temp }}/codex-review.json
-          EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: |
-          set -euo pipefail
-
-          CODEX_REVIEW="$(
-            jq -ser '
-              select(length == 1) |
-              .[0] |
-              select(type == "object" and keys == ["summary"]) |
-              .summary |
-              select(
-                type == "string" and
-                length <= 4000 and
-                test("[^[:space:]]")
-              )
-            ' "$CODEX_REVIEW_FILE"
-          )"
-          CODEX_REVIEW="$(
-            sed -E \
-              -e '1{/^## (Claude|Codex) AI review$/d;}' \
-              -e '/[^[:space:]]/,$!d' \
-              <<< "$CODEX_REVIEW"
-          )"
-          if [[ -z "${CODEX_REVIEW//[[:space:]]/}" ]]; then
-            echo "::error::Codex returned an empty review."
-            exit 1
-          fi
-
-          summary_file="${RUNNER_TEMP}/codex-review-summary.md"
-          printf '%s' "$CODEX_REVIEW" > "$summary_file"
-          bash .ai-review-toolkit/scripts/post_ai_review_summary.sh \
-            codex \
-            "$EXPECTED_HEAD_SHA" \
-            "$summary_file"
+    uses: ./.github/workflows/codex-review-comment.yml
