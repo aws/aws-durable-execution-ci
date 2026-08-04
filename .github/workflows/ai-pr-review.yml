@@ -33,7 +33,9 @@ jobs:
     permissions: {}
     steps:
       - name: Record approval
-        run: echo "Approved review of ${{ github.event.pull_request.head.sha }}"
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: echo "Approved review of $HEAD_SHA"
 
   claude-review:
     name: Generate Claude review
