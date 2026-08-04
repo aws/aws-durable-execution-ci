@@ -198,25 +198,35 @@ jobs:
 
       - name: Save Claude review
         env:
-          REVIEW_OUTPUT: >-
+          CLAUDE_EXECUTION_FILE: >-
             ${{
               steps.review.outcome == 'success' &&
-              steps.review.outputs.structured_output ||
-              steps.review-retry.outputs.structured_output
+              steps.review.outputs.execution_file ||
+              steps.review-retry.outputs.execution_file
             }}
         run: |
           set -euo pipefail
 
-          jq -ser '
-            if (
-              length == 1 and
-              (.[0] | type == "object" and keys == ["comments", "summary"])
-            ) then
-              .[0]
+          if [[ ! -r "$CLAUDE_EXECUTION_FILE" ]]; then
+            echo "::error::Claude execution output is not readable."
+            exit 1
+          fi
+
+          jq -e '
+            [
+              .[]
+              | select(.type == "result" and has("structured_output"))
+              | .structured_output
+            ] as $reviews
+            | if (
+                ($reviews | length) == 1 and
+                ($reviews[0] | type == "object" and keys == ["comments", "summary"])
+              ) then
+                $reviews[0]
             else
               error("Claude returned invalid structured review output")
             end
-          ' <<< "$REVIEW_OUTPUT" > "${RUNNER_TEMP}/claude-review.json"
+          ' "$CLAUDE_EXECUTION_FILE" > "${RUNNER_TEMP}/claude-review.json"
 
       - name: Upload Claude review
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

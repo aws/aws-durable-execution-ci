@@ -12,6 +12,7 @@ from typing import Any
 MAX_COMMENTS = 20
 MAX_RANGE_LINES = 100
 HUNK_HEADER = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+RESERVED_METADATA_PREFIX = "<!-- ai-pr-review:"
 
 
 class ReviewValidationError(ValueError):
@@ -122,6 +123,8 @@ def prepare_review(
     ).strip()
     if not summary:
         raise ReviewValidationError("summary must contain non-whitespace text")
+    if RESERVED_METADATA_PREFIX in summary:
+        raise ReviewValidationError("summary must not contain reserved metadata")
 
     comments = review["comments"]
     if not isinstance(comments, list):

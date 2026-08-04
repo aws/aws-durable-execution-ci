@@ -46,6 +46,10 @@ if [[ -z "${summary//[[:space:]]/}" ]]; then
   echo "::error::$title returned an empty review body."
   exit 1
 fi
+if grep -Fq '<!-- ai-pr-review:' "$summary_file"; then
+  echo "::error::$title returned a review body containing reserved metadata."
+  exit 1
+fi
 
 current_revision="$(
   gh api \

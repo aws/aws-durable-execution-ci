@@ -39,9 +39,9 @@ esac
 
 owner="${GITHUB_REPOSITORY%%/*}"
 repository="${GITHUB_REPOSITORY#*/}"
+heading="## $title"
 inline_marker_pattern="^\\[ai-pr-review-inline-${reviewer}-[0-9]+-[0-9]+-(primary|retry|published)\\]: #$"
 comments_file="$(mktemp "${RUNNER_TEMP:-/tmp}/ai-review-inline-comments.XXXXXX")"
-legacy_ids_file="$(mktemp "${RUNNER_TEMP:-/tmp}/ai-review-legacy-inline-ids.XXXXXX")"
 marked_ids_file="$(mktemp "${RUNNER_TEMP:-/tmp}/ai-review-marked-inline-ids.XXXXXX")"
 open_ids_file="$(mktemp "${RUNNER_TEMP:-/tmp}/ai-review-open-inline-ids.XXXXXX")"
 summaries_file="$(mktemp "${RUNNER_TEMP:-/tmp}/ai-review-summaries.XXXXXX")"
@@ -51,7 +51,6 @@ snapshot_file="$(mktemp "${output_file}.XXXXXX")"
 cleanup_temp_files() {
   rm -f \
     "$comments_file" \
-    "$legacy_ids_file" \
     "$marked_ids_file" \
     "$open_ids_file" \
     "$summaries_file" \
@@ -106,6 +105,7 @@ if [[ "$mode" == "tracked" ]]; then
       --arg marker "$summary_marker" \
       --arg manifest "$inline_manifest" \
       --arg id_prefix "$inline_id_prefix" \
+      --arg heading "$heading" \
       '
         [
           .[]
@@ -113,24 +113,29 @@ if [[ "$mode" == "tracked" ]]; then
           | select(.isMinimized == false)
           | select(.author.login == "github-actions")
           | select((.body | split("\n")[0]) == $marker)
-          | select(.body | split("\n") | index($manifest))
+          | (.body | split("\n")) as $lines
+          | ($lines | index($heading)) as $heading_index
+          | select($heading_index != null and $heading_index >= 2)
+          | select($lines[1] == $manifest)
+          | ($lines[2:$heading_index]) as $id_lines
+          | [
+              $id_lines[]
+              | select(startswith($id_prefix))
+              | select(endswith(" -->"))
+              | ltrimstr($id_prefix)
+              | rtrimstr(" -->")
+              | select(test("^[A-Za-z0-9_=/+-]+$"))
+            ] as $ids
+          | select(($ids | length) == ($id_lines | length))
+          | {createdAt, manifestIds: $ids}
         ] as $summaries
         | if ($summaries | length) == 0 then
             {found: false, ids: []}
           else
-            ($summaries | sort_by(.createdAt) | last | .body) as $body
-            | {
-                found: true,
-                ids: [
-                  $body
-                  | split("\n")[]
-                  | select(startswith($id_prefix))
-                  | select(endswith(" -->"))
-                  | ltrimstr($id_prefix)
-                  | rtrimstr(" -->")
-                  | select(test("^[A-Za-z0-9_=/+-]+$"))
-                ]
-              }
+            {
+              found: true,
+              ids: ($summaries | sort_by(.createdAt) | last | .manifestIds)
+            }
           end
       ' \
       "$summaries_file" > "$summary_state_file"; then
@@ -148,8 +153,8 @@ fi
 
 # List open root comments authored by the GITHUB_TOKEN identity. Tracked mode
 # intersects this list with the latest summary manifest and recovery markers.
-# The broken HTML marker was stripped to a leading newline; new Markdown
-# reference markers survive the action's sanitizer but remain hidden by GitHub.
+# Markdown reference markers survive the action's sanitizer but remain hidden
+# by GitHub.
 # shellcheck disable=SC2016 # GraphQL variables are intentionally literal.
 if ! gh api graphql \
   --paginate \
@@ -209,27 +214,6 @@ if ! jq -rs \
   exit 0
 fi
 
-if [[ "$reviewer" == "claude" ]]; then
-  if ! jq -rs \
-    '
-      .[]
-      | .data.repository.pullRequest.reviewThreads.nodes[]
-      | .comments.nodes[]
-      | select(.replyTo == null)
-      | select(.isMinimized == false)
-      | select(.author.login == "github-actions")
-      | ((.body // "") | split("\n")[0]) as $first_line
-      | select($first_line == "")
-      | .id
-    ' \
-    "$comments_file" > "$legacy_ids_file"; then
-    echo "::warning::Failed to parse legacy $title inline comments."
-    exit 0
-  fi
-else
-  : > "$legacy_ids_file"
-fi
-
 if ! jq -rs \
   --arg marker_pattern "$inline_marker_pattern" \
   '
@@ -258,10 +242,7 @@ if [[ "$mode" == "tracked" && "$has_manifest" == "true" ]]; then
   } | sort -u > "$snapshot_file"
   snapshot_kind="tracked"
 elif [[ "$mode" == "tracked" ]]; then
-  {
-    sort -u "$legacy_ids_file"
-    sort -u "$marked_ids_file"
-  } | sort -u > "$snapshot_file"
+  sort -u "$marked_ids_file" > "$snapshot_file"
   snapshot_kind="recoverable"
 else
   sort -u "$open_ids_file" > "$snapshot_file"

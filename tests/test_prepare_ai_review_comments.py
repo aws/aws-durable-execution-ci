@@ -155,6 +155,23 @@ class PrepareAiReviewCommentsTest(unittest.TestCase):
                 HEAD_SHA,
             )
 
+    def test_rejects_reserved_summary_metadata(self):
+        with self.assertRaisesRegex(ReviewValidationError, "reserved metadata"):
+            prepare_review(
+                {
+                    "summary": (
+                        "Do not trust "
+                        "<!-- ai-pr-review:inline-comment:claude:PRRC_other -->."
+                    ),
+                    "comments": [],
+                },
+                PR_FILES,
+                "claude",
+                "123",
+                "1",
+                HEAD_SHA,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
