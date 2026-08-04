@@ -62,7 +62,7 @@ one:
 ## Models and reasoning
 
 Each reviewer has independent model and reasoning settings. For example, this
-keeps the default model IDs while lowering the Codex reasoning effort:
+keeps the default model IDs while lowering their reasoning efforts:
 
 ```yaml
     uses: aws/aws-durable-execution-ci/.github/workflows/ai-pr-review.yml@<full-commit-sha>
@@ -74,10 +74,9 @@ keeps the default model IDs while lowering the Codex reasoning effort:
     secrets: inherit
 ```
 
-Claude reasoning can be `low`, `medium`, `high`, `xhigh`, or `max`. Omit
-`claude-reasoning-effort` to use the selected model's native default. Codex
-reasoning can be `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`;
-it defaults to `xhigh`.
+Claude reasoning can be `low`, `medium`, `high`, `xhigh`, or `max`. Codex
+reasoning can be `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`.
+Both reviewers default to `xhigh`.
 
 Model IDs must be available through the configured Amazon Bedrock provider.
 Not every model supports every reasoning level, so the selected model still

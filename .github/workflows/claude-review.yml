@@ -14,10 +14,10 @@ on:
         type: string
         default: us.anthropic.claude-opus-4-8
       reasoning-effort:
-        description: Optional Claude reasoning effort
+        description: Claude reasoning effort
         required: false
         type: string
-        default: ""
+        default: xhigh
     secrets:
       BEDROCK_ROLE_ARN:
         description: IAM role used to invoke Claude on Amazon Bedrock
@@ -51,19 +51,16 @@ jobs:
           fi
 
           case "$CLAUDE_REASONING_EFFORT" in
-            "")
-              ;;
             low|medium|high|xhigh|max)
-              echo "effort_arg=--effort ${CLAUDE_REASONING_EFFORT}" \
-                >> "$GITHUB_OUTPUT"
               ;;
             *)
-              echo "::error::Claude reasoning effort must be empty, low, medium, high, xhigh, or max."
+              echo "::error::Claude reasoning effort must be low, medium, high, xhigh, or max."
               exit 1
               ;;
           esac
 
           echo "model=$CLAUDE_MODEL" >> "$GITHUB_OUTPUT"
+          echo "reasoning_effort=$CLAUDE_REASONING_EFFORT" >> "$GITHUB_OUTPUT"
 
       # pull_request_target exposes repository secrets, so only check out the
       # exact trusted base revision. The PR's code is never checked out.
@@ -178,7 +175,7 @@ jobs:
           prompt: ${{ steps.review-inputs.outputs.prompt }}
           claude_args: |
             --model ${{ steps.review-config.outputs.model }}
-            ${{ steps.review-config.outputs.effort_arg }}
+            --effort ${{ steps.review-config.outputs.reasoning_effort }}
             --max-turns 20
             --allowedTools "Read,Grep,Glob"
             --disallowedTools "Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch"
@@ -202,7 +199,7 @@ jobs:
           prompt: ${{ steps.review-inputs.outputs.prompt }}
           claude_args: |
             --model ${{ steps.review-config.outputs.model }}
-            ${{ steps.review-config.outputs.effort_arg }}
+            --effort ${{ steps.review-config.outputs.reasoning_effort }}
             --max-turns 20
             --allowedTools "Read,Grep,Glob"
             --disallowedTools "Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch"

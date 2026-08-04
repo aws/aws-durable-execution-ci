@@ -57,7 +57,7 @@ class AiPrReviewWorkflowTest(unittest.TestCase):
     def test_public_reviewer_configuration_defaults(self):
         expected_defaults = {
             "claude-model": "us.anthropic.claude-opus-4-8",
-            "claude-reasoning-effort": '""',
+            "claude-reasoning-effort": "xhigh",
             "codex-model": "openai.gpt-5.6-sol",
             "codex-reasoning-effort": "xhigh",
         }
@@ -78,7 +78,8 @@ class AiPrReviewWorkflowTest(unittest.TestCase):
             claude,
         )
         self.assertIn(
-            "reasoning-effort: ${{ inputs['claude-reasoning-effort'] }}",
+            "reasoning-effort: ${{ "
+            "inputs['claude-reasoning-effort'] || 'xhigh' }}",
             claude,
         )
 
@@ -99,7 +100,7 @@ class AiPrReviewWorkflowTest(unittest.TestCase):
             "model",
             "us.anthropic.claude-opus-4-8",
         )
-        self.assert_input_default(CLAUDE_WORKFLOW, "reasoning-effort", '""')
+        self.assert_input_default(CLAUDE_WORKFLOW, "reasoning-effort", "xhigh")
         self.assertEqual(
             CLAUDE_WORKFLOW.count(
                 "--model ${{ steps.review-config.outputs.model }}"
@@ -108,7 +109,7 @@ class AiPrReviewWorkflowTest(unittest.TestCase):
         )
         self.assertEqual(
             CLAUDE_WORKFLOW.count(
-                "${{ steps.review-config.outputs.effort_arg }}"
+                "--effort ${{ steps.review-config.outputs.reasoning_effort }}"
             ),
             2,
         )

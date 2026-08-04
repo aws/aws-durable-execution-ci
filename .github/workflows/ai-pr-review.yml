@@ -26,10 +26,10 @@ on:
         type: string
         default: us.anthropic.claude-opus-4-8
       claude-reasoning-effort:
-        description: Optional Claude reasoning effort
+        description: Claude reasoning effort
         required: false
         type: string
-        default: ""
+        default: xhigh
       codex-model:
         description: Codex model ID to use through Amazon Bedrock
         required: false
@@ -95,7 +95,7 @@ jobs:
     with:
       prompt-path: ${{ inputs['prompt-path'] }}
       model: ${{ inputs['claude-model'] || 'us.anthropic.claude-opus-4-8' }}
-      reasoning-effort: ${{ inputs['claude-reasoning-effort'] }}
+      reasoning-effort: ${{ inputs['claude-reasoning-effort'] || 'xhigh' }}
     secrets: inherit
 
   codex-review:
