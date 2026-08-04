@@ -1,0 +1,208 @@
+name: Generate Claude PR Review
+
+on:
+  workflow_call:
+    inputs:
+      prompt-path:
+        description: Optional prompt file relative to the caller repository
+        required: false
+        type: string
+        default: ""
+    secrets:
+      BEDROCK_ROLE_ARN:
+        description: IAM role used to invoke Claude on Amazon Bedrock
+        required: false
+
+permissions: {}
+
+jobs:
+  generate:
+    name: Generate Claude review
+    runs-on: ubuntu-latest
+    environment: ai-pr-review-runtime
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: read
+
+    steps:
+      # pull_request_target exposes repository secrets, so only check out the
+      # exact trusted base revision. The PR's code is never checked out.
+      - name: Check out base branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.base.sha }}
+
+      - name: Reserve AI review toolkit path
+        run: |
+          if [[ -e .ai-review-toolkit ]]; then
+            echo "::error::The trusted base contains the reserved AI review toolkit path."
+            exit 1
+          fi
+
+      # Load support files from the same immutable revision as this workflow.
+      - name: Check out AI review toolkit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .ai-review-toolkit
+          sparse-checkout: |
+            .github/prompts
+            scripts
+          persist-credentials: false
+
+      - name: Resolve AI review prompt
+        id: review-prompt
+        env:
+          CUSTOM_PROMPT_PATH: ${{ inputs['prompt-path'] }}
+        run: |
+          prompt_path="$(
+            bash .ai-review-toolkit/scripts/resolve_ai_review_prompt.sh \
+              "$CUSTOM_PROMPT_PATH"
+          )"
+          echo "path=$prompt_path" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare pull request review context
+        env:
+          EXPECTED_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: bash .ai-review-toolkit/scripts/prepare_ai_review_context.sh
+
+      - name: Prepare review inputs
+        id: review-inputs
+        env:
+          REVIEW_PROMPT_PATH: ${{ steps.review-prompt.outputs.path }}
+        run: |
+          {
+            echo 'prompt<<AI_REVIEW_PROMPT'
+            cat "$REVIEW_PROMPT_PATH"
+            echo 'AI_REVIEW_PROMPT'
+            echo "schema=$(jq -c . .ai-review-toolkit/.github/prompts/ai-pr-review-schema.json)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Prepare unprivileged Claude user
+        run: |
+          bash .ai-review-toolkit/scripts/prepare_ai_review_user.sh claude-review
+
+          # The Claude CLI runs through sudo. Preserve only its Bedrock
+          # credentials and the action's subprocess-isolation controls.
+          sudo sh -c \
+            'printf "%s\n" \
+              "Defaults:runner env_keep += \"AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_REGION AWS_DEFAULT_REGION AWS_BEARER_TOKEN_BEDROCK\"" \
+              "Defaults:runner env_keep += \"ANTHROPIC_BEDROCK_BASE_URL CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_ACTION CLAUDE_CODE_ATTRIBUTION_HEADER\"" \
+              "Defaults:runner env_keep += \"CLAUDE_CODE_SUBPROCESS_ENV_SCRUB CLAUDE_CODE_SCRIPT_CAPS DETAILED_PERMISSION_MESSAGES\"" \
+              > /etc/sudoers.d/claude-review-env'
+          sudo chmod 440 /etc/sudoers.d/claude-review-env
+          sudo visudo -cf /etc/sudoers.d/claude-review-env
+
+      - name: Configure AWS credentials for Claude
+        uses: aws-actions/configure-aws-credentials@517a711dbcd0e402f90c77e7e2f81e849156e31d # v6.2.2
+        with:
+          role-to-assume: ${{ secrets.BEDROCK_ROLE_ARN }}
+          role-session-name: claude-pr-review-${{ github.run_id }}
+          aws-region: us-east-1
+          inline-session-policy: |
+            {
+              "Version": "2012-10-17",
+              "Statement": [{
+                "Effect": "Allow",
+                "Action": [
+                  "bedrock:InvokeModel",
+                  "bedrock:InvokeModelWithResponseStream"
+                ],
+                "Resource": "*"
+              }]
+            }
+          mask-aws-account-id: true
+          output-env-credentials: true
+
+      - name: Review pull request with Claude on Amazon Bedrock
+        id: review
+        continue-on-error: true
+        uses: anthropics/claude-code-action@fa7e2f0a29a126f0b81cdcf360561b36e44cf608 # v1.0.180
+        env:
+          AWS_REGION: us-east-1
+          CLAUDE_CODE_ATTRIBUTION_HEADER: "0"
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          use_bedrock: "true"
+          path_to_claude_code_executable: ${{ github.workspace }}/.ai-review-toolkit/scripts/run_claude_isolated.sh
+          # This also keeps the token out of the git remote configured by the action.
+          allowed_non_write_users: ${{ github.actor }}
+          classify_inline_comments: "false"
+          prompt: ${{ steps.review-inputs.outputs.prompt }}
+          claude_args: |
+            --model us.anthropic.claude-opus-4-8
+            --max-turns 20
+            --allowedTools "Read,Grep,Glob"
+            --disallowedTools "Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch"
+            --json-schema '${{ steps.review-inputs.outputs.schema }}'
+
+      - name: Retry pull request review with Claude on Amazon Bedrock
+        id: review-retry
+        if: steps.review.outcome == 'failure'
+        uses: anthropics/claude-code-action@fa7e2f0a29a126f0b81cdcf360561b36e44cf608 # v1.0.180
+        env:
+          AWS_REGION: us-east-1
+          CLAUDE_CODE_ATTRIBUTION_HEADER: "0"
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          use_bedrock: "true"
+          path_to_claude_code_executable: ${{ github.workspace }}/.ai-review-toolkit/scripts/run_claude_isolated.sh
+          # This also keeps the token out of the git remote configured by the action.
+          allowed_non_write_users: ${{ github.actor }}
+          classify_inline_comments: "false"
+          prompt: ${{ steps.review-inputs.outputs.prompt }}
+          claude_args: |
+            --model us.anthropic.claude-opus-4-8
+            --max-turns 20
+            --allowedTools "Read,Grep,Glob"
+            --disallowedTools "Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch"
+            --json-schema '${{ steps.review-inputs.outputs.schema }}'
+
+      - name: Save Claude review
+        env:
+          CLAUDE_EXECUTION_FILE: >-
+            ${{
+              steps.review.outcome == 'success' &&
+              steps.review.outputs.execution_file ||
+              steps.review-retry.outputs.execution_file
+            }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! -r "$CLAUDE_EXECUTION_FILE" ]]; then
+            echo "::error::Claude execution output is not readable."
+            exit 1
+          fi
+
+          jq -e '
+            [
+              .[]
+              | select(.type == "result" and has("structured_output"))
+              | .structured_output
+            ] as $reviews
+            | if (
+                ($reviews | length) == 1 and
+                ($reviews[0] | type == "object" and keys == ["comments", "summary"])
+              ) then
+                $reviews[0]
+            else
+              error("Claude returned invalid structured review output")
+            end
+          ' "$CLAUDE_EXECUTION_FILE" > "${RUNNER_TEMP}/claude-review.json"
+
+      - name: Upload Claude review
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: claude-review-${{ github.run_id }}
+          path: ${{ runner.temp }}/claude-review.json
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 1
