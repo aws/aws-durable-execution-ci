@@ -135,6 +135,7 @@ jobs:
           path_to_claude_code_executable: ${{ github.workspace }}/.ai-review-toolkit/scripts/run_claude_isolated.sh
           # This also keeps the token out of the git remote configured by the action.
           allowed_non_write_users: ${{ github.actor }}
+          allowed_bots: dependabot
           classify_inline_comments: "false"
           prompt: ${{ steps.review-inputs.outputs.prompt }}
           claude_args: |
@@ -157,6 +158,7 @@ jobs:
           path_to_claude_code_executable: ${{ github.workspace }}/.ai-review-toolkit/scripts/run_claude_isolated.sh
           # This also keeps the token out of the git remote configured by the action.
           allowed_non_write_users: ${{ github.actor }}
+          allowed_bots: dependabot
           classify_inline_comments: "false"
           prompt: ${{ steps.review-inputs.outputs.prompt }}
           claude_args: |
