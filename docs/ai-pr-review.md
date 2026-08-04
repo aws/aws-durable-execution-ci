@@ -15,7 +15,8 @@ Both reviewers return structured findings. The publication jobs re-check the
 pull request revision, validate every requested path and right-side line range
 against GitHub's diff, and then publish inline comments. Small, unambiguous
 fixes include GitHub `suggestion` blocks so a maintainer can apply them
-directly; the AI reviewers never edit the branch.
+directly. Each inline comment identifies whether it came from Claude or Codex;
+the AI reviewers never edit the branch.
 
 ## Usage
 

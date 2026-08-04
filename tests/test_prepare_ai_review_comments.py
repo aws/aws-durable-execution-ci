@@ -49,11 +49,11 @@ def finding(**overrides):
     return value
 
 
-def prepare(comments):
+def prepare(comments, reviewer="claude"):
     return prepare_review(
         {"summary": "One actionable finding.", "comments": comments},
         PR_FILES,
-        "claude",
+        reviewer,
         "123",
         "2",
         HEAD_SHA,
@@ -88,6 +88,7 @@ class PrepareAiReviewCommentsTest(unittest.TestCase):
             {
                 "body": (
                     "[ai-pr-review-inline-claude-123-2-published]: #\n"
+                    "**Claude AI review**\n\n"
                     "This changes the value incorrectly. Use the expected value.\n\n"
                     "```suggestion\nnew_value = 1\n```"
                 ),
@@ -105,6 +106,15 @@ class PrepareAiReviewCommentsTest(unittest.TestCase):
             multiline["body"],
         )
         self.assertNotIn("suggestion", plain["body"])
+
+    def test_labels_inline_comments_by_reviewer(self):
+        for reviewer, title in (
+            ("claude", "Claude AI review"),
+            ("codex", "Codex AI review"),
+        ):
+            with self.subTest(reviewer=reviewer):
+                body = prepare([finding()], reviewer)["comments"][0]["body"]
+                self.assertIn(f"\n**{title}**\n\n", body)
 
     def test_allows_empty_replacement_for_deletion(self):
         prepared = prepare([finding(suggestion="")])
