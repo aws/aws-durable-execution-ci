@@ -13,6 +13,10 @@ MAX_COMMENTS = 20
 MAX_RANGE_LINES = 100
 HUNK_HEADER = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 RESERVED_METADATA_PREFIX = "<!-- ai-pr-review:"
+REVIEWER_TITLES = {
+    "claude": "Claude AI review",
+    "codex": "Codex AI review",
+}
 
 
 class ReviewValidationError(ValueError):
@@ -114,6 +118,10 @@ def prepare_review(
     run_attempt: str,
     expected_head_sha: str,
 ) -> dict[str, Any]:
+    reviewer_title = REVIEWER_TITLES.get(reviewer)
+    if reviewer_title is None:
+        raise ReviewValidationError(f"unsupported AI reviewer: {reviewer}")
+
     if not isinstance(review, dict):
         raise ReviewValidationError("review must be an object")
     require_exact_keys(review, {"summary", "comments"}, "review")
@@ -226,7 +234,7 @@ def prepare_review(
             raise ReviewValidationError(f"{label} duplicates an earlier comment")
         seen_comments.add(duplicate_key)
 
-        published_body = f"{marker}\n{body}"
+        published_body = f"{marker}\n**{reviewer_title}**\n\n{body}"
         if has_suggestion:
             published_body += f"\n\n{suggestion_fence(suggestion)}"
 

@@ -10,6 +10,36 @@ on:
         required: false
         type: string
         default: ""
+      run-claude:
+        description: Run the Claude pull request review
+        required: false
+        type: boolean
+        default: true
+      run-codex:
+        description: Run the Codex pull request review
+        required: false
+        type: boolean
+        default: true
+      claude-model:
+        description: Claude model ID to use through Amazon Bedrock
+        required: false
+        type: string
+        default: us.anthropic.claude-opus-4-8
+      claude-reasoning-effort:
+        description: Claude reasoning effort
+        required: false
+        type: string
+        default: xhigh
+      codex-model:
+        description: Codex model ID to use through Amazon Bedrock
+        required: false
+        type: string
+        default: openai.gpt-5.6-sol
+      codex-reasoning-effort:
+        description: Codex reasoning effort
+        required: false
+        type: string
+        default: xhigh
     secrets:
       BEDROCK_ROLE_ARN:
         description: IAM role used to invoke the AI review models
@@ -22,12 +52,20 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Direct pull_request_target runs have no workflow_call inputs. Formatting
+  # distinguishes a missing value from an explicit false supplied by a caller.
   approve_review:
     name: Approve AI PR review
     if: >-
-      github.event.pull_request.user.login == 'dependabot[bot]' ||
-      github.event.pull_request.draft ||
-      github.event.pull_request.head.repo.full_name != github.repository
+      (
+        format('{0}', inputs['run-claude']) != 'false' ||
+        format('{0}', inputs['run-codex']) != 'false'
+      ) &&
+      (
+        github.event.pull_request.user.login == 'dependabot[bot]' ||
+        github.event.pull_request.draft ||
+        github.event.pull_request.head.repo.full_name != github.repository
+      )
     runs-on: ubuntu-latest
     environment: ai-pr-review
     permissions: {}
@@ -38,10 +76,11 @@ jobs:
         run: echo "Approved review of $HEAD_SHA"
 
   claude-review:
-    name: Generate Claude review
+    name: Claude review
     needs: approve_review
     if: >-
       always() &&
+      format('{0}', inputs['run-claude']) != 'false' &&
       (
         (
           github.event.pull_request.user.login != 'dependabot[bot]' &&
@@ -53,28 +92,20 @@ jobs:
     permissions:
       contents: read
       id-token: write
-      pull-requests: read
+      pull-requests: write
     uses: ./.github/workflows/claude-review.yml
     with:
       prompt-path: ${{ inputs['prompt-path'] }}
+      model: ${{ inputs['claude-model'] || 'us.anthropic.claude-opus-4-8' }}
+      reasoning-effort: ${{ inputs['claude-reasoning-effort'] || 'xhigh' }}
     secrets: inherit
 
-  claude-review-comment:
-    name: Post Claude review
-    needs: claude-review
-    if: >-
-      always() &&
-      needs.claude-review.result == 'success'
-    permissions:
-      contents: read
-      pull-requests: write
-    uses: ./.github/workflows/claude-review-comment.yml
-
   codex-review:
-    name: Generate Codex review
+    name: Codex review
     needs: approve_review
     if: >-
       always() &&
+      format('{0}', inputs['run-codex']) != 'false' &&
       (
         (
           github.event.pull_request.user.login != 'dependabot[bot]' &&
@@ -86,19 +117,10 @@ jobs:
     permissions:
       contents: read
       id-token: write
-      pull-requests: read
+      pull-requests: write
     uses: ./.github/workflows/codex-review.yml
     with:
       prompt-path: ${{ inputs['prompt-path'] }}
+      model: ${{ inputs['codex-model'] || 'openai.gpt-5.6-sol' }}
+      reasoning-effort: ${{ inputs['codex-reasoning-effort'] || 'xhigh' }}
     secrets: inherit
-
-  codex-review-comment:
-    name: Post Codex review
-    needs: codex-review
-    if: >-
-      always() &&
-      needs.codex-review.result == 'success'
-    permissions:
-      contents: read
-      pull-requests: write
-    uses: ./.github/workflows/codex-review-comment.yml

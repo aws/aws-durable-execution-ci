@@ -129,6 +129,7 @@ jq -e \
     .side == "RIGHT" and
     (has("start_line") | not) and
     (.body | startswith("[ai-pr-review-inline-claude-123-2-published]: #\n")) and
+    (.body | contains("\n**Claude AI review**\n\n")) and
     (.body | contains("```suggestion\nnew_value = 1\n```"))
   ' \
   "$GH_INLINE_PAYLOAD_LOG" > /dev/null ||

@@ -1,4 +1,4 @@
-name: Generate Claude PR Review
+name: Claude PR Review
 
 on:
   workflow_call:
@@ -8,6 +8,16 @@ on:
         required: false
         type: string
         default: ""
+      model:
+        description: Claude model ID to use through Amazon Bedrock
+        required: false
+        type: string
+        default: us.anthropic.claude-opus-4-8
+      reasoning-effort:
+        description: Claude reasoning effort
+        required: false
+        type: string
+        default: xhigh
     secrets:
       BEDROCK_ROLE_ARN:
         description: IAM role used to invoke Claude on Amazon Bedrock
@@ -27,6 +37,31 @@ jobs:
       pull-requests: read
 
     steps:
+      - name: Validate Claude review configuration
+        id: review-config
+        env:
+          CLAUDE_MODEL: ${{ inputs['model'] }}
+          CLAUDE_REASONING_EFFORT: ${{ inputs['reasoning-effort'] }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$CLAUDE_MODEL" =~ ^[A-Za-z0-9][A-Za-z0-9._:/-]*$ ]]; then
+            echo "::error::Claude model must be a non-empty model ID."
+            exit 1
+          fi
+
+          case "$CLAUDE_REASONING_EFFORT" in
+            low|medium|high|xhigh|max)
+              ;;
+            *)
+              echo "::error::Claude reasoning effort must be low, medium, high, xhigh, or max."
+              exit 1
+              ;;
+          esac
+
+          echo "model=$CLAUDE_MODEL" >> "$GITHUB_OUTPUT"
+          echo "reasoning_effort=$CLAUDE_REASONING_EFFORT" >> "$GITHUB_OUTPUT"
+
       # pull_request_target exposes repository secrets, so only check out the
       # exact trusted base revision. The PR's code is never checked out.
       - name: Check out base branch
@@ -139,7 +174,8 @@ jobs:
           classify_inline_comments: "false"
           prompt: ${{ steps.review-inputs.outputs.prompt }}
           claude_args: |
-            --model us.anthropic.claude-opus-4-8
+            --model ${{ steps.review-config.outputs.model }}
+            --effort ${{ steps.review-config.outputs.reasoning_effort }}
             --max-turns 20
             --allowedTools "Read,Grep,Glob"
             --disallowedTools "Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch"
@@ -162,7 +198,8 @@ jobs:
           classify_inline_comments: "false"
           prompt: ${{ steps.review-inputs.outputs.prompt }}
           claude_args: |
-            --model us.anthropic.claude-opus-4-8
+            --model ${{ steps.review-config.outputs.model }}
+            --effort ${{ steps.review-config.outputs.reasoning_effort }}
             --max-turns 20
             --allowedTools "Read,Grep,Glob"
             --disallowedTools "Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch"
@@ -208,3 +245,44 @@ jobs:
           if-no-files-found: error
           overwrite: true
           retention-days: 1
+
+  post:
+    name: Post Claude review
+    needs: generate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: Download Claude review
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: claude-review-${{ github.run_id }}
+          path: ${{ runner.temp }}/claude-review
+
+      # Load the posting script from the same immutable revision as this
+      # workflow. No pull request code is checked out or executed.
+      - name: Check out AI review toolkit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .ai-review-toolkit
+          sparse-checkout: scripts
+          persist-credentials: false
+
+      - name: Post Claude review
+        env:
+          EXPECTED_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REVIEW_FILE: ${{ runner.temp }}/claude-review/claude-review.json
+        run: |
+          bash .ai-review-toolkit/scripts/post_ai_review.sh \
+            claude \
+            "$EXPECTED_BASE_SHA" \
+            "$EXPECTED_HEAD_SHA" \
+            "$REVIEW_FILE"
