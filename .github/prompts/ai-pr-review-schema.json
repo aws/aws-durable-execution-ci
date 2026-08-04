@@ -6,10 +6,61 @@
       "minLength": 1,
       "maxLength": 4000,
       "description": "Concise Markdown summary of the PR review and any residual test risk"
+    },
+    "comments": {
+      "type": "array",
+      "maxItems": 20,
+      "description": "Confirmed findings to publish as inline review comments, ordered by severity",
+      "items": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024,
+            "description": "Exact repository-relative path from the PR diff"
+          },
+          "start_line": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "First right-side line in the diff range"
+          },
+          "line": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Last right-side line in the diff range"
+          },
+          "body": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000,
+            "description": "Actionable Markdown finding with impact and a concrete fix"
+          },
+          "has_suggestion": {
+            "type": "boolean",
+            "description": "Whether suggestion is an exact replacement for the selected range"
+          },
+          "suggestion": {
+            "type": "string",
+            "maxLength": 12000,
+            "description": "Exact replacement text without Markdown fences; empty when has_suggestion is false"
+          }
+        },
+        "required": [
+          "path",
+          "start_line",
+          "line",
+          "body",
+          "has_suggestion",
+          "suggestion"
+        ],
+        "additionalProperties": false
+      }
     }
   },
   "required": [
-    "summary"
+    "summary",
+    "comments"
   ],
   "additionalProperties": false
 }

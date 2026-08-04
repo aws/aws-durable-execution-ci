@@ -9,6 +9,19 @@ through Amazon Bedrock. It checks out only the pull request's trusted base
 revision, builds a SHA-anchored review context through the GitHub API, and runs
 both reviewers as unprivileged, read-only users.
 
+Codex generation and comment publication run in separate reusable workflows.
+The generation workflow has read-only GitHub access (plus OIDC access for
+Amazon Bedrock) and passes its output through a short-lived workflow artifact.
+Claude uses the same read-only generation and trusted-publication boundary in
+the parent workflow. Only publication jobs receive `pull-requests: write`; they
+receive no AWS credentials and run neither model.
+
+Both reviewers return structured findings. The publication jobs re-check the
+pull request revision, validate every requested path and right-side line range
+against GitHub's diff, and then publish inline comments. Small, unambiguous
+fixes include GitHub `suggestion` blocks so a maintainer can apply them
+directly; the AI reviewers never edit the branch.
+
 Add this caller as `.github/workflows/ai-pr-review.yml` in a consuming
 repository:
 
@@ -48,7 +61,9 @@ consuming repository and pass its repository-relative path:
 ```
 
 The prompt is loaded from the trusted base revision. It must be a readable,
-non-empty file inside the consuming repository.
+non-empty file inside the consuming repository. The shared workflow appends its
+trusted structured-output contract to custom prompts. Inline comments are
+limited to changed diff hunks and must include at least one added line.
 
 ### Repository setup
 
@@ -61,7 +76,7 @@ Create these environments in each consuming repository:
 
 Keep `BEDROCK_ROLE_ARN` in `ai-pr-review-runtime`. The caller must still specify
 `secrets: inherit` for GitHub to resolve environment-scoped secrets inside
-cross-repository reusable jobs. The called review jobs remain bound to
+cross-repository reusable jobs. The model-generation jobs remain bound to
 `ai-pr-review-runtime`, including its protection rules and branch policies.
 
 Trusted, non-draft branches in the same repository are reviewed automatically.
