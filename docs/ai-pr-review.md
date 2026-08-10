@@ -106,7 +106,9 @@ Create these environments in each consuming repository:
 - `ai-pr-review`: Add required reviewers. This approval gates reviews for
   Dependabot, draft pull requests, and pull requests from forks.
 - `ai-pr-review-runtime`: Add the `BEDROCK_ROLE_ARN` secret containing the IAM
-  role that GitHub's OIDC provider can assume.
+  role that GitHub's OIDC provider can assume. Do not add required reviewers or
+  a wait timer to this environment; every model-generation job uses it, so
+  either rule would require manual approval for every review.
 
 Keep `BEDROCK_ROLE_ARN` in `ai-pr-review-runtime`. The caller must still specify
 `secrets: inherit` for GitHub to resolve environment-scoped secrets inside
