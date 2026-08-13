@@ -80,8 +80,9 @@ The caller must grant `models: read`. No model API key or AWS role is needed.
 Titles and bodies are untrusted model data, not instructions. The summarizer
 uses a fixed system prompt, sends bounded JSON input to the GitHub Models chat
 completion endpoint, accepts at most 64 KiB of response data, and limits the
-normalized summary to 240 characters. It removes control characters and
-neutralizes URLs, Slack mrkdwn, control syntax, and broadcast mentions.
+normalized summary to 240 displayed characters. It removes control characters
+and URLs, escapes Slack control syntax, and neutralizes broadcast mentions
+while preserving ordinary technical punctuation.
 
 Model inference and Slack delivery run in separate jobs. The model job has
 only `contents: read` and `models: read`, receives no webhook secrets, and

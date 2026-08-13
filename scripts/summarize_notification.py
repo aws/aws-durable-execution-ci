@@ -17,7 +17,6 @@ MAX_DESCRIPTION_CHARS = 12_000
 MAX_RESPONSE_BYTES = 64_000
 MAX_SUMMARY_CHARS = 240
 MODEL_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]*")
-MRKDWN_PATTERN = re.compile(r"[*_~`]")
 SLACK_BROADCAST_PATTERN = re.compile(r"@(channel|everyone|here)\b", re.IGNORECASE)
 URL_PATTERN = re.compile(r"(?i)\b(?:https?://|www\.)\S+")
 SYSTEM_PROMPT = (
@@ -96,30 +95,37 @@ def extract_notification_content(
     raise ValueError(f"Unsupported notification event: {event_name}")
 
 
-def normalize_summary(summary: str) -> str:
+def _normalize_plain_text(summary: str) -> str:
     printable = "".join(
         character if character.isprintable() else " " for character in summary
     )
-    normalized = " ".join(printable.strip().strip("`\"'").split())
+    normalized = " ".join(printable.strip().strip("\"'").split())
     if normalized.lower().startswith("summary:"):
         normalized = normalized[len("summary:") :].lstrip()
     normalized = URL_PATTERN.sub("", normalized)
-    normalized = MRKDWN_PATTERN.sub("", normalized)
-    normalized = normalized.replace("<", "(").replace(">", ")")
     normalized = SLACK_BROADCAST_PATTERN.sub(r"(at \1)", normalized)
     normalized = " ".join(normalized.split())
 
-    if len(normalized) <= MAX_SUMMARY_CHARS:
-        return normalized
+    if len(normalized) > MAX_SUMMARY_CHARS:
+        shortened = normalized[: MAX_SUMMARY_CHARS - 3].rsplit(" ", 1)[0]
+        if not shortened:
+            shortened = normalized[: MAX_SUMMARY_CHARS - 3]
+        normalized = f"{shortened}..."
 
-    shortened = normalized[: MAX_SUMMARY_CHARS - 3].rsplit(" ", 1)[0]
-    if not shortened:
-        shortened = normalized[: MAX_SUMMARY_CHARS - 3]
-    return f"{shortened}..."
+    return normalized
+
+
+def normalize_summary(summary: str) -> str:
+    normalized = _normalize_plain_text(summary)
+    return (
+        normalized.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
 
 
 def fallback_summary(content: NotificationContent) -> str:
-    title = normalize_summary(content.title)
+    title = _normalize_plain_text(content.title)
     if any(character.isalnum() for character in title):
         return normalize_summary(f"{content.kind.capitalize()}: {title}")
     return f"New {content.kind} activity."

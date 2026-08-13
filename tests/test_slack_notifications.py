@@ -121,12 +121,33 @@ class SlackSummaryTest(unittest.TestCase):
                 "at https://example.com with `code`"
                 '" '
             ),
-            "Notify (at channel) and (!here) at with code",
+            "*Notify* (at channel) and &lt;!here&gt; at with `code`",
         )
 
         normalized = summary.normalize_summary("word " * summary.MAX_SUMMARY_CHARS)
         self.assertLessEqual(len(normalized), summary.MAX_SUMMARY_CHARS)
         self.assertTrue(normalized.endswith("..."))
+
+    def test_fallback_preserves_semantic_punctuation(self):
+        cases = (
+            ("Update foo_bar handling", "Issue: Update foo_bar handling"),
+            ("Use 2*3 workers", "Issue: Use 2*3 workers"),
+            (
+                "Support List<T> & Map<K, V>",
+                "Issue: Support List&lt;T&gt; &amp; Map&lt;K, V&gt;",
+            ),
+        )
+
+        for title, expected in cases:
+            with self.subTest(title=title):
+                content = summary.NotificationContent(
+                    kind="issue",
+                    action="opened",
+                    title=title,
+                    description="",
+                )
+
+                self.assertEqual(summary.fallback_summary(content), expected)
 
     def test_fallback_uses_title(self):
         content = summary.NotificationContent(
