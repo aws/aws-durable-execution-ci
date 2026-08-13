@@ -81,13 +81,15 @@ Titles and bodies are untrusted model data, not instructions. The summarizer
 uses a fixed system prompt, sends bounded JSON input to the GitHub Models chat
 completion endpoint, accepts at most 64 KiB of response data, and limits the
 normalized summary to 240 characters. It removes control characters and
-neutralizes Slack control syntax and broadcast mentions.
+neutralizes URLs, Slack mrkdwn, control syntax, and broadcast mentions.
 
 Model inference and Slack delivery run in separate jobs. The model job has
 only `contents: read` and `models: read`, receives no webhook secrets, and
 loads only `scripts/summarize_notification.py` from the reusable workflow's
 immutable commit. The Slack jobs have no repository or model permissions,
-receive only the event-specific webhook, and execute no repository code.
+receive only the event-specific webhook, and execute no repository code. They
+still send with an event-specific generic summary if the model job itself
+fails before producing output.
 
 ## Migration
 

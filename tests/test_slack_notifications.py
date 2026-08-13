@@ -117,9 +117,11 @@ class SlackSummaryTest(unittest.TestCase):
     def test_normalizes_and_bounds_summary(self):
         self.assertEqual(
             summary.normalize_summary(
-                ' "Summary: Notify @channel and <!here>\x00 now" '
+                ' "Summary: *Notify* @channel and <!here>\x00 '
+                "at https://example.com with `code`"
+                '" '
             ),
-            "Notify (at channel) and (!here) now",
+            "Notify (at channel) and (!here) at with code",
         )
 
         normalized = summary.normalize_summary("word " * summary.MAX_SUMMARY_CHARS)
@@ -137,6 +139,19 @@ class SlackSummaryTest(unittest.TestCase):
         self.assertEqual(
             summary.fallback_summary(content),
             "Pull request: Add deterministic UUID generation",
+        )
+
+    def test_url_only_title_uses_generic_fallback(self):
+        content = summary.NotificationContent(
+            kind="issue",
+            action="opened",
+            title="https://example.com/details",
+            description="",
+        )
+
+        self.assertEqual(
+            summary.fallback_summary(content),
+            "New issue activity.",
         )
 
     def test_request_treats_event_content_as_untrusted_user_data(self):
@@ -326,23 +341,44 @@ class SlackNotificationWorkflowTest(unittest.TestCase):
         self.assertNotIn("github.event.pull_request.head", summarize)
 
     def test_delivery_jobs_have_no_model_or_repository_permissions(self):
-        webhook_names = {
-            "notify-pr": "SLACK_WEBHOOK_URL_PR",
-            "notify-issues": "SLACK_WEBHOOK_URL_ISSUE",
-            "notify-discussions": "SLACK_WEBHOOK_URL_DISCUSSION",
-            "notify-release": "SLACK_WEBHOOK_URL_RELEASE",
+        webhook_and_fallbacks = {
+            "notify-pr": (
+                "SLACK_WEBHOOK_URL_PR",
+                "New pull request activity.",
+            ),
+            "notify-issues": (
+                "SLACK_WEBHOOK_URL_ISSUE",
+                "New issue activity.",
+            ),
+            "notify-discussions": (
+                "SLACK_WEBHOOK_URL_DISCUSSION",
+                "New discussion activity.",
+            ),
+            "notify-release": (
+                "SLACK_WEBHOOK_URL_RELEASE",
+                "New release activity.",
+            ),
         }
 
-        for job_name, webhook_name in webhook_names.items():
+        for job_name, (
+            webhook_name,
+            fallback,
+        ) in webhook_and_fallbacks.items():
             with self.subTest(job_name=job_name):
                 job = job_block(WORKFLOW, job_name)
                 self.assertIn("needs: summarize", job)
+                self.assertIn("always()", job)
+                self.assertIn("!cancelled()", job)
+                self.assertNotIn(
+                    "needs.summarize.result == 'success'",
+                    job,
+                )
                 self.assertIn("permissions: {}", job)
                 self.assertIn(webhook_name, job)
                 self.assertNotIn("models: read", job)
                 self.assertNotIn("actions/checkout@", job)
                 self.assertIn(
-                    '"summary": ${{ toJSON(needs.summarize.outputs.summary) }}',
+                    f"needs.summarize.outputs.summary || '{fallback}'",
                     job,
                 )
 

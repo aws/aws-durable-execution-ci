@@ -73,7 +73,8 @@ jobs:
     name: Notify Slack - Pull Requests
     needs: summarize
     if: >-
-      needs.summarize.result == 'success' &&
+      always() &&
+      !cancelled() &&
       github.event_name == 'pull_request_target' &&
       github.event.pull_request.draft == false
     runs-on: ubuntu-latest
@@ -90,14 +91,15 @@ jobs:
               "action": ${{ toJSON(github.event.action) }},
               "pr_url": ${{ toJSON(github.event.pull_request.html_url) }},
               "package_name": ${{ toJSON(github.repository) }},
-              "summary": ${{ toJSON(needs.summarize.outputs.summary) }}
+              "summary": ${{ toJSON(needs.summarize.outputs.summary || 'New pull request activity.') }}
             }
 
   notify-issues:
     name: Notify Slack - Issues
     needs: summarize
     if: >-
-      needs.summarize.result == 'success' &&
+      always() &&
+      !cancelled() &&
       github.event_name == 'issues'
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -113,14 +115,15 @@ jobs:
               "action": ${{ toJSON(github.event.action) }},
               "issue_url": ${{ toJSON(github.event.issue.html_url) }},
               "package_name": ${{ toJSON(github.repository) }},
-              "summary": ${{ toJSON(needs.summarize.outputs.summary) }}
+              "summary": ${{ toJSON(needs.summarize.outputs.summary || 'New issue activity.') }}
             }
 
   notify-discussions:
     name: Notify Slack - Discussions
     needs: summarize
     if: >-
-      needs.summarize.result == 'success' &&
+      always() &&
+      !cancelled() &&
       github.event_name == 'discussion'
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -136,14 +139,15 @@ jobs:
               "action": ${{ toJSON(github.event.action) }},
               "discussion_url": ${{ toJSON(github.event.discussion.html_url) }},
               "package_name": ${{ toJSON(github.repository) }},
-              "summary": ${{ toJSON(needs.summarize.outputs.summary) }}
+              "summary": ${{ toJSON(needs.summarize.outputs.summary || 'New discussion activity.') }}
             }
 
   notify-release:
     name: Notify Slack - Release
     needs: summarize
     if: >-
-      needs.summarize.result == 'success' &&
+      always() &&
+      !cancelled() &&
       github.event_name == 'release'
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -159,5 +163,5 @@ jobs:
               "tag_name": ${{ toJSON(github.event.release.tag_name) }},
               "release_url": ${{ toJSON(github.event.release.html_url) }},
               "package_name": ${{ toJSON(github.repository) }},
-              "summary": ${{ toJSON(needs.summarize.outputs.summary) }}
+              "summary": ${{ toJSON(needs.summarize.outputs.summary || 'New release activity.') }}
             }
