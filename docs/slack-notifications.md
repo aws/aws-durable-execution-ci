@@ -81,8 +81,9 @@ Titles and bodies are untrusted model data, not instructions. The summarizer
 uses a fixed system prompt, sends bounded JSON input to the GitHub Models chat
 completion endpoint, accepts at most 64 KiB of response data, and limits the
 normalized summary to 240 displayed characters. It removes control characters
-and URLs, escapes Slack control syntax, and neutralizes broadcast mentions
-while preserving ordinary technical punctuation.
+and explicit URLs and email addresses, defangs bare domains, escapes Slack
+control syntax, and neutralizes broadcast mentions while preserving readable
+technical content.
 
 Model inference and Slack delivery run in separate jobs. The model job has
 only `contents: read` and `models: read`, receives no webhook secrets, and

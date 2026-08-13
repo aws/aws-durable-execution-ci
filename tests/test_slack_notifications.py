@@ -128,6 +128,23 @@ class SlackSummaryTest(unittest.TestCase):
         self.assertLessEqual(len(normalized), summary.MAX_SUMMARY_CHARS)
         self.assertTrue(normalized.endswith("..."))
 
+    def test_neutralizes_all_slack_linkable_text(self):
+        cases = (
+            (
+                "See _https://attacker.example_ now",
+                "See _ now",
+            ),
+            ("Read example.com/docs now", "Read example(.)com/docs now"),
+            ("Email security@example.com now", "Email now"),
+            ("Email security@here.com now", "Email now"),
+            ("Mirror www.example.com/releases", "Mirror"),
+            ("Update README.md", "Update README(.)md"),
+        )
+
+        for text, expected in cases:
+            with self.subTest(text=text):
+                self.assertEqual(summary.normalize_summary(text), expected)
+
     def test_fallback_preserves_semantic_punctuation(self):
         cases = (
             ("Update foo_bar handling", "Issue: Update foo_bar handling"),
