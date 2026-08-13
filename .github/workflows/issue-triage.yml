@@ -24,6 +24,9 @@ on:
           documentation
           enhancement
           question
+          parity
+          BREAKING
+          needs-triage
     secrets:
       BEDROCK_ROLE_ARN:
         description: IAM role used to invoke Codex on Amazon Bedrock
@@ -38,6 +41,9 @@ env:
     documentation
     enhancement
     question
+    parity
+    BREAKING
+    needs-triage
 
 concurrency:
   group: issue-triage-${{ github.repository_id }}-${{ github.event.issue.number }}

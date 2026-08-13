@@ -77,14 +77,23 @@ class IssueTriagePolicyTest(unittest.TestCase):
             [{"name": "SDK", "description": "Language SDK"}],
         )
 
-    def test_rejects_configured_labels_missing_from_repository(self):
-        with self.assertRaisesRegex(
-            ISSUE_TRIAGE.TriageError,
-            "do not exist",
-        ):
+    def test_omits_configured_labels_missing_from_repository(self):
+        self.assertEqual(
             ISSUE_TRIAGE.configured_labels(
                 [{"name": "bug", "description": ""}],
                 ["bug", "component:runtime"],
+            ),
+            [{"name": "bug", "description": ""}],
+        )
+
+    def test_rejects_configuration_when_no_labels_exist(self):
+        with self.assertRaisesRegex(
+            ISSUE_TRIAGE.TriageError,
+            "none",
+        ):
+            ISSUE_TRIAGE.configured_labels(
+                [{"name": "bug", "description": ""}],
+                ["component:runtime"],
             )
 
     def test_parses_newline_separated_label_configuration(self):
@@ -274,7 +283,15 @@ class IssueTriagePolicyTest(unittest.TestCase):
 class IssueTriageWorkflowTest(unittest.TestCase):
     def test_workflow_defines_default_labels_and_override_input(self):
         self.assertIn("DEFAULT_ISSUE_TRIAGE_LABELS: |-", WORKFLOW)
-        for label in ("bug", "documentation", "enhancement", "question"):
+        for label in (
+            "bug",
+            "documentation",
+            "enhancement",
+            "question",
+            "parity",
+            "BREAKING",
+            "needs-triage",
+        ):
             self.assertGreaterEqual(
                 len(re.findall(rf"(?m)^          ?{re.escape(label)}$", WORKFLOW)),
                 1,

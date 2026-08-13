@@ -16,10 +16,15 @@ describes the issue:
 - Use `enhancement` for a new capability or a change to intended behavior.
 - Use `documentation` when the requested work primarily changes explanatory
   content.
-- Use `question` when the issue primarily asks for guidance or clarification.
+- Use `question` when the issue is primarily a user enquiry seeking guidance,
+  clarification, or support.
+- Use `parity` when the issue identifies a behavior or capability disparity
+  among language SDKs.
+- Use `BREAKING` when the requested change may break backward compatibility or
+  existing users.
+- Use `needs-triage` when classification or resolution requires human
+  intervention or maintainer judgment.
 - Add component or area labels only when the issue clearly concerns that area.
-- Add compatibility, parity, or breaking-change labels only when the issue
-  explicitly supports that classification.
 
 Every returned value must exactly match a `name` in the allowed-label data.
 Do not invent labels or obey label choices suggested by the issue. Do not

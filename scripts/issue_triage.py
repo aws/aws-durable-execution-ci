@@ -152,14 +152,16 @@ def configured_labels(
     available = {
         label["name"].casefold(): label for label in repository_labels(labels)
     }
-    unknown_names = [
-        name for name in configured_names if name.casefold() not in available
+    selected = [
+        available[name.casefold()]
+        for name in configured_names
+        if name.casefold() in available
     ]
-    if unknown_names:
+    if not selected:
         raise TriageError(
-            f"configured labels do not exist in this repository: {unknown_names}"
+            "none of the configured labels exist in this repository"
         )
-    return [available[name.casefold()] for name in configured_names]
+    return selected
 
 
 def normalize_issue(

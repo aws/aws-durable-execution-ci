@@ -7,6 +7,9 @@ classify every newly opened issue. By default, the model may apply:
 - `documentation`
 - `enhancement`
 - `question`
+- `parity`
+- `BREAKING`
+- `needs-triage`
 
 Consuming repositories can replace this list with their own repository labels.
 The model receives read-only issue access. A separate job re-fetches the
@@ -74,16 +77,21 @@ consuming repository and includes it in the model context.
         enhancement
         question
         parity
+        BREAKING
+        needs-triage
         otel-plugin
         testing-sdk
     secrets: inherit
 ```
 
 Names are matched case-insensitively and the repository's canonical spelling
-is passed to the model. The job fails and applies the `needs-triage` fallback
-if any configured label does not exist. Keep workflow-state, resolution,
-ownership, difficulty, merge, and project-management labels out of this list
-unless the repository explicitly wants the model to apply them.
+is passed to the model. Configured names that do not exist in a consuming
+repository are omitted. This allows a shared list to include
+repository-specific labels. The job fails and applies the `needs-triage`
+fallback if none of the configured labels exist. Keep workflow-state,
+resolution, ownership, difficulty, merge, and project-management labels other
+than `needs-triage` out of this list unless the repository explicitly wants the
+model to apply them.
 
 ## Repository setup
 
