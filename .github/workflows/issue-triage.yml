@@ -27,6 +27,11 @@ on:
           parity
           BREAKING
           needs-triage
+      prompt-path:
+        description: Optional classification prompt path in the caller repository
+        required: false
+        type: string
+        default: ""
     secrets:
       BEDROCK_ROLE_ARN:
         description: IAM role used to invoke Codex on Amazon Bedrock
@@ -106,6 +111,18 @@ jobs:
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           TRIAGE_LABELS_OVERRIDE: ${{ inputs['labels'] }}
         run: python3 scripts/issue_triage.py prepare
+
+      - name: Resolve issue triage prompt
+        env:
+          CALLER_REPOSITORY: ${{ github.repository }}
+          CALLER_SHA: ${{ github.sha }}
+          CUSTOM_PROMPT_PATH: ${{ inputs['prompt-path'] }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: >-
+          python3 scripts/resolve_issue_triage_prompt.py
+          .github/prompts/issue-triage.md
+          .github/prompts/issue-triage-output.md
+          .ai-issue-triage-context/prompt.md
 
       - name: Prepare unprivileged Codex user
         run: |
@@ -189,7 +206,7 @@ jobs:
           runtime_schema="${output_dir}/schema.json"
           raw_result="${RUNNER_TEMP}/issue-triage-raw.json"
           validated_file="${RUNNER_TEMP}/issue-triage.json"
-          prompt_file="${toolkit_dir}/.github/prompts/issue-triage.md"
+          prompt_file="${toolkit_dir}/.ai-issue-triage-context/prompt.md"
           context_file="${toolkit_dir}/.ai-issue-triage-context/context.json"
           output_schema="${toolkit_dir}/.ai-issue-triage-context/output-schema.json"
           trap 'sudo rm -rf "$output_dir"' EXIT

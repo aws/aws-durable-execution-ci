@@ -93,6 +93,29 @@ resolution, ownership, difficulty, merge, and project-management labels other
 than `needs-triage` out of this list unless the repository explicitly wants the
 model to apply them.
 
+## Prompt configuration
+
+Use the `prompt-path` input to replace the default classification guidance with
+a UTF-8 Markdown file from the consuming repository:
+
+```yaml
+    uses: aws/aws-durable-execution-ci/.github/workflows/issue-triage.yml@<full-commit-sha>
+    with:
+      prompt-path: .github/prompts/issue-triage.md
+    secrets: inherit
+```
+
+The path must be relative to the repository and name a non-empty regular file
+no larger than 64 KiB. The workflow retrieves only that file through the GitHub
+Contents API at the caller's exact commit SHA; it does not check out or execute
+code from the consuming repository.
+
+The custom file replaces only the repository's classification guidance. The
+workflow always appends its own immutable prompt-injection defenses, allowed
+label constraint, and structured-output requirements. Custom guidance cannot
+enable tools, repository access, network access, approvals, or additional
+output fields.
+
 ## Repository setup
 
 Create the `ai-pr-review-runtime` environment in each consuming repository if
@@ -112,12 +135,15 @@ session policy. The model job receives `contents: read`, `issues: read`, and
 
 Issue titles, bodies, label names, and label descriptions are all treated as
 untrusted data. They are serialized as JSON and appended to Codex over stdin;
-the trusted classification policy remains the separate prompt argument.
+the resolved classification policy remains the separate prompt argument.
 
 The generation job:
 
 - Checks out only support files from the workflow's immutable revision and
-  never checks out the consuming repository.
+  never checks out the consuming repository. An optional custom prompt is
+  fetched as one file at the caller's exact commit.
+- Appends workflow-owned security and output instructions after either the
+  default or custom classification guidance.
 - Runs Codex as an unprivileged user that cannot traverse the workflow
   workspace.
 - Uses an empty ephemeral Codex home, ignores user configuration and rule

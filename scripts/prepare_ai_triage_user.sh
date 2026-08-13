@@ -30,6 +30,8 @@ cd /tmp
 for protected_path in \
   "$GITHUB_WORKSPACE/README.md" \
   "$GITHUB_WORKSPACE/.github/prompts/issue-triage.md" \
+  "$GITHUB_WORKSPACE/.github/prompts/issue-triage-output.md" \
+  "$GITHUB_WORKSPACE/.ai-issue-triage-context/prompt.md" \
   "$GITHUB_WORKSPACE/.ai-issue-triage-context/context.json"
 do
   if sudo -u "$triage_user" test -r "$protected_path"; then
