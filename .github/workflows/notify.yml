@@ -10,6 +10,12 @@ on:
   release:
     types: [published]
   workflow_call:
+    inputs:
+      model:
+        description: GitHub Models model ID used for notification summaries
+        required: false
+        type: string
+        default: openai/gpt-4.1-mini
     secrets:
       SLACK_WEBHOOK_URL_PR:
         description: Incoming webhook for pull request notifications
@@ -27,12 +33,54 @@ on:
 permissions: {}
 
 jobs:
+  summarize:
+    name: Generate notification summary
+    if: >-
+      github.event_name != 'pull_request_target' ||
+      github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    continue-on-error: true
+    outputs:
+      summary: ${{ steps.summary.outputs.summary }}
+    permissions:
+      contents: read
+      models: read
+    steps:
+      # Load only trusted support code from the immutable workflow revision.
+      # Pull request and caller repository code are never checked out.
+      - name: Check out notification toolkit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .notification-toolkit
+          sparse-checkout: scripts/summarize_notification.py
+          sparse-checkout-cone-mode: false
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Generate concise notification summary
+        id: summary
+        env:
+          AI_SUMMARY_MODEL: >-
+            ${{ inputs['model'] || 'openai/gpt-4.1-mini' }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          python3
+          .notification-toolkit/scripts/summarize_notification.py
+
   notify-pr:
     name: Notify Slack - Pull Requests
+    needs: summarize
     if: >-
+      always() &&
+      !cancelled() &&
       github.event_name == 'pull_request_target' &&
       github.event.pull_request.draft == false
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
     steps:
       - name: Send pull request notification to Slack
         uses: slackapi/slack-github-action@dcb1066f776dd043e64d0e8ba94ca15cc7e1875d # v4.0.0
@@ -43,13 +91,20 @@ jobs:
             {
               "action": ${{ toJSON(github.event.action) }},
               "pr_url": ${{ toJSON(github.event.pull_request.html_url) }},
-              "package_name": ${{ toJSON(github.repository) }}
+              "package_name": ${{ toJSON(github.repository) }},
+              "summary": ${{ toJSON(needs.summarize.outputs.summary || 'New pull request activity.') }}
             }
 
   notify-issues:
     name: Notify Slack - Issues
-    if: github.event_name == 'issues'
+    needs: summarize
+    if: >-
+      always() &&
+      !cancelled() &&
+      github.event_name == 'issues'
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
     steps:
       - name: Send issue notification to Slack
         uses: slackapi/slack-github-action@dcb1066f776dd043e64d0e8ba94ca15cc7e1875d # v4.0.0
@@ -60,13 +115,20 @@ jobs:
             {
               "action": ${{ toJSON(github.event.action) }},
               "issue_url": ${{ toJSON(github.event.issue.html_url) }},
-              "package_name": ${{ toJSON(github.repository) }}
+              "package_name": ${{ toJSON(github.repository) }},
+              "summary": ${{ toJSON(needs.summarize.outputs.summary || 'New issue activity.') }}
             }
 
   notify-discussions:
     name: Notify Slack - Discussions
-    if: github.event_name == 'discussion'
+    needs: summarize
+    if: >-
+      always() &&
+      !cancelled() &&
+      github.event_name == 'discussion'
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
     steps:
       - name: Send discussion notification to Slack
         uses: slackapi/slack-github-action@dcb1066f776dd043e64d0e8ba94ca15cc7e1875d # v4.0.0
@@ -77,13 +139,20 @@ jobs:
             {
               "action": ${{ toJSON(github.event.action) }},
               "discussion_url": ${{ toJSON(github.event.discussion.html_url) }},
-              "package_name": ${{ toJSON(github.repository) }}
+              "package_name": ${{ toJSON(github.repository) }},
+              "summary": ${{ toJSON(needs.summarize.outputs.summary || 'New discussion activity.') }}
             }
 
   notify-release:
     name: Notify Slack - Release
-    if: github.event_name == 'release'
+    needs: summarize
+    if: >-
+      always() &&
+      !cancelled() &&
+      github.event_name == 'release'
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
     steps:
       - name: Send release notification to Slack
         uses: slackapi/slack-github-action@dcb1066f776dd043e64d0e8ba94ca15cc7e1875d # v4.0.0
@@ -94,5 +163,6 @@ jobs:
             {
               "tag_name": ${{ toJSON(github.event.release.tag_name) }},
               "release_url": ${{ toJSON(github.event.release.html_url) }},
-              "package_name": ${{ toJSON(github.repository) }}
+              "package_name": ${{ toJSON(github.repository) }},
+              "summary": ${{ toJSON(needs.summarize.outputs.summary || 'New release activity.') }}
             }

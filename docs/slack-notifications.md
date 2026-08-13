@@ -25,6 +25,9 @@ permissions: {}
 
 jobs:
   notify:
+    permissions:
+      contents: read
+      models: read
     uses: aws/aws-durable-execution-ci/.github/workflows/notify.yml@<full-commit-sha>
     secrets:
       SLACK_WEBHOOK_URL_PR: ${{ secrets.SLACK_WEBHOOK_URL_PR }}
@@ -39,13 +42,56 @@ Replace `<full-commit-sha>` with the 40-character commit SHA to use.
 
 Draft pull requests are skipped. Using `pull_request_target` makes the webhook
 available for pull requests from forks; the shared workflow does not check out
-or execute pull request code. The shared workflow selects the event-specific
-webhook and populates the `package_name` payload field from the caller's
+or execute pull request code. The shared workflow generates a concise summary
+from the event title and body, selects the event-specific webhook, and
+populates the `package_name` payload field from the caller's
 `github.repository`.
+
+Every pull request, issue, discussion, and release payload includes a
+`summary` field. Configure the corresponding Slack webhook workflows to accept
+and display that field. If GitHub Models is unavailable or returns invalid
+output, the notification still sends with a deterministic title-based
+summary.
 
 The discussion webhook is optional. Repositories that do not notify on
 discussions can omit both the `discussion` trigger and
 `SLACK_WEBHOOK_URL_DISCUSSION` secret mapping.
+
+## Model configuration
+
+The default model is `openai/gpt-4.1-mini`. Callers can select another model
+available through GitHub Models:
+
+```yaml
+    uses: aws/aws-durable-execution-ci/.github/workflows/notify.yml@<full-commit-sha>
+    with:
+      model: openai/gpt-4.1-mini
+    secrets:
+      SLACK_WEBHOOK_URL_PR: ${{ secrets.SLACK_WEBHOOK_URL_PR }}
+      SLACK_WEBHOOK_URL_ISSUE: ${{ secrets.SLACK_WEBHOOK_URL_ISSUE }}
+      SLACK_WEBHOOK_URL_DISCUSSION: ${{ secrets.SLACK_WEBHOOK_URL_DISCUSSION }}
+      SLACK_WEBHOOK_URL_RELEASE: ${{ secrets.SLACK_WEBHOOK_URL_RELEASE }}
+```
+
+The caller must grant `models: read`. No model API key or AWS role is needed.
+
+## Security model
+
+Titles and bodies are untrusted model data, not instructions. The summarizer
+uses a fixed system prompt, sends bounded JSON input to the GitHub Models chat
+completion endpoint, accepts at most 64 KiB of response data, and limits the
+normalized summary to 240 displayed characters. It removes control characters
+and explicit URLs and email addresses, defangs bare domains, escapes Slack
+control syntax, and neutralizes broadcast mentions while preserving readable
+technical content.
+
+Model inference and Slack delivery run in separate jobs. The model job has
+only `contents: read` and `models: read`, receives no webhook secrets, and
+loads only `scripts/summarize_notification.py` from the reusable workflow's
+immutable commit. The Slack jobs have no repository or model permissions,
+receive only the event-specific webhook, and execute no repository code. They
+still send with an event-specific generic summary if the model job itself
+fails before producing output.
 
 ## Migration
 
