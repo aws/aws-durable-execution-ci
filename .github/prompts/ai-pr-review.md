@@ -14,6 +14,8 @@ Focus on:
 - Language-neutral requirement semantics and schema compatibility
 - Execution-history matching, placeholders, and variable substitution
 - Async invocation, callback, polling, and reporting lifecycles
+- For OpenTelemetry-related changes, compliance with the applicable
+  OpenTelemetry specifications and semantic conventions
 - Missing or inadequate tests for changed behavior
 
 Complete the entire review before returning the structured result. Do not
