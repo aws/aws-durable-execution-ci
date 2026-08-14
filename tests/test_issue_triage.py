@@ -153,6 +153,27 @@ class IssueTriagePolicyTest(unittest.TestCase):
         self.assertEqual(schema["properties"]["labels"]["maxItems"], 2)
         self.assertFalse(schema["additionalProperties"])
 
+    def test_allows_all_configured_label_facets(self):
+        candidates = [
+            {"name": f"label-{index}", "description": ""}
+            for index in range(8)
+        ]
+        selected = [candidate["name"] for candidate in candidates]
+
+        self.assertEqual(
+            ISSUE_TRIAGE.output_schema(candidates)["properties"]["labels"][
+                "maxItems"
+            ],
+            8,
+        )
+        self.assertEqual(
+            ISSUE_TRIAGE.validate_result(
+                {"labels": selected},
+                candidates,
+            ),
+            {"labels": selected},
+        )
+
     def test_rejects_unknown_or_excluded_labels(self):
         candidates = [{"name": "bug", "description": ""}]
 
@@ -289,18 +310,44 @@ class IssueTriagePolicyTest(unittest.TestCase):
 class IssueTriageWorkflowTest(unittest.TestCase):
     def test_workflow_defines_default_labels_and_override_input(self):
         self.assertIn("DEFAULT_ISSUE_TRIAGE_LABELS: |-", WORKFLOW)
-        for label in (
+        issue_labels = (
+            "pkg:sdk",
+            "pkg:testing",
+            "pkg:otel",
             "bug",
-            "documentation",
             "enhancement",
             "question",
+            "documentation",
             "parity",
             "BREAKING",
+            "urgent",
             "needs-triage",
-        ):
+            "needs-info",
+            "good first issue",
+            "help wanted",
+        )
+        for label in issue_labels:
             self.assertGreaterEqual(
                 len(re.findall(rf"(?m)^          ?{re.escape(label)}$", WORKFLOW)),
                 1,
+        )
+        for label in (
+            "duplicate",
+            "not-a-bug",
+            "wontfix",
+            "invalid",
+            "project",
+            "needs-review",
+            "changes-requested",
+            "needs-rebase",
+            "do-not-merge",
+            "ready-to-merge",
+            "dependencies",
+            "github_actions",
+        ):
+            self.assertNotRegex(
+                WORKFLOW,
+                rf"(?m)^          ?{re.escape(label)}$",
             )
         self.assertRegex(WORKFLOW, r"(?ms)^      labels:\n.*?default: \|-")
         self.assertEqual(
@@ -309,6 +356,40 @@ class IssueTriageWorkflowTest(unittest.TestCase):
             ),
             2,
         )
+
+    def test_default_prompt_uses_issue_taxonomy_and_excludes_pr_labels(self):
+        for label in (
+            "pkg:sdk",
+            "pkg:testing",
+            "pkg:otel",
+            "bug",
+            "enhancement",
+            "question",
+            "documentation",
+            "parity",
+            "BREAKING",
+            "urgent",
+            "needs-triage",
+            "needs-info",
+            "good first issue",
+            "help wanted",
+        ):
+            self.assertIn(f"`{label}`", DEFAULT_PROMPT)
+
+        self.assertIn("multiple package labels", DEFAULT_PROMPT)
+        self.assertIn(
+            "Do not select status, resolution, ownership, difficulty",
+            DEFAULT_PROMPT,
+        )
+        for label in (
+            "duplicate",
+            "not-a-bug",
+            "wontfix",
+            "invalid",
+            "project",
+        ):
+            self.assertNotIn(f"`{label}`", DEFAULT_PROMPT)
+        self.assertIn("Never apply PR-only", DEFAULT_PROMPT)
 
     def test_model_job_cannot_write_issues(self):
         classify = job_block(WORKFLOW, "classify")

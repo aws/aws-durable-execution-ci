@@ -20,13 +20,20 @@ on:
         required: false
         type: string
         default: |-
+          pkg:sdk
+          pkg:testing
+          pkg:otel
           bug
-          documentation
           enhancement
           question
+          documentation
           parity
           BREAKING
+          urgent
           needs-triage
+          needs-info
+          good first issue
+          help wanted
       prompt-path:
         description: Optional classification prompt path in the caller repository
         required: false
@@ -42,13 +49,20 @@ permissions: {}
 env:
   # Non-workflow_call events do not populate reusable-workflow input defaults.
   DEFAULT_ISSUE_TRIAGE_LABELS: |-
+    pkg:sdk
+    pkg:testing
+    pkg:otel
     bug
-    documentation
     enhancement
     question
+    documentation
     parity
     BREAKING
+    urgent
     needs-triage
+    needs-info
+    good first issue
+    help wanted
 
 concurrency:
   group: issue-triage-${{ github.repository_id }}-${{ github.event.issue.number }}

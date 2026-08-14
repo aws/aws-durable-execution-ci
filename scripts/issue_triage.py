@@ -11,8 +11,8 @@ from pathlib import Path
 from typing import Any
 
 
-MAX_LABELS = 5
 MAX_CONFIGURED_LABELS = 50
+MAX_LABELS = MAX_CONFIGURED_LABELS
 MAX_JSON_FILE_BYTES = 1_000_000
 CONTEXT_DIRECTORY = ".ai-issue-triage-context"
 ISSUE_CONTEXT_FIELDS = frozenset(
