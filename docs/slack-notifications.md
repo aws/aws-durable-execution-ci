@@ -27,9 +27,10 @@ jobs:
   notify:
     permissions:
       contents: read
-      models: read
+      id-token: write
     uses: aws/aws-durable-execution-ci/.github/workflows/notify.yml@<full-commit-sha>
     secrets:
+      BEDROCK_ROLE_ARN: ${{ secrets.BEDROCK_ROLE_ARN }}
       SLACK_WEBHOOK_URL_PR: ${{ secrets.SLACK_WEBHOOK_URL_PR }}
       SLACK_WEBHOOK_URL_ISSUE: ${{ secrets.SLACK_WEBHOOK_URL_ISSUE }}
       SLACK_WEBHOOK_URL_DISCUSSION: ${{ secrets.SLACK_WEBHOOK_URL_DISCUSSION }}
@@ -49,9 +50,9 @@ populates the `package_name` payload field from the caller's
 
 Every pull request, issue, discussion, and release payload includes a
 `summary` field. Configure the corresponding Slack webhook workflows to accept
-and display that field. If GitHub Models is unavailable or returns invalid
-output, the notification still sends with a deterministic title-based
-summary.
+and display that field. If Amazon Bedrock credentials are unavailable or Codex
+returns invalid output, the notification still sends with a deterministic
+title-based summary.
 
 The discussion webhook is optional. Repositories that do not notify on
 discussions can omit both the `discussion` trigger and
@@ -59,39 +60,44 @@ discussions can omit both the `discussion` trigger and
 
 ## Model configuration
 
-The default model is `openai/gpt-4.1-mini`. Callers can select another model
-available through GitHub Models:
+The default model is `openai.gpt-5.6-luna`. Callers can select another Codex
+model available through Amazon Bedrock:
 
 ```yaml
     uses: aws/aws-durable-execution-ci/.github/workflows/notify.yml@<full-commit-sha>
     with:
-      model: openai/gpt-4.1-mini
+      model: openai.gpt-5.6-luna
     secrets:
+      BEDROCK_ROLE_ARN: ${{ secrets.BEDROCK_ROLE_ARN }}
       SLACK_WEBHOOK_URL_PR: ${{ secrets.SLACK_WEBHOOK_URL_PR }}
       SLACK_WEBHOOK_URL_ISSUE: ${{ secrets.SLACK_WEBHOOK_URL_ISSUE }}
       SLACK_WEBHOOK_URL_DISCUSSION: ${{ secrets.SLACK_WEBHOOK_URL_DISCUSSION }}
       SLACK_WEBHOOK_URL_RELEASE: ${{ secrets.SLACK_WEBHOOK_URL_RELEASE }}
 ```
 
-The caller must grant `models: read`. No model API key or AWS role is needed.
+The caller must grant `id-token: write` and pass `BEDROCK_ROLE_ARN`. The role
+must allow the Bedrock Mantle inference actions used by the workflow. If the
+secret is omitted, notification delivery remains enabled but uses the
+deterministic fallback summary.
 
 ## Security model
 
 Titles and bodies are untrusted model data, not instructions. The summarizer
-uses a fixed system prompt, sends bounded JSON input to the GitHub Models chat
-completion endpoint, accepts at most 64 KiB of response data, and limits the
-normalized summary to 240 displayed characters. It removes control characters
-and explicit URLs and email addresses, defangs bare domains, escapes Slack
-control syntax, and neutralizes broadcast mentions while preserving readable
-technical content.
+uses a fixed system prompt, sends bounded JSON input to Codex on Amazon
+Bedrock, accepts at most 64 KiB of response data, and limits the normalized
+summary to 240 displayed characters. Codex runs as an unprivileged user with
+tools disabled and no access to the trusted workflow checkout. The sanitizer
+removes control characters and explicit URLs and email addresses, defangs bare
+domains, escapes Slack control syntax, and neutralizes broadcast mentions
+while preserving readable technical content.
 
 Model inference and Slack delivery run in separate jobs. The model job has
-only `contents: read` and `models: read`, receives no webhook secrets, and
-loads only `scripts/summarize_notification.py` from the reusable workflow's
-immutable commit. The Slack jobs have no repository or model permissions,
-receive only the event-specific webhook, and execute no repository code. They
-still send with an event-specific generic summary if the model job itself
-fails before producing output.
+only `contents: read` and `id-token: write`, receives no webhook secrets, and
+loads only the trusted summary scripts from the reusable workflow's immutable
+commit. The Slack jobs have no repository or model permissions, receive only
+the event-specific webhook, and execute no repository code. They still send
+with an event-specific generic summary if the model job itself fails before
+producing output.
 
 ## Migration
 
