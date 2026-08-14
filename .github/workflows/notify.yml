@@ -184,7 +184,7 @@ jobs:
             --disable view_image \
             --strict-config \
             --model "$SUMMARY_MODEL" \
-            --config 'model_reasoning_effort="none"' \
+            --config 'model_reasoning_effort="low"' \
             --config 'model_provider="amazon-bedrock"' \
             --config 'default_permissions=":read-only"' \
             --config 'web_search="disabled"' \

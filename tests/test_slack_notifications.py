@@ -325,6 +325,17 @@ class SlackNotificationWorkflowTest(unittest.TestCase):
             job_block(WORKFLOW, "summarize"),
         )
 
+    def test_default_luna_model_uses_supported_reasoning_effort(self):
+        summarize = job_block(WORKFLOW, "summarize")
+
+        self.assertIn(
+            "${{ inputs['model'] || 'openai.gpt-5.6-luna' }}",
+            summarize,
+        )
+        self.assertIn('--model "$SUMMARY_MODEL"', summarize)
+        self.assertIn('model_reasoning_effort="low"', summarize)
+        self.assertNotIn('model_reasoning_effort="none"', summarize)
+
     def test_model_job_uses_isolated_bedrock_credentials_and_no_webhooks(self):
         summarize = job_block(WORKFLOW, "summarize")
 
