@@ -3,18 +3,26 @@
 The reusable issue-triage workflow uses Codex through Amazon Bedrock to
 classify every newly opened issue. By default, the model may apply:
 
-- `bug`
-- `documentation`
-- `enhancement`
-- `question`
-- `parity`
-- `BREAKING`
-- `needs-triage`
+| Section | What it captures | Labels |
+| --- | --- | --- |
+| Package | Where in the monorepo | `pkg:sdk`, `pkg:testing`, `pkg:otel` |
+| Issue kind | Report or request type | `bug`, `enhancement`, `question` |
+| Area / topic | Orthogonal work facet | `documentation`, `parity` |
+| Compatibility | Potential backward compatibility impact | `BREAKING` |
+| Priority | Work that jumps the queue | `urgent` |
+| Lifecycle | Transient in-flight state | `needs-triage`, `needs-info` |
+| Community | Contribution signals | `good first issue`, `help wanted` |
 
 Consuming repositories can replace this list with their own repository labels.
 The model receives read-only issue access. A separate job re-fetches the
 repository's labels, validates the configured names and structured model
 output, and applies only labels from the configured list.
+
+The default issue policy excludes the PR review/merge labels `needs-review`,
+`changes-requested`, `needs-rebase`, `do-not-merge`, and `ready-to-merge`, and
+the PR automation labels `dependencies` and `github_actions`. A consuming
+repository can explicitly opt into any of them through the `labels` input and
+repository-specific prompt guidance.
 
 If model generation fails, the workflow preserves the manual-triage path by
 applying `needs-triage`. That fallback label is created when it does not
@@ -72,15 +80,20 @@ consuming repository and includes it in the model context.
     uses: aws/aws-durable-execution-ci/.github/workflows/issue-triage.yml@<full-commit-sha>
     with:
       labels: |
+        pkg:sdk
+        pkg:testing
+        pkg:otel
         bug
-        documentation
         enhancement
         question
+        documentation
         parity
         BREAKING
+        urgent
         needs-triage
-        otel-plugin
-        testing-sdk
+        needs-info
+        good first issue
+        help wanted
     secrets: inherit
 ```
 
@@ -88,10 +101,11 @@ Names are matched case-insensitively and the repository's canonical spelling
 is passed to the model. Configured names that do not exist in a consuming
 repository are omitted. This allows a shared list to include
 repository-specific labels. The job fails and applies the `needs-triage`
-fallback if none of the configured labels exist. Keep workflow-state,
-resolution, ownership, difficulty, merge, and project-management labels other
-than `needs-triage` out of this list unless the repository explicitly wants the
-model to apply them.
+fallback if none of the configured labels exist. The default prompt permits
+compatible combinations across distinct facets and multiple package labels for
+cross-package work, while preserving mutually exclusive alternatives within a
+facet. It treats `urgent` and community signals conservatively and keeps
+resolution, project-management, and PR-only labels out of the default policy.
 
 ## Prompt configuration
 
