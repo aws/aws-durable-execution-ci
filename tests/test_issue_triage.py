@@ -376,7 +376,9 @@ class IssueTriageWorkflowTest(unittest.TestCase):
         ):
             self.assertIn(f"`{label}`", DEFAULT_PROMPT)
 
-        self.assertIn("multiple package labels", DEFAULT_PROMPT)
+        self.assertIn("distinct,\ncompatible facets", DEFAULT_PROMPT)
+        self.assertIn("mutually exclusive alternatives", DEFAULT_PROMPT)
+        self.assertIn("Multiple\npackage labels", DEFAULT_PROMPT)
         self.assertIn(
             "Do not select status, resolution, ownership, difficulty",
             DEFAULT_PROMPT,
@@ -389,7 +391,7 @@ class IssueTriageWorkflowTest(unittest.TestCase):
             "project",
         ):
             self.assertNotIn(f"`{label}`", DEFAULT_PROMPT)
-        self.assertIn("Never apply PR-only", DEFAULT_PROMPT)
+        self.assertNotIn("Never apply PR-only", DEFAULT_PROMPT)
 
     def test_model_job_cannot_write_issues(self):
         classify = job_block(WORKFLOW, "classify")

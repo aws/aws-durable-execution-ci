@@ -1,9 +1,12 @@
 Classify the newly opened GitHub issue using only the allowed repository labels
 in the JSON appended as a stdin block.
 
-Choose one or more labels. Labels describe independent facets, so combine any
-labels supported by the issue, including multiple package labels for
-cross-package work. Use the smallest accurate set.
+Choose one or more labels. Combine labels only when they describe distinct,
+compatible facets. Preserve mutually exclusive alternatives within a facet;
+for example, do not select multiple priority or lifecycle states unless
+repository-specific guidance explicitly says they may coexist. Multiple
+package labels may be combined for cross-package work. Use the smallest
+accurate set.
 
 Package:
 
@@ -56,7 +59,3 @@ Community:
 Do not select status, resolution, ownership, difficulty, merge, or
 project-management labels unless they are allowed and genuinely classify the
 issue.
-
-Never apply PR-only review, merge, or automation labels to an issue:
-`needs-review`, `changes-requested`, `needs-rebase`, `do-not-merge`,
-`ready-to-merge`, `dependencies`, or `github_actions`.

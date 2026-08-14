@@ -18,10 +18,11 @@ The model receives read-only issue access. A separate job re-fetches the
 repository's labels, validates the configured names and structured model
 output, and applies only labels from the configured list.
 
-The issue workflow does not apply the PR-only review/merge labels
-`needs-review`, `changes-requested`, `needs-rebase`, `do-not-merge`, and
-`ready-to-merge`, or the PR automation labels `dependencies` and
-`github_actions`.
+The default issue policy excludes the PR review/merge labels `needs-review`,
+`changes-requested`, `needs-rebase`, `do-not-merge`, and `ready-to-merge`, and
+the PR automation labels `dependencies` and `github_actions`. A consuming
+repository can explicitly opt into any of them through the `labels` input and
+repository-specific prompt guidance.
 
 If model generation fails, the workflow preserves the manual-triage path by
 applying `needs-triage`. That fallback label is created when it does not
@@ -101,10 +102,10 @@ is passed to the model. Configured names that do not exist in a consuming
 repository are omitted. This allows a shared list to include
 repository-specific labels. The job fails and applies the `needs-triage`
 fallback if none of the configured labels exist. The default prompt permits
-any combination from the configured allowlist, including multiple package
-labels for cross-package work. It treats `urgent` and community signals
-conservatively, keeps resolution and project-management labels out of the
-default policy, and never selects labels reserved for pull requests.
+compatible combinations across distinct facets and multiple package labels for
+cross-package work, while preserving mutually exclusive alternatives within a
+facet. It treats `urgent` and community signals conservatively and keeps
+resolution, project-management, and PR-only labels out of the default policy.
 
 ## Prompt configuration
 
