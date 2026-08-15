@@ -105,13 +105,25 @@ class AiPrReviewWorkflowTest(unittest.TestCase):
             CLAUDE_WORKFLOW.count(
                 "--model ${{ steps.review-config.outputs.model }}"
             ),
-            2,
+            1,
         )
         self.assertEqual(
             CLAUDE_WORKFLOW.count(
                 "--effort ${{ steps.review-config.outputs.reasoning_effort }}"
             ),
-            2,
+            1,
+        )
+
+    def test_claude_workflow_runs_once_with_30_minute_timeout(self):
+        generate = job_block(CLAUDE_WORKFLOW, "generate")
+
+        self.assertIn("timeout-minutes: 30", generate)
+        self.assertNotIn("timeout-minutes: 45", generate)
+        self.assertNotIn("review-retry", generate)
+        self.assertNotIn("continue-on-error: true", generate)
+        self.assertIn(
+            "CLAUDE_EXECUTION_FILE: ${{ steps.review.outputs.execution_file }}",
+            generate,
         )
 
     def test_codex_workflow_uses_model_and_reasoning_inputs(self):

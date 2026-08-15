@@ -30,7 +30,7 @@ jobs:
     name: Generate Claude review
     runs-on: ubuntu-latest
     environment: ai-pr-review-runtime
-    timeout-minutes: 45
+    timeout-minutes: 30
     permissions:
       contents: read
       id-token: write
@@ -159,31 +159,6 @@ jobs:
 
       - name: Review pull request with Claude on Amazon Bedrock
         id: review
-        continue-on-error: true
-        uses: anthropics/claude-code-action@fa7e2f0a29a126f0b81cdcf360561b36e44cf608 # v1.0.180
-        env:
-          AWS_REGION: us-east-1
-          CLAUDE_CODE_ATTRIBUTION_HEADER: "0"
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          use_bedrock: "true"
-          path_to_claude_code_executable: ${{ github.workspace }}/.ai-review-toolkit/scripts/run_claude_isolated.sh
-          # This also keeps the token out of the git remote configured by the action.
-          allowed_non_write_users: ${{ github.actor }}
-          allowed_bots: dependabot
-          classify_inline_comments: "false"
-          prompt: ${{ steps.review-inputs.outputs.prompt }}
-          claude_args: |
-            --model ${{ steps.review-config.outputs.model }}
-            --effort ${{ steps.review-config.outputs.reasoning_effort }}
-            --max-turns 20
-            --allowedTools "Read,Grep,Glob"
-            --disallowedTools "Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch"
-            --json-schema '${{ steps.review-inputs.outputs.schema }}'
-
-      - name: Retry pull request review with Claude on Amazon Bedrock
-        id: review-retry
-        if: steps.review.outcome == 'failure'
         uses: anthropics/claude-code-action@fa7e2f0a29a126f0b81cdcf360561b36e44cf608 # v1.0.180
         env:
           AWS_REGION: us-east-1
@@ -207,12 +182,7 @@ jobs:
 
       - name: Save Claude review
         env:
-          CLAUDE_EXECUTION_FILE: >-
-            ${{
-              steps.review.outcome == 'success' &&
-              steps.review.outputs.execution_file ||
-              steps.review-retry.outputs.execution_file
-            }}
+          CLAUDE_EXECUTION_FILE: ${{ steps.review.outputs.execution_file }}
         run: |
           set -euo pipefail
 
