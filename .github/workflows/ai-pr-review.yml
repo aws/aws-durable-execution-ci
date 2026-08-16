@@ -24,7 +24,7 @@ on:
         description: Claude model ID to use through Amazon Bedrock
         required: false
         type: string
-        default: us.anthropic.claude-opus-4-8
+        default: us.anthropic.claude-sonnet-5
       claude-reasoning-effort:
         description: Claude reasoning effort
         required: false
@@ -96,7 +96,7 @@ jobs:
     uses: ./.github/workflows/claude-review.yml
     with:
       prompt-path: ${{ inputs['prompt-path'] }}
-      model: ${{ inputs['claude-model'] || 'us.anthropic.claude-opus-4-8' }}
+      model: ${{ inputs['claude-model'] || 'us.anthropic.claude-sonnet-5' }}
       reasoning-effort: ${{ inputs['claude-reasoning-effort'] || 'xhigh' }}
     secrets: inherit
 

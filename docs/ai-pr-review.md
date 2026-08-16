@@ -67,7 +67,7 @@ keeps the default model IDs while lowering their reasoning efforts:
 ```yaml
     uses: aws/aws-durable-execution-ci/.github/workflows/ai-pr-review.yml@<full-commit-sha>
     with:
-      claude-model: us.anthropic.claude-opus-4-8
+      claude-model: us.anthropic.claude-sonnet-5
       claude-reasoning-effort: high
       codex-model: openai.gpt-5.6-sol
       codex-reasoning-effort: medium
@@ -77,6 +77,9 @@ keeps the default model IDs while lowering their reasoning efforts:
 Claude reasoning can be `low`, `medium`, `high`, `xhigh`, or `max`. Codex
 reasoning can be `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`.
 Both reviewers default to `xhigh`.
+
+Claude runs in bare mode with only the `Read`, `Grep`, and `Glob` built-in
+tools available.
 
 Model IDs must be available through the configured Amazon Bedrock provider.
 Not every model supports every reasoning level, so the selected model still

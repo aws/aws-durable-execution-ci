@@ -12,7 +12,7 @@ on:
         description: Claude model ID to use through Amazon Bedrock
         required: false
         type: string
-        default: us.anthropic.claude-opus-4-8
+        default: us.anthropic.claude-sonnet-5
       reasoning-effort:
         description: Claude reasoning effort
         required: false
@@ -176,6 +176,8 @@ jobs:
             --model ${{ steps.review-config.outputs.model }}
             --effort ${{ steps.review-config.outputs.reasoning_effort }}
             --max-turns 20
+            --bare
+            --tools "Read,Grep,Glob"
             --allowedTools "Read,Grep,Glob"
             --disallowedTools "Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch"
             --json-schema '${{ steps.review-inputs.outputs.schema }}'
