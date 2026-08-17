@@ -56,7 +56,7 @@ class AiPrReviewWorkflowTest(unittest.TestCase):
 
     def test_public_reviewer_configuration_defaults(self):
         expected_defaults = {
-            "claude-model": "us.anthropic.claude-opus-4-8",
+            "claude-model": "us.anthropic.claude-sonnet-5",
             "claude-reasoning-effort": "xhigh",
             "codex-model": "openai.gpt-5.6-sol",
             "codex-reasoning-effort": "xhigh",
@@ -74,7 +74,7 @@ class AiPrReviewWorkflowTest(unittest.TestCase):
         claude = job_block(AI_WORKFLOW, "claude-review")
         self.assertIn(
             "model: ${{ inputs['claude-model'] || "
-            "'us.anthropic.claude-opus-4-8' }}",
+            "'us.anthropic.claude-sonnet-5' }}",
             claude,
         )
         self.assertIn(
@@ -98,7 +98,7 @@ class AiPrReviewWorkflowTest(unittest.TestCase):
         self.assert_input_default(
             CLAUDE_WORKFLOW,
             "model",
-            "us.anthropic.claude-opus-4-8",
+            "us.anthropic.claude-sonnet-5",
         )
         self.assert_input_default(CLAUDE_WORKFLOW, "reasoning-effort", "xhigh")
         self.assertEqual(
@@ -113,6 +113,13 @@ class AiPrReviewWorkflowTest(unittest.TestCase):
             ),
             1,
         )
+
+    def test_claude_workflow_uses_minimal_read_only_tooling(self):
+        generate = job_block(CLAUDE_WORKFLOW, "generate")
+
+        self.assertEqual(generate.count("--bare"), 1)
+        self.assertEqual(generate.count('--tools "Read,Grep,Glob"'), 1)
+        self.assertEqual(generate.count('--allowedTools "Read,Grep,Glob"'), 1)
 
     def test_claude_workflow_runs_once_with_30_minute_timeout(self):
         generate = job_block(CLAUDE_WORKFLOW, "generate")
