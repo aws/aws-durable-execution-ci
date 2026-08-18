@@ -1,0 +1,49 @@
+name: Stale Issue Closer
+
+on:
+  workflow_call:
+    inputs:
+      days-until-close:
+        description: Days without a response before an issue is closed
+        required: false
+        type: number
+        default: 14
+      close-reason:
+        description: State reason applied when closing (completed, not_planned, or duplicate)
+        required: false
+        type: string
+        default: not_planned
+permissions: {}
+
+concurrency:
+  group: stale-issue-closer-${{ github.repository_id }}
+  cancel-in-progress: false
+
+jobs:
+  close-stale:
+    name: Close stale issues
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      issues: write
+
+    steps:
+      # Load only the trusted toolkit from the immutable workflow revision.
+      # The caller repository is never checked out.
+      - name: Check out stale issue closer toolkit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          sparse-checkout: scripts/close_stale_issues.py
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Close stale issues
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          STALE_DAYS_UNTIL_CLOSE: ${{ inputs.days-until-close }}
+          STALE_CLOSE_REASON: ${{ inputs.close-reason }}
+        run: python3 scripts/close_stale_issues.py
