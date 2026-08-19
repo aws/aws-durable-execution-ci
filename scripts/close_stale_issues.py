@@ -6,7 +6,6 @@ import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from typing import Any
-from urllib.parse import quote
 
 # Only issues with this label are considered by this workflow
 TARGET_LABEL: str = "needs-info"
@@ -149,6 +148,32 @@ def get_gh_issue_events(repo: str, issue_number: int) -> list[dict[str, Any]]:
         page += 1
 
 
+def close_gh_issue(repo: str, issue_number: int, reason: str) -> None:
+    run_gh_json(
+        [
+            "--method",
+            "PATCH",
+            f"repos/{repo}/issues/{issue_number}",
+            "--input",
+            "-",
+        ],
+        input_value={"state": "closed", "state_reason": reason},
+    )
+
+
+def post_gh_comment(repo: str, issue_number: int, body: str) -> None:
+    run_gh_json(
+        [
+            "--method",
+            "POST",
+            f"repos/{repo}/issues/{issue_number}/comments",
+            "--input",
+            "-",
+        ],
+        input_value={"body": body},
+    )
+
+
 def parse_timestamp(value: Any) -> datetime | None:
     if not isinstance(value, str) or not value:
         return None
@@ -159,33 +184,6 @@ def parse_timestamp(value: Any) -> datetime | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
-
-
-def latest_label_applied_at(events: list[dict[str, Any]]) -> datetime | None:
-    """Return the most recent time the given label was applied to an issue.
-
-    Ignores non-label timeline events, malformed label payloads, labels with a
-    different name, and events whose timestamps cannot be parsed.
-    """
-    latest: datetime | None = None
-
-    for event in events:
-        if event.get("event") != "labeled":
-            continue
-
-        event_label = event.get("label")
-        if not isinstance(event_label, dict):
-            continue
-
-        name = event_label.get("name")
-        if not isinstance(name, str) or name.casefold() != TARGET_LABEL:
-            continue
-
-        applied_time = parse_timestamp(event.get("created_at"))
-        if applied_time is not None and (latest is None or applied_time > latest):
-            latest = applied_time
-
-    return latest
 
 
 def is_generated_close_comment(event: dict[str, Any]) -> bool:
@@ -227,30 +225,31 @@ def latest_comment_at(events: list[dict[str, Any]]) -> datetime | None:
     return latest
 
 
-def close_gh_issue(repo: str, issue_number: int, reason: str) -> None:
-    run_gh_json(
-        [
-            "--method",
-            "PATCH",
-            f"repos/{repo}/issues/{issue_number}",
-            "--input",
-            "-",
-        ],
-        input_value={"state": "closed", "state_reason": reason},
-    )
+def latest_label_applied_at(events: list[dict[str, Any]]) -> datetime | None:
+    """Return the most recent time the given label was applied to an issue.
 
+    Ignores non-label timeline events, malformed label payloads, labels with a
+    different name, and events whose timestamps cannot be parsed.
+    """
+    latest: datetime | None = None
 
-def post_gh_comment(repo: str, issue_number: int, body: str) -> None:
-    run_gh_json(
-        [
-            "--method",
-            "POST",
-            f"repos/{repo}/issues/{issue_number}/comments",
-            "--input",
-            "-",
-        ],
-        input_value={"body": body},
-    )
+    for event in events:
+        if event.get("event") != "labeled":
+            continue
+
+        event_label = event.get("label")
+        if not isinstance(event_label, dict):
+            continue
+
+        name = event_label.get("name")
+        if not isinstance(name, str) or name.casefold() != TARGET_LABEL:
+            continue
+
+        applied_time = parse_timestamp(event.get("created_at"))
+        if applied_time is not None and (latest is None or applied_time > latest):
+            latest = applied_time
+
+    return latest
 
 
 def run() -> None:
@@ -260,7 +259,8 @@ def run() -> None:
     comment = close_comment(days)
 
     now = datetime.now(timezone.utc)
-    cutoff = timedelta(days=days)
+    # cutoff = timedelta(days=days)
+    cutoff = timedelta(minutes=1)
 
     issues = get_gh_open_issues(repo)
     print(f"Found {len(issues)} open issue(s) labeled '{TARGET_LABEL}' in {repo}.")
