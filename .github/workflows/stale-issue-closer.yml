@@ -1,6 +1,14 @@
 name: Stale Issue Closer
 
 on:
+  schedule:
+    # GitHub can delay scheduled workflows, and may drop queued runs during high-load periods.
+    # Avoid scheduling at the top of the hour to reduce that risk:
+    # https://docs.github.com/actions/using-workflows/events-that-trigger-workflows#schedule
+    # Run every day at 12:37 UTC.
+    # - cron: "37 12 * * *"
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
   workflow_call:
     inputs:
       days-until-close:
@@ -29,11 +37,11 @@ jobs:
       issues: write
 
     steps:
-      # Load only the trusted toolkit from the immutable workflow revision.
-      # The caller repository is never checked out.
       - name: Check out stale issue closer toolkit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # Use job.workflow_* so reusable calls fetch this workflow repo's
+          # script, not caller-owned code.
           repository: ${{ job.workflow_repository }}
           ref: ${{ job.workflow_sha }}
           sparse-checkout: scripts/close_stale_issues.py
@@ -44,6 +52,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
-          STALE_DAYS_UNTIL_CLOSE: ${{ inputs.days-until-close }}
-          STALE_CLOSE_REASON: ${{ inputs.close-reason }}
+          # Stringify the numeric input before defaulting so an explicit 0 is
+          # not evaluated as falsy and is rejected by script validation instead of becoming 14.
+          STALE_DAYS_UNTIL_CLOSE: ${{ format('{0}', inputs['days-until-close']) || '14' }}
+          STALE_CLOSE_REASON: ${{ inputs['close-reason'] || 'not_planned' }}
         run: python3 scripts/close_stale_issues.py

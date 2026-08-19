@@ -1,8 +1,9 @@
 # Stale issue closer
 
 The reusable stale-issue-closer workflow closes issues that are waiting on a
-response. It targets open issues carrying the `needs-info` label and closes any
-that have gone without a reply for a configured number of days (14 by default).
+response. It targets open issues carrying the `needs-info` label, removes that
+label when a response has arrived, and closes any issue that has gone without a
+reply for a configured number of days (14 by default).
 
 ## Behavior
 
@@ -11,12 +12,14 @@ For each open issue that carries `needs-info`, the workflow:
 1. Reads the issue timeline and finds the most recent time `needs-info` was
    applied. This timestamp starts the response window.
 2. Finds the most recent non-generated comment on the issue. Any human or
-   integration comment resets the window, regardless of who wrote it — a reply
-   from the reporter or a maintainer both count as a response.
-3. Computes the effective last activity as the later of the label time and the
-   most recent comment time. If that is at least `days-until-close` days ago,
-   the workflow posts or reuses the generated closing comment and closes the
-   issue.
+   integration comment after the latest `needs-info` application counts as a
+   response, regardless of who wrote it — a reply from the reporter or a
+   maintainer both clear the label.
+3. Removes `needs-info` and skips closing when a response was received after
+   the label was applied.
+4. If no response was received and the label has been present for at least
+   `days-until-close` days, the workflow posts or reuses the generated closing
+   comment and closes the issue.
 
 Issues still inside the window are left untouched. Pull requests are ignored.
 
@@ -25,10 +28,10 @@ be retried without posting a duplicate comment. The marker is trusted only on
 comments authored by the GitHub Actions bot; copied marker text in any other
 comment still counts as a response. Marked bot comments are reused only when
 they were posted after the latest non-generated activity or label application,
-so older generated comments do not suppress a new stale closures on the same issue.
+so older generated comments do not suppress a new stale closure on the same issue.
 
-Removing the label (for example, once the reporter responds and a maintainer
-acts on it) takes the issue out of scope on the next run.
+Removing the label takes the issue out of scope on the next run; the workflow does this automatically once it detects a response after `needs-info` was
+applied.
 
 ## Usage
 

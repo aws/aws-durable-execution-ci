@@ -72,7 +72,7 @@ def close_comment(days: int) -> str:
     )
 
 
-def run_gh_json(
+def gh_run_json(
     arguments: list[str], *, input_value: Any | None = None
 ) -> Any:
     """Run `gh api` with optional JSON input and return parsed JSON output.
@@ -105,11 +105,11 @@ def run_gh_json(
         raise StaleIssueError("GitHub API returned invalid JSON") from error
 
 
-def get_gh_open_issues(repo: str) -> list[dict[str, Any]]:
+def gh_get_open_issues(repo: str) -> list[dict[str, Any]]:
     issues: list[dict[str, Any]] = []
     page = 1
     while True:
-        response = run_gh_json(
+        response = gh_run_json(
             [
                 f"repos/{repo}/issues"
                 f"?state=open&labels={TARGET_LABEL}"
@@ -128,11 +128,11 @@ def get_gh_open_issues(repo: str) -> list[dict[str, Any]]:
         page += 1
 
 
-def get_gh_issue_events(repo: str, issue_number: int) -> list[dict[str, Any]]:
+def gh_get_issue_events(repo: str, issue_number: int) -> list[dict[str, Any]]:
     events: list[dict[str, Any]] = []
     page = 1
     while True:
-        response = run_gh_json(
+        response = gh_run_json(
             [
                 f"repos/{repo}/issues/{issue_number}/timeline"
                 f"?per_page={GITHUB_PAGE_SIZE}&page={page}"
@@ -148,8 +148,8 @@ def get_gh_issue_events(repo: str, issue_number: int) -> list[dict[str, Any]]:
         page += 1
 
 
-def close_gh_issue(repo: str, issue_number: int, reason: str) -> None:
-    run_gh_json(
+def gh_close_issue(repo: str, issue_number: int, reason: str) -> None:
+    gh_run_json(
         [
             "--method",
             "PATCH",
@@ -161,8 +161,8 @@ def close_gh_issue(repo: str, issue_number: int, reason: str) -> None:
     )
 
 
-def post_gh_comment(repo: str, issue_number: int, body: str) -> None:
-    run_gh_json(
+def gh_post_comment(repo: str, issue_number: int, body: str) -> None:
+    gh_run_json(
         [
             "--method",
             "POST",
@@ -171,6 +171,16 @@ def post_gh_comment(repo: str, issue_number: int, body: str) -> None:
             "-",
         ],
         input_value={"body": body},
+    )
+
+
+def gh_remove_label(repo: str, issue_number: int, label: str) -> None:
+    gh_run_json(
+        [
+            "--method",
+            "DELETE",
+            f"repos/{repo}/issues/{issue_number}/labels/{label}",
+        ]
     )
 
 
@@ -259,9 +269,10 @@ def run() -> None:
     comment = close_comment(days)
 
     now = datetime.now(timezone.utc)
-    cutoff = timedelta(days=days)
+    # cutoff = timedelta(days=days)
+    cutoff = timedelta(minutes=1)
 
-    issues = get_gh_open_issues(repo)
+    issues = gh_get_open_issues(repo)
     print(f"Found {len(issues)} open issue(s) labeled '{TARGET_LABEL}' in {repo}.")
 
     closed = 0
@@ -270,18 +281,22 @@ def run() -> None:
         if not isinstance(number, int):
             continue
 
-        events = get_gh_issue_events(repo, number)
+        events = gh_get_issue_events(repo, number)
         label_applied_time = latest_label_applied_at(events)
         if label_applied_time is None:
             print(f"#{number}: no '{TARGET_LABEL}' labeled event found.")
             continue
 
         commented_time = latest_comment_at(events)
-        last_activity_time = label_applied_time
-        if commented_time is not None:
-            last_activity_time = max(label_applied_time, commented_time)
-        age = now - last_activity_time
+        if commented_time is not None and commented_time > label_applied_time:
+            gh_remove_label(repo, number, TARGET_LABEL)
+            print(
+                f"#{number}: response received after '{TARGET_LABEL}' "
+                "was applied; label removed."
+            )
+            continue
 
+        age = now - label_applied_time
         if age < cutoff:
             remaining = cutoff - age
             print(
@@ -290,9 +305,9 @@ def run() -> None:
             )
             continue
 
-        if not has_generated_close_comment_after(events, last_activity_time):
-            post_gh_comment(repo, number, comment)
-        close_gh_issue(repo, number, reason)
+        if not has_generated_close_comment_after(events, label_applied_time):
+            gh_post_comment(repo, number, comment)
+        gh_close_issue(repo, number, reason)
         print(f"#{number}: closed ({age.days}d without response).")
         closed += 1
 

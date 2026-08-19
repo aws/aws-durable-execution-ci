@@ -91,6 +91,7 @@ class FakeGitHub:
         self.patch_failures: set[int] = patch_failures or set()
         self.comments: list[tuple[int, JsonObject]] = []
         self.closed_issues: list[tuple[int, JsonObject]] = []
+        self.removed_labels: list[tuple[int, str]] = []
 
     def __call__(
         self, arguments: list[str], *, input_value: JsonObject | None = None
@@ -103,6 +104,11 @@ class FakeGitHub:
                 assert input_value is not None
                 self.comments.append((number, input_value))
                 return {}
+            if method == "DELETE" and endpoint.endswith(
+                f"/labels/{CLOSER.TARGET_LABEL}"
+            ):
+                self.removed_labels.append((number, CLOSER.TARGET_LABEL))
+                return []
             if method == "PATCH":
                 assert input_value is not None
                 if number in self.patch_failures:
@@ -126,7 +132,7 @@ def run_fake(
 ) -> FakeGitHub:
     env: EnvOverrides = {**DEFAULT_ENV, **(env_overrides or {})}
     with patch.dict(CLOSER.os.environ, env, clear=True), patch.object(
-        CLOSER, "run_gh_json", fake
+        CLOSER, "gh_run_json", fake
     ):
         CLOSER.run()
     return fake
@@ -154,13 +160,14 @@ class StaleClosingTest(unittest.TestCase):
         )
         self.assertIn(CLOSER.CLOSE_COMMENT_MARKER, fake.comments[0][1]["body"])
 
-    def test_comment_after_label_resets_clock(self) -> None:
+    def test_comment_after_label_removes_label(self) -> None:
         fake = run_with(
             [{"number": 7}],
             {7: [labeled(days_ago=20), commented(days_ago=2)]},
         )
         self.assertEqual(fake.closed_issues, [])
         self.assertEqual(fake.comments, [])
+        self.assertEqual(fake.removed_labels, [(7, "needs-info")])
 
     def test_old_comment_before_label_does_not_reset(self) -> None:
         fake = run_with(
@@ -168,6 +175,7 @@ class StaleClosingTest(unittest.TestCase):
             {7: [commented(days_ago=40), labeled(days_ago=20)]},
         )
         self.assertEqual([n for n, _ in fake.closed_issues], [7])
+        self.assertEqual(fake.removed_labels, [])
 
     def test_within_window_is_skipped(self) -> None:
         fake = run_with(
@@ -199,6 +207,22 @@ class StaleClosingTest(unittest.TestCase):
             {7: [labeled(days_ago=30), labeled(days_ago=3)]},
         )
         self.assertEqual(fake.closed_issues, [])
+        self.assertEqual(fake.removed_labels, [])
+
+    def test_comment_before_latest_label_does_not_remove_label(self) -> None:
+        fake = run_with(
+            [{"number": 7}],
+            {
+                7: [
+                    labeled(days_ago=30),
+                    commented(days_ago=20),
+                    labeled(days_ago=3),
+                ]
+            },
+        )
+        self.assertEqual(fake.closed_issues, [])
+        self.assertEqual(fake.comments, [])
+        self.assertEqual(fake.removed_labels, [])
 
     def test_custom_close_reason(self) -> None:
         fake = run_with(
@@ -242,8 +266,9 @@ class StaleClosingTest(unittest.TestCase):
         )
         self.assertEqual([n for n, _ in fake.closed_issues], [7])
         self.assertEqual(fake.comments, [])
+        self.assertEqual(fake.removed_labels, [])
 
-    def test_marked_non_bot_comment_after_label_resets_clock(self) -> None:
+    def test_marked_non_bot_comment_after_label_removes_label(self) -> None:
         fake = run_with(
             [{"number": 7}],
             {
@@ -255,6 +280,7 @@ class StaleClosingTest(unittest.TestCase):
         )
         self.assertEqual(fake.closed_issues, [])
         self.assertEqual(fake.comments, [])
+        self.assertEqual(fake.removed_labels, [(7, "needs-info")])
 
     def test_marked_non_bot_comment_does_not_suppress_close_notice(self) -> None:
         fake = run_with(
@@ -262,26 +288,30 @@ class StaleClosingTest(unittest.TestCase):
             {
                 7: [
                     labeled(days_ago=40),
-                    commented(days_ago=20, body=CLOSER.close_comment(14)),
+                    commented(days_ago=30, body=CLOSER.close_comment(14)),
+                    labeled(days_ago=20),
                 ]
             },
         )
         self.assertEqual([n for n, _ in fake.closed_issues], [7])
         self.assertEqual([n for n, _ in fake.comments], [7])
+        self.assertEqual(fake.removed_labels, [])
 
-    def test_old_generated_close_comment_before_response_is_not_reused(self) -> None:
+    def test_old_generated_close_comment_before_latest_label_is_not_reused(self) -> None:
         fake = run_with(
             [{"number": 7}],
             {
                 7: [
                     labeled(days_ago=40),
-                    generated_close_comment(days_ago=25),
-                    commented(days_ago=20),
+                    generated_close_comment(days_ago=35),
+                    commented(days_ago=30),
+                    labeled(days_ago=20),
                 ]
             },
         )
         self.assertEqual([n for n, _ in fake.closed_issues], [7])
         self.assertEqual([n for n, _ in fake.comments], [7])
+        self.assertEqual(fake.removed_labels, [])
 
     def test_malformed_generated_close_comment_timestamp_is_not_reused(self) -> None:
         fake = run_with(
