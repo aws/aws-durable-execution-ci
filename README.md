@@ -7,6 +7,7 @@ Shared GitHub Actions workflows for AWS Durable Execution repositories.
 - [AI pull request review](docs/ai-pr-review.md): Runs independent Claude and Codex reviews through Amazon Bedrock.
 - [Slack notifications](docs/slack-notifications.md): Sends notifications for pull request, issue, discussion, and release events.
 - [Issue triage](docs/issue-triage.md): Uses AI to classify new issues with existing repository labels.
+- [Stale issue closer](docs/stale-issue-closer.md): Closes `needs-info` issues after 14 days without a response.
 
 ## Security
 
