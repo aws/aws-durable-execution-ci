@@ -10,14 +10,22 @@ For each open issue that carries `needs-info`, the workflow:
 
 1. Reads the issue timeline and finds the most recent time `needs-info` was
    applied. This timestamp starts the response window.
-2. Finds the most recent comment on the issue. **Any** comment resets the
-   window, regardless of who wrote it — a reply from the reporter or a
-   maintainer both count as a response.
+2. Finds the most recent non-generated comment on the issue. Any human or
+   integration comment resets the window, regardless of who wrote it — a reply
+   from the reporter or a maintainer both count as a response.
 3. Computes the effective last activity as the later of the label time and the
    most recent comment time. If that is at least `days-until-close` days ago,
-   the workflow posts the closing comment and closes the issue.
+   the workflow posts or reuses the generated closing comment and closes the
+   issue.
 
 Issues still inside the window are left untouched. Pull requests are ignored.
+
+Generated close comments include a hidden marker so a failed close attempt can
+be retried without posting a duplicate comment. The marker is trusted only on
+comments authored by the GitHub Actions bot; copied marker text in any other
+comment still counts as a response. Marked bot comments are reused only when
+they were posted after the latest non-generated activity or label application,
+so older generated comments do not suppress a new stale closures on the same issue.
 
 Removing the label (for example, once the reporter responds and a maintainer
 acts on it) takes the issue out of scope on the next run.
