@@ -259,8 +259,7 @@ def run() -> None:
     comment = close_comment(days)
 
     now = datetime.now(timezone.utc)
-    # cutoff = timedelta(days=days)
-    cutoff = timedelta(minutes=1)
+    cutoff = timedelta(days=days)
 
     issues = get_gh_open_issues(repo)
     print(f"Found {len(issues)} open issue(s) labeled '{TARGET_LABEL}' in {repo}.")

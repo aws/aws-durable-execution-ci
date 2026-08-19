@@ -5,8 +5,7 @@ on:
     # GitHub can delay scheduled workflows, and may drop queued runs during high-load periods. 
     # Avoid scheduling at the top of the hour to reduce that risk: https://docs.github.com/actions/using-workflows/events-that-trigger-workflows#schedule
     # Run everyday at 12:37.
-    # - cron: "37 12 * * *"
-    - cron: "*/5 * * * *"
+    - cron: "37 12 * * *"
   workflow_dispatch:
 
 permissions: {}
@@ -16,8 +15,7 @@ jobs:
     permissions:
       contents: read
       issues: write
-    # uses: aws/aws-durable-execution-ci/.github/workflows/stale-issue-closer.yml@main
-    uses: hln33/aws-durable-execution-ci/.github/workflows/stale-issue-closer.yml@main
+    uses: aws/aws-durable-execution-ci/.github/workflows/stale-issue-closer.yml@main
     with:
       days-until-close: 14
       close-reason: not_planned
