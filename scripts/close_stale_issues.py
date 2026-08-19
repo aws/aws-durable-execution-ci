@@ -13,7 +13,8 @@ TARGET_LABEL: str = "needs-info"
 
 CLOSE_REASONS = frozenset({"completed", "not_planned", "duplicate"})
 GITHUB_PAGE_SIZE = 100
-
+CLOSE_COMMENT_MARKER = "<!-- aws-durable-execution-ci:stale-close-comment -->"
+GENERATED_CLOSE_COMMENT_AUTHOR = "github-actions[bot]"
 
 
 class StaleIssueError(ValueError):
@@ -64,6 +65,7 @@ def close_reason() -> str:
 def close_comment(days: int) -> str:
     day_label = "day" if days == 1 else "days"
     return (
+        f"{CLOSE_COMMENT_MARKER}\n\n"
         "This issue has been automatically closed because it was labeled "
         f"`{TARGET_LABEL}` and has not received a response in "
         f"{days} {day_label}. If you still need help, please comment with "
@@ -104,18 +106,6 @@ def run_gh_json(
         raise StaleIssueError("GitHub API returned invalid JSON") from error
 
 
-def parse_timestamp(value: Any) -> datetime | None:
-    if not isinstance(value, str) or not value:
-        return None
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
-
-
 def get_gh_open_issues(repo: str) -> list[dict[str, Any]]:
     issues: list[dict[str, Any]] = []
     page = 1
@@ -129,7 +119,7 @@ def get_gh_open_issues(repo: str) -> list[dict[str, Any]]:
         )
         if not isinstance(response, list):
             raise StaleIssueError("GitHub returned an invalid issue list")
-        
+
         for issue in response:
             if isinstance(issue, dict) and "pull_request" not in issue:
                 issues.append(issue)
@@ -159,6 +149,18 @@ def get_gh_issue_events(repo: str, issue_number: int) -> list[dict[str, Any]]:
         page += 1
 
 
+def parse_timestamp(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
 def latest_label_applied_at(events: list[dict[str, Any]]) -> datetime | None:
     """Return the most recent time the given label was applied to an issue.
 
@@ -186,10 +188,38 @@ def latest_label_applied_at(events: list[dict[str, Any]]) -> datetime | None:
     return latest
 
 
+def is_generated_close_comment(event: dict[str, Any]) -> bool:
+    body = event.get("body")
+    if not isinstance(body, str) or CLOSE_COMMENT_MARKER not in body:
+        return False
+
+    actor = event.get("actor")
+    if not isinstance(actor, dict):
+        return False
+
+    return actor.get("login") == GENERATED_CLOSE_COMMENT_AUTHOR
+
+
+def has_generated_close_comment_after(
+    events: list[dict[str, Any]], since: datetime
+) -> bool:
+    for event in events:
+        if event.get("event") != "commented":
+            continue
+        if not is_generated_close_comment(event):
+            continue
+        commented = parse_timestamp(event.get("created_at"))
+        if commented is not None and commented > since:
+            return True
+    return False
+
+
 def latest_comment_at(events: list[dict[str, Any]]) -> datetime | None:
     latest: datetime | None = None
     for event in events:
         if event.get("event") != "commented":
+            continue
+        if is_generated_close_comment(event):
             continue
         commented = parse_timestamp(event.get("created_at"))
         if commented is not None and (latest is None or commented > latest):
@@ -261,7 +291,8 @@ def run() -> None:
             )
             continue
 
-        post_gh_comment(repo, number, comment)
+        if not has_generated_close_comment_after(events, last_activity_time):
+            post_gh_comment(repo, number, comment)
         close_gh_issue(repo, number, reason)
         print(f"#{number}: closed ({age.days}d without response).")
         closed += 1
