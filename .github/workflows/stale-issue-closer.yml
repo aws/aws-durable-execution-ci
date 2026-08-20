@@ -6,8 +6,7 @@ on:
     # Avoid scheduling at the top of the hour to reduce that risk:
     # https://docs.github.com/actions/using-workflows/events-that-trigger-workflows#schedule
     # Run every day at 12:37 UTC.
-    # - cron: "37 12 * * *"
-    - cron: "*/5 * * * *"
+    - cron: "37 12 * * *"
   workflow_dispatch:
   workflow_call:
     inputs:
