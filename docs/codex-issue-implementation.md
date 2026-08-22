@@ -113,7 +113,9 @@ Pass optional inputs from the caller job:
   changes `.github/workflows/**` is rejected before publication.
 
 Label matching follows GitHub's case-insensitive behavior. Existing labels can
-therefore use different casing from the configured values.
+therefore use different casing from the configured values. Automation label
+names must not contain commas because scheduled discovery uses GitHub's
+comma-separated label filter.
 
 The schedule in the caller controls run frequency. Scheduled and manual
 discovery scans the oldest open eligible issues until it finds up to

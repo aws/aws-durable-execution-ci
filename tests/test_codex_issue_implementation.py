@@ -312,6 +312,18 @@ class EventSelectionTest(unittest.TestCase):
             ):
                 IMPLEMENTATION.automation_labels()
 
+    def test_automation_labels_reject_commas(self):
+        with patch.dict(
+            os.environ,
+            environment(IMPLEMENTATION_LABEL="automation,implement"),
+            clear=True,
+        ):
+            with self.assertRaisesRegex(
+                IMPLEMENTATION.ImplementationError,
+                "without commas",
+            ):
+                IMPLEMENTATION.automation_labels()
+
     def test_discovery_is_bounded_by_configuration(self):
         with patch.dict(
             os.environ,
@@ -1675,7 +1687,14 @@ class ValidationPolicyTest(unittest.TestCase):
         validation_pattern = SCHEMA["properties"]["validation"]["items"][
             "pattern"
         ]
-        for candidate in ("", "   ", "line one\nline two", "bad\u0007text"):
+        for candidate in (
+            "",
+            "   ",
+            "line one\nline two",
+            "line one\u2028line two",
+            "line one\u2029line two",
+            "bad\u0007text",
+        ):
             with self.subTest(candidate=repr(candidate)):
                 self.assertIsNone(re.fullmatch(summary_pattern, candidate))
                 self.assertIsNone(re.fullmatch(validation_pattern, candidate))
@@ -1847,6 +1866,139 @@ class ValidationPolicyTest(unittest.TestCase):
             IMPLEMENTATION.prepared_issue_semantic_snapshot(prepared)
         )
         self.assertIn(f"snapshot={semantic_digest}", comments[0]["body"])
+
+    def test_no_pr_rechecks_default_branch_before_comment(self):
+        state = {
+            "repository": "aws/example",
+            "implementation_label": "codex:implement",
+            "no_pr_label": "codex:no-pr",
+            "publication_actor": "publisher[bot]",
+            "issue": IMPLEMENTATION.issue_snapshot(issue()),
+            "linked_pull_requests": [],
+            "branch": "implement-issue-31",
+            "target": {
+                "ref": "main",
+                "sha": "a" * 40,
+            },
+        }
+        result = {
+            "outcome": "no_change",
+            "summary": "No pull request is required.",
+            "validation": [],
+        }
+        with patch.object(
+            IMPLEMENTATION,
+            "require_current_issue",
+        ), patch.object(
+            IMPLEMENTATION,
+            "require_linked_pull_requests",
+        ), patch.object(
+            IMPLEMENTATION,
+            "require_default_branch_unchanged",
+            side_effect=[
+                None,
+                IMPLEMENTATION.ImplementationError(
+                    "default branch head changed during the run"
+                ),
+            ],
+        ) as require_default, patch.object(
+            IMPLEMENTATION,
+            "ensure_label",
+        ), patch.object(
+            IMPLEMENTATION,
+            "require_current_issue_semantics",
+        ), patch.object(
+            IMPLEMENTATION,
+            "linked_open_pull_requests",
+            return_value=[],
+        ), patch.object(
+            IMPLEMENTATION,
+            "post_issue_comment_once",
+        ) as post_comment, patch.object(
+            IMPLEMENTATION,
+            "add_issue_label",
+        ) as add_label:
+            with self.assertRaisesRegex(
+                IMPLEMENTATION.ImplementationError,
+                "default branch head changed",
+            ):
+                IMPLEMENTATION.publish_implementation(
+                    state,
+                    result,
+                    Path("/change.patch"),
+                    Path("/workspace"),
+                )
+
+        self.assertEqual(require_default.call_count, 2)
+        post_comment.assert_not_called()
+        add_label.assert_not_called()
+
+    def test_no_pr_rechecks_default_branch_before_label(self):
+        state = {
+            "repository": "aws/example",
+            "implementation_label": "codex:implement",
+            "no_pr_label": "codex:no-pr",
+            "publication_actor": "publisher[bot]",
+            "issue": IMPLEMENTATION.issue_snapshot(issue()),
+            "linked_pull_requests": [],
+            "branch": "implement-issue-31",
+            "target": {
+                "ref": "main",
+                "sha": "a" * 40,
+            },
+        }
+        result = {
+            "outcome": "no_change",
+            "summary": "No pull request is required.",
+            "validation": [],
+        }
+        with patch.object(
+            IMPLEMENTATION,
+            "require_current_issue",
+        ), patch.object(
+            IMPLEMENTATION,
+            "require_linked_pull_requests",
+        ), patch.object(
+            IMPLEMENTATION,
+            "require_default_branch_unchanged",
+            side_effect=[
+                None,
+                None,
+                IMPLEMENTATION.ImplementationError(
+                    "default branch head changed during the run"
+                ),
+            ],
+        ) as require_default, patch.object(
+            IMPLEMENTATION,
+            "ensure_label",
+        ), patch.object(
+            IMPLEMENTATION,
+            "require_current_issue_semantics",
+        ), patch.object(
+            IMPLEMENTATION,
+            "linked_open_pull_requests",
+            return_value=[],
+        ), patch.object(
+            IMPLEMENTATION,
+            "post_issue_comment_once",
+        ) as post_comment, patch.object(
+            IMPLEMENTATION,
+            "add_issue_label",
+        ) as add_label:
+            with self.assertRaisesRegex(
+                IMPLEMENTATION.ImplementationError,
+                "default branch head changed",
+            ):
+                IMPLEMENTATION.publish_implementation(
+                    state,
+                    result,
+                    Path("/change.patch"),
+                    Path("/workspace"),
+                )
+
+        self.assertEqual(require_default.call_count, 3)
+        post_comment.assert_called_once()
+        add_label.assert_not_called()
 
     def test_default_branch_designation_change_invalidates_prepared_state(self):
         state = {

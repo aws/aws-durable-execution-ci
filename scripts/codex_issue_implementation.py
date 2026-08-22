@@ -78,9 +78,14 @@ def positive_integer(value: str, description: str) -> int:
 
 def configured_label(name: str, default: str) -> str:
     value = os.environ.get(name, "").strip() or default
-    if not 1 <= len(value) <= 50 or "\n" in value:
+    if (
+        not 1 <= len(value) <= 50
+        or "\n" in value
+        or "," in value
+    ):
         raise ImplementationError(
-            f"{name} must be a single label name up to 50 characters"
+            f"{name} must be a single label name without commas "
+            "up to 50 characters"
         )
     return value
 
@@ -1168,7 +1173,9 @@ def valid_model_text(value: Any, maximum: int) -> bool:
         and bool(value.strip())
         and len(value) <= maximum
         and not any(
-            ord(character) < 0x20 or 0x7F <= ord(character) <= 0x9F
+            ord(character) < 0x20
+            or 0x7F <= ord(character) <= 0x9F
+            or character in ("\u2028", "\u2029")
             for character in value
         )
     )
@@ -2245,6 +2252,7 @@ def publish_implementation(
             f"<!-- codex-no-pr issue={issue_number} "
             f"snapshot={snapshot_digest} -->"
         )
+        require_default_branch_unchanged(state)
         post_issue_comment_once(
             state["repository"],
             issue_number,
@@ -2260,6 +2268,7 @@ def publish_implementation(
             raise ImplementationError(
                 "issue state changed before no-PR label publication"
             )
+        require_default_branch_unchanged(state)
         add_issue_label(state["repository"], issue_number, label)
         return
 
