@@ -1,12 +1,17 @@
 # Codex issue implementation
 
-The reusable Codex issue implementation workflow reconciles explicitly labeled
-issues into draft pull requests. Independently of issue labels or issue
-linkage, it also updates an existing pull request when an authorized maintainer
-marks a review thread with:
+The reusable Codex issue implementation workflow reconciles open issues into
+draft pull requests when an authorized maintainer comments:
 
 ```text
-/codex address
+/ai implement
+```
+
+Independently of issue linkage, it also updates an existing pull request when
+an authorized maintainer marks a review thread with:
+
+```text
+/ai address
 ```
 
 The immediate event triggers and daily schedule belong in each consuming
@@ -23,8 +28,8 @@ repository:
 name: Codex Issue Implementation
 
 on:
-  issues:
-    types: [labeled]
+  issue_comment:
+    types: [created]
   pull_request_review_comment:
     types: [created]
   schedule:
@@ -32,7 +37,7 @@ on:
   workflow_dispatch:
     inputs:
       issue-number:
-        description: Optional eligible issue number to reconcile
+        description: Optional authorized issue number to reconcile
         required: false
         type: string
         default: ""
@@ -57,20 +62,23 @@ ensures that the workflow, trusted prompt, schema, and publication policy come
 from one immutable revision.
 
 The caller must declare every event it wants to support. A reusable workflow
-does not add its own `issues`, review-comment, schedule, or manual triggers to
-the caller.
+does not add its own issue-comment, review-comment, schedule, or manual
+triggers to the caller.
 
 ## Repository setup
 
-Create the `codex:implement` label before enabling the workflow. Applying that
-label to an open issue starts reconciliation immediately. The daily schedule
-recovers missed events, failed runs, and branches pushed before pull request
-creation completed.
+Post `/ai implement` as a standalone comment on an open issue. The trimmed
+body must exactly match the command. The author must currently have `write`,
+`maintain`, or `admin` repository permission and must not be a bot. The daily
+schedule recovers missed events, failed runs, and branches pushed before pull
+request creation completed by finding open issues with an authorized command.
+Implementation labels are not inspected; applying `codex:implement` alone does
+not start work. Command variants and emoji reactions do not start work.
 
-The implementation label is not required for `/codex address`. That command is
-scoped directly to the pull request containing the command; it does not require
-that pull request to close or reference an issue and never creates a new
-implementation branch or pull request.
+`/ai address` is scoped directly to the pull request review thread
+containing the command. It does not require that pull request to close or
+reference an issue and never creates a new implementation branch or pull
+request.
 
 Create an `ai-pr-review-runtime` environment with this secret:
 
@@ -103,7 +111,6 @@ Pass optional inputs from the caller job:
 
 ```yaml
     with:
-      implementation-label: automation:implement
       no-pr-label: automation:no-pr
       max-issues: 5
       model: openai.gpt-5.6-sol
@@ -111,7 +118,6 @@ Pass optional inputs from the caller job:
       allow-workflow-changes: false
 ```
 
-- `implementation-label` defaults to `codex:implement`.
 - `no-pr-label` defaults to `codex:no-pr`.
 - `max-issues` defaults to 3 and is limited to 10 per discovery run.
 - `model` defaults to `openai.gpt-5.6-sol`.
@@ -119,19 +125,17 @@ Pass optional inputs from the caller job:
 - `allow-workflow-changes` defaults to `false`. When false, a model result that
   changes `.github/workflows/**` is rejected before publication.
 
-Label matching follows GitHub's case-insensitive behavior. Existing labels can
-therefore use different casing from the configured values. Automation label
-names must not contain commas because scheduled discovery uses GitHub's
-comma-separated label filter.
+The configured no-PR label follows GitHub's case-insensitive label behavior.
 
 The schedule in the caller controls run frequency. Scheduled and manual
-discovery scans the oldest open eligible issues until it finds up to
-`max-issues` issues with pending reconciliation work. Issues whose linked pull
-request has no unprocessed review marker do not consume the limit. Blocked or
-ambiguous issues consume a slot until their current state is reported; later
-discovery runs skip the same actor-authored notification marker and continue
-scanning. A manual run can pass `issue-number` to reconcile one eligible issue
-directly.
+discovery scans the oldest open issues until it finds up to `max-issues` issues
+with an authorized `/ai implement` command and pending reconciliation work.
+Issues whose linked pull request has no unprocessed review marker do not
+consume the limit. Blocked or ambiguous issues consume a slot until their
+current state is reported; later discovery runs skip the same actor-authored
+notification marker and continue scanning. A manual run can pass
+`issue-number` to reconcile one issue directly, but the worker still requires
+an authorized implementation command.
 
 ## Issue and pull request behavior
 
@@ -167,11 +171,11 @@ open or closed pull request has already used that branch, so closing a
 generated draft and deleting its branch does not cause a replacement or orphan
 branch. An unrelated branch with the deterministic name is not overwritten.
 
-With exactly one linked open pull request, labeled issue reconciliation
-requires that pull request to close exactly that one open, eligible issue.
+With exactly one linked open pull request, issue-scoped reconciliation requires
+that pull request to close exactly that one open issue.
 Review-command runs are scoped directly to the pull request containing the
-command and do not inspect closing issue references or issue labels. The pull
-request snapshot is persisted and revalidated before pushes and
+command and do not inspect closing issue references. The pull request snapshot
+is persisted and revalidated before pushes and
 acknowledgements. The head branch must be in the current repository; fork
 branches are never updated. The workflow checks out the exact head SHA, applies
 all currently unprocessed marked feedback in one reconciliation, and pushes
@@ -183,7 +187,7 @@ ambiguity.
 
 ## Review marker
 
-Post `/codex address` as a reply in the relevant pull request review thread.
+Post `/ai address` as a reply in the relevant pull request review thread.
 The trimmed body must exactly match that command. General comments, unmarked
 review comments, command variants, and reactions do not start work.
 
@@ -209,7 +213,9 @@ The worker treats every run as reconciliation. It aborts publication when any
 of these change after model execution:
 
 - issue identity, body, state, or labels for issue-scoped work;
-- linked pull request count, identity, and issue ownership for labeled work;
+- the selected `/ai implement` comment or its author's current permission;
+- linked pull request count, identity, and issue ownership for issue-scoped
+  work;
 - the exact pull request identity, refs, and head SHA for review commands;
 - default branch designation or SHA, or pull request head SHA;
 - unprocessed authorized review markers;
@@ -226,8 +232,8 @@ explanation instead of opening a pull request.
 
 ## Security model
 
-Issue titles, bodies, labels, pull request data, diffs, and review threads are
-untrusted model input.
+Issue titles, bodies, labels, comments, pull request data, diffs, and review
+threads are untrusted model input.
 
 The workflow:
 

@@ -1,8 +1,8 @@
 name: Codex Issue Implementation
 
 on:
-  issues:
-    types: [labeled]
+  issue_comment:
+    types: [created]
   pull_request_review_comment:
     types: [created]
   schedule:
@@ -10,15 +10,10 @@ on:
   workflow_dispatch:
     inputs:
       issue-number:
-        description: Optional eligible issue number to reconcile
+        description: Optional authorized issue number to reconcile
         required: false
         type: string
         default: ""
-      implementation-label:
-        description: Label that opts an issue into Codex implementation
-        required: false
-        type: string
-        default: codex:implement
       no-pr-label:
         description: Label applied when no pull request is required
         required: false
@@ -55,15 +50,10 @@ on:
   workflow_call:
     inputs:
       issue-number:
-        description: Optional eligible issue number to reconcile
+        description: Optional authorized issue number to reconcile
         required: false
         type: string
         default: ""
-      implementation-label:
-        description: Label that opts an issue into Codex implementation
-        required: false
-        type: string
-        default: codex:implement
       no-pr-label:
         description: Label applied when no pull request is required
         required: false
@@ -97,7 +87,6 @@ on:
 permissions: {}
 
 env:
-  DEFAULT_IMPLEMENTATION_LABEL: codex:implement
   DEFAULT_NO_PR_LABEL: codex:no-pr
   DEFAULT_MAX_ISSUES: "3"
   DEFAULT_CODEX_MODEL: openai.gpt-5.6-sol
@@ -105,7 +94,7 @@ env:
 
 jobs:
   resolve:
-    name: Resolve eligible issues
+    name: Resolve authorized work
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -144,15 +133,12 @@ jobs:
           fi
           echo "publish_actor=$publish_actor" >> "$GITHUB_OUTPUT"
 
-      - name: Resolve work to issue numbers
+      - name: Resolve work items
         id: resolve
         env:
           CODEX_PUBLISH_ACTOR: >-
             ${{ steps.publisher.outputs.publish_actor }}
           GH_TOKEN: ${{ github.token }}
-          IMPLEMENTATION_LABEL: >-
-            ${{ inputs['implementation-label'] ||
-                env.DEFAULT_IMPLEMENTATION_LABEL }}
           MAX_ISSUES: >-
             ${{ format('{0}', inputs['max-issues']) ||
                 env.DEFAULT_MAX_ISSUES }}
@@ -182,8 +168,6 @@ jobs:
       address-only: ${{ matrix.address_only }}
       work-key: ${{ matrix.work_key }}
       publication-actor: ${{ needs.resolve.outputs.publish_actor }}
-      implementation-label: >-
-        ${{ inputs['implementation-label'] || 'codex:implement' }}
       no-pr-label: >-
         ${{ inputs['no-pr-label'] || 'codex:no-pr' }}
       model: ${{ inputs['model'] || 'openai.gpt-5.6-sol' }}

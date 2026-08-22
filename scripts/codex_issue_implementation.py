@@ -13,7 +13,8 @@ from pathlib import Path
 from typing import Any
 
 
-ADDRESS_COMMAND = "/codex address"
+ADDRESS_COMMAND = "/ai address"
+IMPLEMENT_COMMAND = "/ai implement"
 ACKNOWLEDGEMENT_PATTERN = re.compile(
     r"<!-- codex-addressed command-id=(\d+) commit=([0-9a-f]{40}) -->"
 )
@@ -87,23 +88,11 @@ def boolean_from_environment(name: str, default: bool = False) -> bool:
 
 def configured_label(name: str, default: str) -> str:
     value = os.environ.get(name, "").strip() or default
-    if (
-        not 1 <= len(value) <= 50
-        or "\n" in value
-        or "," in value
-    ):
+    if not 1 <= len(value) <= 50 or "\n" in value:
         raise ImplementationError(
-            f"{name} must be a single label name without commas "
-            "up to 50 characters"
+            f"{name} must be a label name up to 50 characters"
         )
     return value
-
-
-def implementation_label() -> str:
-    return configured_label(
-        "IMPLEMENTATION_LABEL",
-        "codex:implement",
-    )
 
 
 def no_pr_label() -> str:
@@ -111,16 +100,6 @@ def no_pr_label() -> str:
         "NO_PR_LABEL",
         "codex:no-pr",
     )
-
-
-def automation_labels() -> tuple[str, str]:
-    implementation = implementation_label()
-    no_pull_request = no_pr_label()
-    if implementation.casefold() == no_pull_request.casefold():
-        raise ImplementationError(
-            "implementation and no-PR labels must be different"
-        )
-    return implementation, no_pull_request
 
 
 def publication_actor() -> str:
@@ -284,13 +263,11 @@ def fetch_issue(repository: str, issue_number: int) -> dict[str, Any]:
 
 def issue_is_eligible(
     issue: dict[str, Any],
-    label: str,
     excluded_label: str | None = None,
 ) -> bool:
     labels = normalized_label_names(labels_from_issue(issue))
     return (
         issue.get("state") == "open"
-        and label.casefold() in labels
         and (
             excluded_label is None
             or excluded_label.casefold() not in labels
@@ -338,14 +315,6 @@ query($owner: String!, $name: String!, $number: Int!) {
         nodes {
           number
           state
-          labels(first: 100) {
-            nodes {
-              name
-            }
-            pageInfo {
-              hasNextPage
-            }
-          }
         }
         pageInfo {
           hasNextPage
@@ -456,11 +425,9 @@ def fetch_pull_request(
     }
 
 
-def linked_eligible_issues_for_pull_request(
+def linked_open_issues_for_pull_request(
     repository: str,
     pull_request_number: int,
-    label: str,
-    excluded_label: str | None = None,
 ) -> list[int]:
     owner, name = repository.split("/")
     data = run_graphql(
@@ -495,32 +462,7 @@ def linked_eligible_issues_for_pull_request(
             or type(issue.get("number")) is not int
         ):
             continue
-        label_connection = issue.get("labels")
-        if not isinstance(label_connection, dict):
-            raise ImplementationError(
-                "GitHub returned invalid linked issue labels"
-            )
-        label_nodes = label_connection.get("nodes")
-        label_page_info = label_connection.get("pageInfo")
-        if (
-            not isinstance(label_nodes, list)
-            or not isinstance(label_page_info, dict)
-            or label_page_info.get("hasNextPage") is not False
-        ):
-            raise ImplementationError(
-                "linked issue has more labels than the workflow supports"
-            )
-        label_names = {
-            value["name"].casefold()
-            for value in label_nodes
-            if isinstance(value, dict)
-            and isinstance(value.get("name"), str)
-        }
-        if label.casefold() in label_names and (
-            excluded_label is None
-            or excluded_label.casefold() not in label_names
-        ):
-            issue_numbers.append(issue["number"])
+        issue_numbers.append(issue["number"])
     return sorted(set(issue_numbers))
 
 
@@ -822,18 +764,16 @@ def commit_has_automation_trailers(
 
 def discover_issues(
     repository: str,
-    label: str,
     excluded_label: str,
     maximum: int,
     actor: str,
 ) -> list[int]:
-    encoded_label = urllib.parse.quote(label, safe="")
     issue_numbers: list[int] = []
     page = 1
     while len(issue_numbers) < maximum:
         response = run_gh_json(
             [
-                f"repos/{repository}/issues?state=open&labels={encoded_label}"
+                f"repos/{repository}/issues?state=open"
                 f"&sort=created&direction=asc&per_page=100&page={page}"
             ]
         )
@@ -846,18 +786,8 @@ def discover_issues(
                 or type(issue.get("number")) is not int
             ):
                 continue
-            labels = issue.get("labels", [])
-            label_names = {
-                value["name"].casefold()
-                for value in labels
-                if isinstance(value, dict)
-                and isinstance(value.get("name"), str)
-            }
-            if excluded_label.casefold() in label_names:
-                continue
             state = prepare_issue_state(
                 repository,
-                label,
                 excluded_label,
                 actor,
                 issue,
@@ -879,6 +809,34 @@ def discover_issues(
             return issue_numbers
         page += 1
     return issue_numbers
+
+
+def resolve_issue_comment_event(
+    repository: str,
+    event: dict[str, Any],
+) -> list[int]:
+    issue = event.get("issue")
+    comment = event.get("comment")
+    if (
+        event.get("action") != "created"
+        or not isinstance(issue, dict)
+        or "pull_request" in issue
+        or issue.get("state") != "open"
+        or type(issue.get("number")) is not int
+        or not isinstance(comment, dict)
+        or not isinstance(comment.get("body"), str)
+        or comment["body"].strip() != IMPLEMENT_COMMAND
+        or is_bot_user(comment.get("user"))
+    ):
+        return []
+    user = comment["user"]["login"]
+    if not collaborator_has_write_permission(repository, user):
+        print(
+            f"::warning::Ignoring {IMPLEMENT_COMMAND} from unauthorized "
+            f"user {user}."
+        )
+        return []
+    return [issue["number"]]
 
 
 def resolve_review_event(
@@ -914,7 +872,7 @@ def resolve_review_event(
 
 def resolve_work_items(event_name: str, event: dict[str, Any]) -> list[int]:
     repository = repository_name()
-    label, excluded_label = automation_labels()
+    excluded_label = no_pr_label()
     maximum = positive_integer(
         os.environ.get("MAX_ISSUES", "").strip() or "3",
         "MAX_ISSUES",
@@ -928,20 +886,8 @@ def resolve_work_items(event_name: str, event: dict[str, Any]) -> list[int]:
     if explicit_issue:
         return [positive_integer(explicit_issue, "REQUESTED_ISSUE_NUMBER")]
 
-    if event_name == "issues":
-        issue = event.get("issue")
-        event_label = event.get("label")
-        if (
-            event.get("action") == "labeled"
-            and isinstance(issue, dict)
-            and issue.get("state") == "open"
-            and type(issue.get("number")) is int
-            and isinstance(event_label, dict)
-            and isinstance(event_label.get("name"), str)
-            and event_label["name"].casefold() == label.casefold()
-        ):
-            return [issue["number"]]
-        return []
+    if event_name == "issue_comment":
+        return resolve_issue_comment_event(repository, event)
 
     if event_name == "pull_request_review_comment":
         if event.get("action") != "created":
@@ -954,7 +900,6 @@ def resolve_work_items(event_name: str, event: dict[str, Any]) -> list[int]:
     if event_name in ("schedule", "workflow_dispatch", "workflow_call"):
         return discover_issues(
             repository,
-            label,
             excluded_label,
             maximum,
             publication_actor(),
@@ -1003,7 +948,6 @@ def validate_git_branch(branch: str) -> None:
 
 def prepare_issue_state(
     repository: str,
-    label: str,
     excluded_label: str,
     actor: str,
     issue: dict[str, Any],
@@ -1013,19 +957,22 @@ def prepare_issue_state(
         raise ImplementationError("GitHub returned an invalid issue")
     snapshot = issue_snapshot(issue)
     snapshot_digest = issue_semantic_digest(snapshot)
-    linked_pull_requests = linked_open_pull_requests(
-        repository, issue_number
+    actionable_issue = issue_is_eligible(issue, excluded_label)
+    implementation_command = (
+        current_implementation_command(repository, issue_number)
+        if actionable_issue
+        else None
     )
     state: dict[str, Any] = {
         "version": 1,
         "repository": repository,
-        "implementation_label": label,
+        "implementation_command": implementation_command,
         "no_pr_label": excluded_label,
         "address_only": False,
         "publication_actor": actor,
         "issue": snapshot,
         "branch": deterministic_branch(issue_number),
-        "linked_pull_requests": linked_pull_requests,
+        "linked_pull_requests": [],
         "linked_pull_request_issue_numbers": [],
         "pull_request": None,
         "markers": [],
@@ -1033,8 +980,14 @@ def prepare_issue_state(
         "target": None,
     }
 
-    if not issue_is_eligible(issue, label, state["no_pr_label"]):
+    if not actionable_issue or implementation_command is None:
         return state
+
+    linked_pull_requests = linked_open_pull_requests(
+        repository,
+        issue_number,
+    )
+    state["linked_pull_requests"] = linked_pull_requests
 
     if len(linked_pull_requests) > 1:
         state["action"] = "ambiguous"
@@ -1069,18 +1022,16 @@ def prepare_issue_state(
                 "as its head, so the workflow will not push to it."
             )
             return state
-        linked_issue_numbers = linked_eligible_issues_for_pull_request(
+        linked_issue_numbers = linked_open_issues_for_pull_request(
             repository,
             pull_request["number"],
-            label,
-            excluded_label,
         )
         state["linked_pull_request_issue_numbers"] = linked_issue_numbers
         if linked_issue_numbers != [issue_number]:
             state["action"] = "blocked"
             state["reason"] = (
-                "The linked pull request must close exactly this open, "
-                "eligible issue before the workflow can update it."
+                "The linked pull request must close exactly this open "
+                "issue before the workflow can update it."
             )
             return state
         validate_git_branch(pull_request["head_ref"])
@@ -1226,11 +1177,9 @@ def prepare_state() -> dict[str, Any]:
             fetch_pull_request(repository, pull_request_number),
         )
     issue_number = issue_number_from_environment()
-    label, excluded_label = automation_labels()
     return prepare_issue_state(
         repository,
-        label,
-        excluded_label,
+        no_pr_label(),
         actor,
         fetch_issue(repository, issue_number),
     )
@@ -1818,16 +1767,13 @@ def publication_plan_command(
 def require_current_issue(state: dict[str, Any]) -> dict[str, Any]:
     issue_number = state["issue"]["number"]
     issue = fetch_issue(state["repository"], issue_number)
-    if not issue_is_eligible(
-        issue,
-        state["implementation_label"],
-        state["no_pr_label"],
-    ):
+    if not issue_is_eligible(issue, state["no_pr_label"]):
         raise ImplementationError("issue is no longer open and eligible")
     if issue_snapshot(issue) != state["issue"]:
         raise ImplementationError(
             "issue changed during the run; retry with the latest state"
         )
+    require_current_implementation_command(state)
     return issue
 
 
@@ -1836,11 +1782,7 @@ def require_current_issue_semantics(
 ) -> dict[str, Any]:
     issue_number = state["issue"]["number"]
     issue = fetch_issue(state["repository"], issue_number)
-    if not issue_is_eligible(
-        issue,
-        state["implementation_label"],
-        state["no_pr_label"],
-    ):
+    if not issue_is_eligible(issue, state["no_pr_label"]):
         raise ImplementationError("issue is no longer open and eligible")
     if issue_semantic_snapshot(issue) != prepared_issue_semantic_snapshot(
         state["issue"]
@@ -1848,6 +1790,7 @@ def require_current_issue_semantics(
         raise ImplementationError(
             "issue changed during the run; retry with the latest state"
         )
+    require_current_implementation_command(state)
     return issue
 
 
@@ -1868,11 +1811,9 @@ def require_linked_pull_requests(
 def require_linked_pull_request_issue_numbers(
     state: dict[str, Any],
 ) -> list[int]:
-    current = linked_eligible_issues_for_pull_request(
+    current = linked_open_issues_for_pull_request(
         state["repository"],
         state["target"]["pull_request_number"],
-        state["implementation_label"],
-        state["no_pr_label"],
     )
     if current != state["linked_pull_request_issue_numbers"]:
         raise ImplementationError(
@@ -2004,6 +1945,65 @@ def issue_comments(repository: str, issue_number: int) -> list[dict[str, Any]]:
         if len(response) < 100:
             return comments
         page += 1
+
+
+def implementation_command_snapshot(
+    comment: dict[str, Any],
+) -> dict[str, Any] | None:
+    user = comment.get("user")
+    if (
+        type(comment.get("id")) is not int
+        or not isinstance(comment.get("body"), str)
+        or comment["body"].strip() != IMPLEMENT_COMMAND
+        or not isinstance(comment.get("created_at"), str)
+        or not isinstance(comment.get("updated_at"), str)
+        or is_bot_user(user)
+    ):
+        return None
+    return {
+        "id": comment["id"],
+        "author": user["login"],
+        "body": comment["body"],
+        "created_at": comment["created_at"],
+        "updated_at": comment["updated_at"],
+    }
+
+
+def current_implementation_command(
+    repository: str,
+    issue_number: int,
+) -> dict[str, Any] | None:
+    permissions: dict[str, bool] = {}
+    commands: list[dict[str, Any]] = []
+    for comment in issue_comments(repository, issue_number):
+        if not isinstance(comment, dict):
+            continue
+        command = implementation_command_snapshot(comment)
+        if command is None:
+            continue
+        login = command["author"]
+        if login not in permissions:
+            permissions[login] = collaborator_has_write_permission(
+                repository,
+                login,
+            )
+        if permissions[login]:
+            commands.append(command)
+    if not commands:
+        return None
+    return max(commands, key=lambda value: value["id"])
+
+
+def require_current_implementation_command(state: dict[str, Any]) -> None:
+    current = current_implementation_command(
+        state["repository"],
+        state["issue"]["number"],
+    )
+    if current != state.get("implementation_command"):
+        raise ImplementationError(
+            "implementation command changed during the run; retry "
+            "reconciliation"
+        )
 
 
 def issue_comment_marker_exists(
@@ -2316,7 +2316,6 @@ def publish_blocked(state: dict[str, Any]) -> None:
     issue = require_current_issue(state)
     current = prepare_issue_state(
         state["repository"],
-        state["implementation_label"],
         state["no_pr_label"],
         state["publication_actor"],
         issue,
