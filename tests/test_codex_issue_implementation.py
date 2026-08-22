@@ -103,6 +103,7 @@ def environment(**overrides):
         "IMPLEMENTATION_LABEL": "codex:implement",
         "NO_PR_LABEL": "codex:no-pr",
         "ISSUE_NUMBER": "31",
+        "CODEX_PUBLISH_ACTOR": "publisher[bot]",
     }
     values.update(overrides)
     return values
@@ -312,49 +313,61 @@ class EventSelectionTest(unittest.TestCase):
 
 
 class MarkerPolicyTest(unittest.TestCase):
-    def test_acknowledged_command_is_not_processed_again(self):
-        comments = [
-            {
-                "id": 600,
-                "body": "Please add a test.",
-                "user": {"login": "reviewer", "type": "User"},
-                "created_at": "2026-08-22T00:00:00Z",
-            },
-            {
-                "id": 700,
-                "in_reply_to_id": 600,
-                "body": "/codex address",
-                "user": {"login": "maintainer", "type": "User"},
-                "created_at": "2026-08-22T00:01:00Z",
-            },
-            {
-                "id": 701,
-                "in_reply_to_id": 600,
-                "body": (
-                    "Addressed.\n\n"
-                    "<!-- codex-addressed command-id=700 "
-                    f"commit={'a' * 40} -->"
-                ),
-                "user": {
-                    "login": "github-actions[bot]",
-                    "type": "Bot",
-                },
-                "created_at": "2026-08-22T00:02:00Z",
-            },
-        ]
-        with patch.object(
-            IMPLEMENTATION,
-            "review_comments",
-            return_value=comments,
-        ), patch.object(
-            IMPLEMENTATION,
-            "collaborator_has_write_permission",
-        ) as permission:
-            self.assertEqual(
-                IMPLEMENTATION.unprocessed_markers("aws/example", 44),
-                [],
-            )
-        permission.assert_not_called()
+    def test_pat_and_app_acknowledgements_are_not_processed_again(self):
+        for actor, actor_type in (
+            ("maintainer", "User"),
+            ("publisher[bot]", "Bot"),
+        ):
+            with self.subTest(actor=actor):
+                comments = [
+                    {
+                        "id": 600,
+                        "body": "Please add a test.",
+                        "user": {"login": "reviewer", "type": "User"},
+                        "created_at": "2026-08-22T00:00:00Z",
+                    },
+                    {
+                        "id": 700,
+                        "in_reply_to_id": 600,
+                        "body": "/codex address",
+                        "user": {
+                            "login": "maintainer",
+                            "type": "User",
+                        },
+                        "created_at": "2026-08-22T00:01:00Z",
+                    },
+                    {
+                        "id": 701,
+                        "in_reply_to_id": 600,
+                        "body": (
+                            "Addressed.\n\n"
+                            "<!-- codex-addressed command-id=700 "
+                            f"commit={'a' * 40} -->"
+                        ),
+                        "user": {
+                            "login": actor,
+                            "type": actor_type,
+                        },
+                        "created_at": "2026-08-22T00:02:00Z",
+                    },
+                ]
+                with patch.object(
+                    IMPLEMENTATION,
+                    "review_comments",
+                    return_value=comments,
+                ), patch.object(
+                    IMPLEMENTATION,
+                    "collaborator_has_write_permission",
+                ) as permission:
+                    self.assertEqual(
+                        IMPLEMENTATION.unprocessed_markers(
+                            "aws/example",
+                            44,
+                            actor,
+                        ),
+                        [],
+                    )
+                permission.assert_not_called()
 
     def test_marker_context_contains_the_complete_review_thread(self):
         comments = [
@@ -383,9 +396,16 @@ class MarkerPolicyTest(unittest.TestCase):
             "collaborator_has_write_permission",
             return_value=True,
         ):
-            markers = IMPLEMENTATION.unprocessed_markers("aws/example", 44)
+            markers = IMPLEMENTATION.unprocessed_markers(
+                "aws/example",
+                44,
+                "publisher[bot]",
+            )
 
-        self.assertEqual([value["id"] for value in markers[0]["thread"]], [600, 700])
+        self.assertEqual(
+            [value["id"] for value in markers[0]["thread"]],
+            [600, 700],
+        )
         self.assertEqual(markers[0]["thread_root_id"], 600)
 
     def test_post_push_marker_check_ignores_mutable_code_context(self):
@@ -444,6 +464,7 @@ class PreparationPolicyTest(unittest.TestCase):
         self.assertEqual(state["branch"], "implement-issue-31")
         self.assertFalse(state["branch"].startswith("codex/"))
         self.assertEqual(state["target"]["sha"], "a" * 40)
+        self.assertEqual(state["publication_actor"], "publisher[bot]")
 
     def test_exactly_one_linked_pr_updates_that_pr(self):
         pull = pull_request()
@@ -460,7 +481,7 @@ class PreparationPolicyTest(unittest.TestCase):
             IMPLEMENTATION,
             "unprocessed_markers",
             return_value=markers,
-        ), patch.object(
+        ) as unprocessed, patch.object(
             IMPLEMENTATION,
             "repository_metadata",
             return_value={"default_branch": "main"},
@@ -473,6 +494,11 @@ class PreparationPolicyTest(unittest.TestCase):
         self.assertEqual(state["action"], "address")
         self.assertEqual(state["target"]["pull_request_number"], 44)
         self.assertEqual(state["markers"], markers)
+        unprocessed.assert_called_once_with(
+            "aws/example",
+            44,
+            "publisher[bot]",
+        )
 
     def test_multiple_linked_prs_are_reported_as_ambiguous(self):
         with patch.dict(os.environ, environment(), clear=True), patch.object(
@@ -701,6 +727,136 @@ class ValidationPolicyTest(unittest.TestCase):
                 "changed during the run",
             ):
                 IMPLEMENTATION.require_current_issue(state)
+
+    def test_no_pr_gate_ignores_only_updated_at(self):
+        prepared = IMPLEMENTATION.issue_snapshot(issue())
+        state = {
+            "repository": "aws/example",
+            "implementation_label": "codex:implement",
+            "no_pr_label": "codex:no-pr",
+            "issue": prepared,
+        }
+        with patch.object(
+            IMPLEMENTATION,
+            "fetch_issue",
+            return_value=issue(updated_at="2026-08-22T00:01:00Z"),
+        ):
+            IMPLEMENTATION.require_current_issue_semantics(state)
+
+        edits = (
+            issue(title="Changed title"),
+            issue(body="Changed requirements"),
+            issue(labels=[
+                {"name": "codex:implement"},
+                {"name": "priority:high"},
+            ]),
+            issue(node_id="I_kwDOReplacement"),
+            issue(state="closed"),
+        )
+        for edited in edits:
+            with self.subTest(edited=edited), patch.object(
+                IMPLEMENTATION,
+                "fetch_issue",
+                return_value=edited,
+            ):
+                with self.assertRaises(
+                    IMPLEMENTATION.ImplementationError
+                ):
+                    IMPLEMENTATION.require_current_issue_semantics(state)
+
+    def test_no_pr_retry_deduplicates_comment_after_label_failure(self):
+        prepared = IMPLEMENTATION.issue_snapshot(issue())
+        state = {
+            "repository": "aws/example",
+            "implementation_label": "codex:implement",
+            "no_pr_label": "codex:no-pr",
+            "publication_actor": "publisher[bot]",
+            "issue": prepared,
+            "linked_pull_requests": [],
+            "branch": "implement-issue-31",
+            "target": {
+                "ref": "main",
+                "sha": "a" * 40,
+            },
+        }
+        result = {
+            "outcome": "no_change",
+            "summary": "No pull request is required.",
+            "validation": [],
+        }
+        comments = []
+
+        def post_comment(*_args, **kwargs):
+            comments.append(
+                {
+                    "body": kwargs["input_value"]["body"],
+                    "user": {
+                        "login": "publisher[bot]",
+                        "type": "Bot",
+                    },
+                }
+            )
+            return comments[-1]
+
+        with patch.object(
+            IMPLEMENTATION,
+            "require_current_issue",
+        ), patch.object(
+            IMPLEMENTATION,
+            "require_linked_pull_requests",
+        ), patch.object(
+            IMPLEMENTATION,
+            "require_default_branch_unchanged",
+        ), patch.object(
+            IMPLEMENTATION,
+            "ensure_label",
+        ), patch.object(
+            IMPLEMENTATION,
+            "linked_open_pull_requests",
+            return_value=[],
+        ), patch.object(
+            IMPLEMENTATION,
+            "fetch_issue",
+            return_value=issue(updated_at="2026-08-22T00:01:00Z"),
+        ), patch.object(
+            IMPLEMENTATION,
+            "issue_comments",
+            side_effect=lambda *_args: list(comments),
+        ), patch.object(
+            IMPLEMENTATION,
+            "run_gh_json",
+            side_effect=post_comment,
+        ) as run, patch.object(
+            IMPLEMENTATION,
+            "add_issue_label",
+            side_effect=[
+                IMPLEMENTATION.ImplementationError("label failed"),
+                None,
+            ],
+        ):
+            with self.assertRaisesRegex(
+                IMPLEMENTATION.ImplementationError,
+                "label failed",
+            ):
+                IMPLEMENTATION.publish_implementation(
+                    state,
+                    result,
+                    Path("/change.patch"),
+                    Path("/workspace"),
+                )
+            IMPLEMENTATION.publish_implementation(
+                state,
+                result,
+                Path("/change.patch"),
+                Path("/workspace"),
+            )
+
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(len(comments), 1)
+        semantic_digest = IMPLEMENTATION.stable_digest(
+            IMPLEMENTATION.prepared_issue_semantic_snapshot(prepared)
+        )
+        self.assertIn(f"snapshot={semantic_digest}", comments[0]["body"])
 
     def test_default_branch_designation_change_invalidates_prepared_state(self):
         state = {
@@ -990,9 +1146,44 @@ class ValidationPolicyTest(unittest.TestCase):
                 31,
                 "<!-- codex-no-pr issue=31 -->",
                 "No pull request is needed.",
+                "publisher[bot]",
             )
 
         run.assert_called_once()
+
+    def test_pat_and_app_comments_are_deduplicated(self):
+        for actor, actor_type in (
+            ("maintainer", "User"),
+            ("publisher[bot]", "Bot"),
+        ):
+            with self.subTest(actor=actor), patch.object(
+                IMPLEMENTATION,
+                "issue_comments",
+                return_value=[
+                    {
+                        "body": (
+                            "Done.\n\n"
+                            "<!-- codex-no-pr issue=31 -->"
+                        ),
+                        "user": {
+                            "login": actor,
+                            "type": actor_type,
+                        },
+                    }
+                ],
+            ), patch.object(
+                IMPLEMENTATION,
+                "run_gh_json",
+            ) as run:
+                IMPLEMENTATION.post_issue_comment_once(
+                    "aws/example",
+                    31,
+                    "<!-- codex-no-pr issue=31 -->",
+                    "No pull request is needed.",
+                    actor,
+                )
+
+            run.assert_not_called()
 
 
 class WorkflowPolicyTest(unittest.TestCase):
@@ -1024,6 +1215,22 @@ class WorkflowPolicyTest(unittest.TestCase):
             reconcile.group(1),
         )
 
+    def test_file_sparse_checkout_disables_cone_mode(self):
+        checkout = re.search(
+            r"(?ms)^      - name: Load trusted Codex implementation toolkit\n"
+            r"(.*?)(?=^      - name:|\Z)",
+            WORKFLOW,
+        )
+        assert checkout is not None
+        self.assertIn("sparse-checkout-cone-mode: false", checkout.group(1))
+
+    def test_numeric_max_issues_preserves_zero_for_validation(self):
+        expression = (
+            "${{ format('{0}', inputs['max-issues']) ||\n"
+            "                env.DEFAULT_MAX_ISSUES }}"
+        )
+        self.assertEqual(WORKFLOW.count(expression), 2)
+
     def test_model_step_has_no_github_token_and_uses_workspace_sandbox(self):
         model = re.search(
             r"(?ms)^      - name: Implement current issue work with Codex\n"
@@ -1033,6 +1240,7 @@ class WorkflowPolicyTest(unittest.TestCase):
         assert model is not None
         block = model.group(1)
         self.assertNotIn("CODEX_PUBLISH_TOKEN", block)
+        self.assertNotIn("CODEX_PUBLISH_ACTOR", block)
         self.assertNotIn("GH_TOKEN", block)
         self.assertNotIn("GITHUB_TOKEN", block)
         self.assertIn("--sandbox workspace-write", block)
@@ -1073,7 +1281,22 @@ class WorkflowPolicyTest(unittest.TestCase):
             r"(.*?)(?=^      - name:|\Z)",
             WORKFLOW,
         )
-        assert checkout is not None and publish is not None
+        config = re.search(
+            r"(?ms)^      - name: Validate Codex implementation configuration\n"
+            r"(.*?)(?=^      - name:|\Z)",
+            WORKFLOW,
+        )
+        prepare = re.search(
+            r"(?ms)^      - name: Re-fetch issue and pull request state\n"
+            r"(.*?)(?=^      - name:|\Z)",
+            WORKFLOW,
+        )
+        assert (
+            checkout is not None
+            and publish is not None
+            and config is not None
+            and prepare is not None
+        )
         self.assertIn(
             "token: ${{ secrets.CODEX_PUBLISH_TOKEN }}",
             checkout.group(1),
@@ -1083,6 +1306,19 @@ class WorkflowPolicyTest(unittest.TestCase):
             publish.group(1),
         )
         self.assertNotIn("secrets.GITHUB_TOKEN", publish.group(1))
+        self.assertIn(
+            "query { viewer { login } }",
+            config.group(1),
+        )
+        self.assertIn(
+            "echo \"publish_actor=$publish_actor\"",
+            config.group(1),
+        )
+        self.assertIn(
+            "CODEX_PUBLISH_ACTOR: "
+            "${{ steps.config.outputs.publish_actor }}",
+            prepare.group(1),
+        )
 
     def test_prompt_marks_repository_requests_as_untrusted(self):
         self.assertIn("untrusted data", PROMPT)

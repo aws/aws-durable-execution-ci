@@ -22,6 +22,14 @@ MAX_CONTEXT_BYTES = 1_000_000
 MAX_ISSUES_PER_RUN = 10
 MAX_PATCH_BYTES = 5_000_000
 MAX_REVIEW_COMMENTS = 1_000
+ISSUE_SEMANTIC_FIELDS = (
+    "number",
+    "node_id",
+    "title",
+    "body",
+    "state",
+    "labels",
+)
 WRITE_PERMISSIONS = frozenset(("admin", "maintain", "write"))
 
 
@@ -92,6 +100,18 @@ def automation_labels() -> tuple[str, str]:
             "implementation and no-PR labels must be different"
         )
     return implementation, no_pull_request
+
+
+def publication_actor() -> str:
+    actor = require_environment("CODEX_PUBLISH_ACTOR")
+    if (
+        len(actor) > 100
+        or re.fullmatch(r"[A-Za-z0-9-]+(?:\[bot\])?", actor) is None
+    ):
+        raise ImplementationError(
+            "CODEX_PUBLISH_ACTOR must be a valid GitHub login"
+        )
+    return actor
 
 
 def issue_number_from_environment() -> int:
@@ -461,6 +481,7 @@ def is_bot_user(user: Any) -> bool:
 
 def acknowledged_command_ids(
     comments: list[dict[str, Any]],
+    actor: str,
 ) -> set[int]:
     acknowledged: set[int] = set()
     for comment in comments:
@@ -470,7 +491,8 @@ def acknowledged_command_ids(
         body = comment.get("body")
         if (
             not isinstance(user, dict)
-            or user.get("login") != "github-actions[bot]"
+            or not isinstance(user.get("login"), str)
+            or user["login"].casefold() != actor.casefold()
             or not isinstance(body, str)
         ):
             continue
@@ -507,10 +529,12 @@ def normalized_thread_comment(comment: dict[str, Any]) -> dict[str, Any]:
 
 
 def unprocessed_markers(
-    repository: str, pull_request_number: int
+    repository: str,
+    pull_request_number: int,
+    actor: str,
 ) -> list[dict[str, Any]]:
     comments = review_comments(repository, pull_request_number)
-    acknowledged = acknowledged_command_ids(comments)
+    acknowledged = acknowledged_command_ids(comments, actor)
     permissions: dict[str, bool] = {}
     markers: list[dict[str, Any]] = []
 
@@ -576,22 +600,40 @@ def stable_digest(value: Any) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def issue_snapshot(issue: dict[str, Any]) -> dict[str, Any]:
+def issue_semantic_snapshot(issue: dict[str, Any]) -> dict[str, Any]:
+    body = issue.get("body")
     snapshot = {
         "number": issue.get("number"),
         "node_id": issue.get("node_id"),
         "title": issue.get("title"),
-        "body": issue.get("body") or "",
+        "body": body if body is not None else "",
         "state": issue.get("state"),
         "labels": sorted(labels_from_issue(issue)),
-        "updated_at": issue.get("updated_at"),
     }
     if (
         type(snapshot["number"]) is not int
         or not isinstance(snapshot["node_id"], str)
         or not isinstance(snapshot["title"], str)
-        or not isinstance(snapshot["updated_at"], str)
+        or not isinstance(snapshot["body"], str)
+        or not isinstance(snapshot["state"], str)
     ):
+        raise ImplementationError("GitHub returned an invalid issue")
+    return snapshot
+
+
+def prepared_issue_semantic_snapshot(
+    snapshot: dict[str, Any],
+) -> dict[str, Any]:
+    try:
+        return {field: snapshot[field] for field in ISSUE_SEMANTIC_FIELDS}
+    except (KeyError, TypeError) as error:
+        raise ImplementationError("prepared issue snapshot is invalid") from error
+
+
+def issue_snapshot(issue: dict[str, Any]) -> dict[str, Any]:
+    snapshot = issue_semantic_snapshot(issue)
+    snapshot["updated_at"] = issue.get("updated_at")
+    if not isinstance(snapshot["updated_at"], str):
         raise ImplementationError("GitHub returned an invalid issue")
     snapshot["digest"] = stable_digest(snapshot)
     return snapshot
@@ -841,6 +883,7 @@ def prepare_state() -> dict[str, Any]:
     repository = repository_name()
     issue_number = issue_number_from_environment()
     label, excluded_label = automation_labels()
+    actor = publication_actor()
     issue = fetch_issue(repository, issue_number)
     snapshot = issue_snapshot(issue)
     linked_pull_requests = linked_open_pull_requests(
@@ -851,6 +894,7 @@ def prepare_state() -> dict[str, Any]:
         "repository": repository,
         "implementation_label": label,
         "no_pr_label": excluded_label,
+        "publication_actor": actor,
         "issue": snapshot,
         "branch": deterministic_branch(issue_number),
         "linked_pull_requests": linked_pull_requests,
@@ -894,7 +938,11 @@ def prepare_state() -> dict[str, Any]:
             )
             return state
         validate_git_branch(pull_request["head_ref"])
-        markers = unprocessed_markers(repository, pull_request["number"])
+        markers = unprocessed_markers(
+            repository,
+            pull_request["number"],
+            actor,
+        )
         if not markers:
             return state
         state["action"] = "address"
@@ -1221,6 +1269,26 @@ def require_current_issue(state: dict[str, Any]) -> dict[str, Any]:
     return issue
 
 
+def require_current_issue_semantics(
+    state: dict[str, Any],
+) -> dict[str, Any]:
+    issue_number = state["issue"]["number"]
+    issue = fetch_issue(state["repository"], issue_number)
+    if not issue_is_eligible(
+        issue,
+        state["implementation_label"],
+        state["no_pr_label"],
+    ):
+        raise ImplementationError("issue is no longer open and eligible")
+    if issue_semantic_snapshot(issue) != prepared_issue_semantic_snapshot(
+        state["issue"]
+    ):
+        raise ImplementationError(
+            "issue changed during the run; retry with the latest state"
+        )
+    return issue
+
+
 def require_linked_pull_requests(
     state: dict[str, Any],
 ) -> list[dict[str, Any]]:
@@ -1237,7 +1305,11 @@ def require_linked_pull_requests(
 
 def current_marker_snapshot(state: dict[str, Any]) -> list[dict[str, Any]]:
     pull_request_number = state["target"]["pull_request_number"]
-    return unprocessed_markers(state["repository"], pull_request_number)
+    return unprocessed_markers(
+        state["repository"],
+        pull_request_number,
+        state["publication_actor"],
+    )
 
 
 def marker_acknowledgement_snapshot(
@@ -1337,13 +1409,15 @@ def post_issue_comment_once(
     issue_number: int,
     marker: str,
     body: str,
+    actor: str,
 ) -> None:
     for comment in issue_comments(repository, issue_number):
         user = comment.get("user") if isinstance(comment, dict) else None
         if (
             isinstance(comment, dict)
             and isinstance(user, dict)
-            and user.get("login") == "github-actions[bot]"
+            and isinstance(user.get("login"), str)
+            and user["login"].casefold() == actor.casefold()
             and isinstance(comment.get("body"), str)
             and marker in comment["body"]
         ):
@@ -1562,6 +1636,7 @@ def publish_ambiguous(state: dict[str, Any]) -> None:
             f"Codex found multiple open pull requests linked to this issue "
             f"({numbers}). Close or unlink all but one before retrying."
         ),
+        state["publication_actor"],
     )
 
 
@@ -1590,6 +1665,7 @@ def publish_blocked(state: dict[str, Any]) -> None:
         state["issue"]["number"],
         marker,
         f"Codex could not continue automatically. {state['reason']}",
+        state["publication_actor"],
     )
 
 
@@ -1639,21 +1715,17 @@ def publish_implementation(
             )
         label = state["no_pr_label"]
         ensure_label(state["repository"], label)
-        current_issue = fetch_issue(state["repository"], issue_number)
-        if (
-            current_issue.get("node_id") != state["issue"]["node_id"]
-            or not issue_is_eligible(
-                current_issue,
-                state["implementation_label"],
-            )
-            or linked_open_pull_requests(state["repository"], issue_number)
-        ):
+        require_current_issue_semantics(state)
+        if linked_open_pull_requests(state["repository"], issue_number):
             raise ImplementationError(
                 "issue state changed before no-PR label publication"
             )
+        snapshot_digest = stable_digest(
+            prepared_issue_semantic_snapshot(state["issue"])
+        )
         marker = (
             f"<!-- codex-no-pr issue={issue_number} "
-            f"snapshot={state['issue']['digest']} -->"
+            f"snapshot={snapshot_digest} -->"
         )
         post_issue_comment_once(
             state["repository"],
@@ -1663,16 +1735,10 @@ def publish_implementation(
                 f"Codex determined that no pull request is required. "
                 f"{safe_github_text(result['summary'])}"
             ),
+            state["publication_actor"],
         )
-        current_issue = fetch_issue(state["repository"], issue_number)
-        if (
-            current_issue.get("node_id") != state["issue"]["node_id"]
-            or not issue_is_eligible(
-                current_issue,
-                state["implementation_label"],
-            )
-            or linked_open_pull_requests(state["repository"], issue_number)
-        ):
+        require_current_issue_semantics(state)
+        if linked_open_pull_requests(state["repository"], issue_number):
             raise ImplementationError(
                 "issue state changed before no-PR label publication"
             )
