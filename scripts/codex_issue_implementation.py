@@ -626,8 +626,15 @@ def feedback_cursor(value: dict[str, Any]) -> dict[str, Any]:
     identifier = value.get("id")
     if kind not in FEEDBACK_KINDS or type(identifier) is not int:
         raise ImplementationError("pull request feedback is invalid")
+    created_at = feedback_timestamp_micros(value.get("created_at"))
+    updated_value = value.get("updated_at")
+    updated_at = (
+        feedback_timestamp_micros(updated_value)
+        if updated_value is not None
+        else created_at
+    )
     return {
-        "at": feedback_timestamp_micros(value.get("created_at")),
+        "at": max(created_at, updated_at),
         "kind": kind,
         "id": identifier,
     }
@@ -1125,6 +1132,21 @@ def work_item(kind: str, number: int) -> dict[str, Any]:
     return {"kind": kind, "number": number}
 
 
+def issue_state_work_item(
+    state: dict[str, Any],
+    issue_number: int,
+) -> dict[str, Any]:
+    if state.get("action") != "address":
+        return work_item("issue", issue_number)
+    pull_request = state.get("pull_request")
+    if (
+        not isinstance(pull_request, dict)
+        or type(pull_request.get("number")) is not int
+    ):
+        raise ImplementationError("address state has no pull request")
+    return work_item("pull_request", pull_request["number"])
+
+
 def discover_work_items(
     repository: str,
     excluded_label: str,
@@ -1166,21 +1188,7 @@ def discover_work_items(
                     actor,
                     candidate,
                 )
-                if state["action"] == "address":
-                    pull_request = state.get("pull_request")
-                    if (
-                        not isinstance(pull_request, dict)
-                        or type(pull_request.get("number")) is not int
-                    ):
-                        raise ImplementationError(
-                            "address state has no pull request"
-                        )
-                    item = work_item(
-                        "pull_request",
-                        pull_request["number"],
-                    )
-                else:
-                    item = work_item("issue", number)
+                item = issue_state_work_item(state, number)
             if state["action"] == "skip":
                 continue
             notification_marker = state_notification_marker(state)
@@ -1307,7 +1315,17 @@ def resolve_work_items(
         ]
 
     if event_name == "issue_comment":
-        return resolve_issue_comment_event(repository, event)
+        items = resolve_issue_comment_event(repository, event)
+        if len(items) == 1 and items[0]["kind"] == "issue":
+            issue_number = items[0]["number"]
+            state = prepare_issue_state(
+                repository,
+                excluded_label,
+                publication_actor(),
+                fetch_issue(repository, issue_number),
+            )
+            return [issue_state_work_item(state, issue_number)]
+        return items
 
     if event_name == "pull_request_review_comment":
         if event.get("action") != "created":

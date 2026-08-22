@@ -240,6 +240,14 @@ class EventSelectionTest(unittest.TestCase):
             IMPLEMENTATION,
             "collaborator_has_write_permission",
             return_value=True,
+        ), patch.object(
+            IMPLEMENTATION,
+            "fetch_issue",
+            return_value=issue(),
+        ), patch.object(
+            IMPLEMENTATION,
+            "prepare_issue_state",
+            return_value={"action": "implement"},
         ):
             self.assertEqual(
                 IMPLEMENTATION.resolve_work_items("issue_comment", event),
@@ -259,6 +267,40 @@ class EventSelectionTest(unittest.TestCase):
                 [],
             )
         permission.assert_not_called()
+
+    def test_issue_event_address_work_uses_pull_request_scope(self):
+        event = {
+            "action": "created",
+            "issue": {"number": 31, "state": "open"},
+            "comment": implementation_comment(),
+        }
+        with patch.dict(
+            os.environ,
+            environment(MAX_ISSUES="3"),
+            clear=True,
+        ), patch.object(
+            IMPLEMENTATION,
+            "collaborator_has_write_permission",
+            return_value=True,
+        ), patch.object(
+            IMPLEMENTATION,
+            "fetch_issue",
+            return_value=issue(),
+        ), patch.object(
+            IMPLEMENTATION,
+            "prepare_issue_state",
+            return_value={
+                "action": "address",
+                "pull_request": pull_request(),
+            },
+        ):
+            self.assertEqual(
+                IMPLEMENTATION.resolve_work_items(
+                    "issue_comment",
+                    event,
+                ),
+                [pull_request_item()],
+            )
 
     def test_unauthorized_implementation_comment_is_ignored(self):
         event = {
@@ -1392,8 +1434,14 @@ class MarkerPolicyTest(unittest.TestCase):
             command_id=1000,
             body="/ai address",
         )
+        edited_feedback = {
+            **first_feedback,
+            "body": "Edited first feedback.",
+            "updated_at": "2026-08-22T00:04:00Z",
+        }
         second_conversation = [
-            *first_conversation,
+            edited_feedback,
+            first_command,
             acknowledgement,
             second_feedback,
             second_command,
@@ -1403,11 +1451,15 @@ class MarkerPolicyTest(unittest.TestCase):
         self.assertEqual(second_markers[0]["command_ids"], [1000])
         self.assertEqual(
             [value["body"] for value in second_markers[0]["feedback"]],
-            ["Second feedback."],
+            ["Edited first feedback.", "Second feedback."],
         )
         self.assertEqual(
             second_markers[0]["previous_feedback_cursor"],
             cursor,
+        )
+        self.assertGreater(
+            second_markers[0]["feedback_cursor"]["at"],
+            cursor["at"],
         )
 
     def test_marker_context_does_not_truncate_comment_or_diff(self):

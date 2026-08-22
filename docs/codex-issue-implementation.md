@@ -131,13 +131,14 @@ The schedule in the caller controls run frequency. Scheduled and manual
 discovery scans open issues and pull requests in creation order until it finds
 up to `max-issues` pending work items. This recovers authorized `/ai implement`
 commands and unprocessed `/ai address` commands even when the pull request does
-not close an eligible issue. Address work is always emitted as a pull request
-work item, including when it was found through a linked issue, so recovery does
-not start duplicate issue-scoped and pull-request-scoped workers. Blocked or
-ambiguous issues consume a slot until their current state is reported; later
-discovery runs skip the same actor-authored notification marker and continue
-scanning. A manual run can pass `issue-number` to reconcile one issue directly,
-but the worker still requires an authorized implementation command.
+not close an eligible issue. Across webhook and recovery resolution, address
+work is always emitted as a pull request work item, including when it was found
+through a linked issue, so duplicate issue-scoped and pull-request-scoped
+workers cannot target the same review command. Blocked or ambiguous issues
+consume a slot until their current state is reported; later discovery runs skip
+the same actor-authored notification marker and continue scanning. A manual run
+can pass `issue-number` to reconcile one issue directly, but the worker still
+requires an authorized implementation command.
 
 ## Issue and pull request behavior
 
@@ -215,10 +216,11 @@ Machine-readable markers contain the command comment IDs and commit SHA, so
 later runs treat those commands as processed. A no-change result is also
 acknowledged, using the unchanged pull request head SHA. Batch acknowledgements
 also record a feedback high-water mark, so a later top-level command on the
-same head includes only newer feedback. Review threads are not resolved
-automatically. Conversation bodies, review comment bodies, and diff hunks are
-preserved in full; the run fails instead of acknowledging feedback when the
-complete prepared state exceeds the overall context size limit.
+same head includes only newer or subsequently edited feedback. Review threads
+are not resolved automatically. Conversation bodies, review comment bodies,
+and diff hunks are preserved in full; the run fails instead of acknowledging
+feedback when the complete prepared state exceeds the overall context size
+limit.
 
 ## Revalidation and failure behavior
 
