@@ -112,8 +112,11 @@ Pass optional inputs from the caller job:
 The schedule in the caller controls run frequency. Scheduled and manual
 discovery scans the oldest open eligible issues until it finds up to
 `max-issues` issues with pending reconciliation work. Issues whose linked pull
-request has no unprocessed review marker do not consume the limit. A manual run
-can pass `issue-number` to reconcile one eligible issue directly.
+request has no unprocessed review marker do not consume the limit. Blocked or
+ambiguous issues consume a slot until their current state is reported; later
+discovery runs skip the same actor-authored notification marker and continue
+scanning. A manual run can pass `issue-number` to reconcile one eligible issue
+directly.
 
 ## Issue and pull request behavior
 
@@ -130,9 +133,10 @@ numbers remain independent matrix jobs and can run in parallel.
 
 With no linked open pull request, Codex checks out the exact current default
 branch revision. A change is committed to the deterministic
-`implement-issue-<number>` branch and published with a non-force push. The
-workflow checks again for a linked pull request before it pushes and before it
-opens one draft pull request whose body closes the issue.
+`implement-issue-<number>` branch and published with an exact
+`--force-with-lease` comparison that requires the remote branch not to exist.
+The workflow checks again for a linked pull request before it pushes and before
+it opens one draft pull request whose body closes the issue.
 
 If a workflow-owned branch was pushed but pull request creation failed, a
 later run recognizes commit trailers on that branch and retries only pull
@@ -144,10 +148,12 @@ generated draft does not cause a replacement. An unrelated branch with the
 deterministic name is not overwritten.
 
 With exactly one linked open pull request, Codex runs only when that pull
-request has an unprocessed review marker. The head branch must be in the
-current repository; fork branches are never updated. The workflow checks out
-the exact head SHA, applies all currently unprocessed marked feedback in one
-reconciliation, and pushes back to the same branch.
+request closes exactly that one open, eligible issue and has an unprocessed
+review marker. The eligible issue set is persisted and revalidated before
+pushes and acknowledgements. The head branch must be in the current repository;
+fork branches are never updated. The workflow checks out the exact head SHA,
+applies all currently unprocessed marked feedback in one reconciliation, and
+pushes back to the same branch.
 
 When multiple open pull requests close the issue, the workflow does not choose
 one. It posts a deduplicated issue comment asking a maintainer to remove the
@@ -178,13 +184,15 @@ of these change after model execution:
 
 - issue identity, body, state, or labels;
 - linked pull request count or identity;
+- the exact open, eligible issue set closed by the pull request;
 - default branch designation or SHA, or pull request head SHA;
 - unprocessed authorized review markers;
 - deterministic implementation branch state.
 
-Pushes are non-force and anchored by the validated parent SHA, so a concurrent
-human or automation update is rejected. Failed validation or publication
-leaves review markers unprocessed for a later retry.
+Pushes use an exact `--force-with-lease` expectation anchored by the validated
+remote SHA, or by branch nonexistence for a new implementation. A concurrent
+human or automation update is therefore rejected atomically. Failed validation
+or publication leaves review markers unprocessed for a later retry.
 
 When Codex determines that a new implementation requires no repository
 change, the workflow applies the non-actionable label and posts a deduplicated
@@ -201,8 +209,9 @@ The workflow:
   workflow revision;
 - checks out an exact default-branch or pull-request-head SHA without
   persisted GitHub credentials;
-- runs Codex as an unprivileged user with a writable worktree and read-only
-  Git metadata;
+- runs Codex as an unprivileged user with a writable worktree, read-only Git
+  metadata, an exact safe-directory registration, and optional Git locks
+  disabled;
 - uses `workspace-write` with approval prompts disabled, outbound network and
   web search disabled, temporary directories excluded, and apps, plugins,
   hooks, image, browser, computer, and multi-agent tools disabled;

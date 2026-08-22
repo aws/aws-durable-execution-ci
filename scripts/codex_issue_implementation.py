@@ -759,20 +759,28 @@ def discover_issues(
                 if isinstance(value, dict)
                 and isinstance(value.get("name"), str)
             }
-            if (
-                excluded_label not in label_names
-                and prepare_issue_state(
-                    repository,
-                    label,
-                    excluded_label,
-                    actor,
-                    issue,
-                )["action"]
-                != "skip"
+            if excluded_label in label_names:
+                continue
+            state = prepare_issue_state(
+                repository,
+                label,
+                excluded_label,
+                actor,
+                issue,
+            )
+            if state["action"] == "skip":
+                continue
+            notification_marker = state_notification_marker(state)
+            if notification_marker is not None and issue_comment_marker_exists(
+                repository,
+                issue["number"],
+                notification_marker,
+                actor,
             ):
-                issue_numbers.append(issue["number"])
-                if len(issue_numbers) == maximum:
-                    return issue_numbers
+                continue
+            issue_numbers.append(issue["number"])
+            if len(issue_numbers) == maximum:
+                return issue_numbers
         if len(response) < 100:
             return issue_numbers
         page += 1
@@ -927,6 +935,7 @@ def prepare_issue_state(
         "issue": snapshot,
         "branch": deterministic_branch(issue_number),
         "linked_pull_requests": linked_pull_requests,
+        "linked_pull_request_issue_numbers": [],
         "markers": [],
         "action": "skip",
         "target": None,
@@ -964,6 +973,20 @@ def prepare_issue_state(
             state["reason"] = (
                 "The linked pull request uses the repository default branch "
                 "as its head, so the workflow will not push to it."
+            )
+            return state
+        linked_issue_numbers = linked_eligible_issues_for_pull_request(
+            repository,
+            pull_request["number"],
+            label,
+            excluded_label,
+        )
+        state["linked_pull_request_issue_numbers"] = linked_issue_numbers
+        if linked_issue_numbers != [issue_number]:
+            state["action"] = "blocked"
+            state["reason"] = (
+                "The linked pull request must close exactly this open, "
+                "eligible issue before the workflow can update it."
             )
             return state
         validate_git_branch(pull_request["head_ref"])
@@ -1347,6 +1370,22 @@ def require_linked_pull_requests(
     return current
 
 
+def require_linked_pull_request_issue_numbers(
+    state: dict[str, Any],
+) -> list[int]:
+    current = linked_eligible_issues_for_pull_request(
+        state["repository"],
+        state["target"]["pull_request_number"],
+        state["implementation_label"],
+        state["no_pr_label"],
+    )
+    if current != state["linked_pull_request_issue_numbers"]:
+        raise ImplementationError(
+            "pull request issue ownership changed during the run"
+        )
+    return current
+
+
 def current_marker_snapshot(state: dict[str, Any]) -> list[dict[str, Any]]:
     pull_request_number = state["target"]["pull_request_number"]
     return unprocessed_markers(
@@ -1448,13 +1487,12 @@ def issue_comments(repository: str, issue_number: int) -> list[dict[str, Any]]:
         page += 1
 
 
-def post_issue_comment_once(
+def issue_comment_marker_exists(
     repository: str,
     issue_number: int,
     marker: str,
-    body: str,
     actor: str,
-) -> None:
+) -> bool:
     for comment in issue_comments(repository, issue_number):
         user = comment.get("user") if isinstance(comment, dict) else None
         if (
@@ -1465,7 +1503,55 @@ def post_issue_comment_once(
             and isinstance(comment.get("body"), str)
             and marker in comment["body"]
         ):
-            return
+            return True
+    return False
+
+
+def ambiguous_issue_marker(
+    issue_number: int,
+    pull_requests: list[dict[str, Any]],
+) -> str:
+    return (
+        f"<!-- codex-implementation-ambiguous issue={issue_number} prs="
+        f"{','.join(str(value['number']) for value in pull_requests)} -->"
+    )
+
+
+def blocked_issue_marker(issue_number: int, reason: str) -> str:
+    return (
+        f"<!-- codex-implementation-blocked issue={issue_number} "
+        f"digest={stable_digest(reason)} -->"
+    )
+
+
+def state_notification_marker(state: dict[str, Any]) -> str | None:
+    if state["action"] == "ambiguous":
+        return ambiguous_issue_marker(
+            state["issue"]["number"],
+            state["linked_pull_requests"],
+        )
+    if state["action"] == "blocked":
+        return blocked_issue_marker(
+            state["issue"]["number"],
+            state["reason"],
+        )
+    return None
+
+
+def post_issue_comment_once(
+    repository: str,
+    issue_number: int,
+    marker: str,
+    body: str,
+    actor: str,
+) -> None:
+    if issue_comment_marker_exists(
+        repository,
+        issue_number,
+        marker,
+        actor,
+    ):
+        return
     run_gh_json(
         [f"repos/{repository}/issues/{issue_number}/comments"],
         input_value={"body": f"{body}\n\n{marker}"},
@@ -1612,13 +1698,24 @@ def push_commit(
         raise ImplementationError(
             "remote branch changed immediately before publication"
         )
+    lease = (
+        f"--force-with-lease=refs/heads/{branch}:"
+        f"{expected_remote_sha or ''}"
+    )
     push = run_command(
-        ["git", "push", "--porcelain", "origin", f"HEAD:refs/heads/{branch}"],
+        [
+            "git",
+            "push",
+            "--porcelain",
+            lease,
+            "origin",
+            f"HEAD:refs/heads/{branch}",
+        ],
         cwd=workspace,
     )
     if push.returncode != 0:
         raise ImplementationError(
-            push.stderr.strip() or "non-force push was rejected"
+            push.stderr.strip() or "atomic branch update was rejected"
         )
 
 
@@ -1669,10 +1766,9 @@ def publish_ambiguous(state: dict[str, Any]) -> None:
             "pull request ambiguity no longer exists; retry reconciliation"
         )
     numbers = ", ".join(f"#{value['number']}" for value in current)
-    marker = (
-        f"<!-- codex-implementation-ambiguous issue="
-        f"{state['issue']['number']} prs="
-        f"{','.join(str(value['number']) for value in current)} -->"
+    marker = ambiguous_issue_marker(
+        state["issue"]["number"],
+        current,
     )
     post_issue_comment_once(
         state["repository"],
@@ -1702,9 +1798,9 @@ def publish_blocked(state: dict[str, Any]) -> None:
             raise ImplementationError(
                 "blocking branch changed during the run"
             )
-    marker = (
-        f"<!-- codex-implementation-blocked issue="
-        f"{state['issue']['number']} digest={stable_digest(state['reason'])} -->"
+    marker = blocked_issue_marker(
+        state["issue"]["number"],
+        state["reason"],
     )
     post_issue_comment_once(
         state["repository"],
@@ -1824,6 +1920,7 @@ def publish_review_update(
 ) -> None:
     require_current_issue(state)
     require_linked_pull_requests(state)
+    require_linked_pull_request_issue_numbers(state)
     require_markers_unchanged(state)
     pull_request = state["linked_pull_requests"][0]
     if (
@@ -1836,6 +1933,7 @@ def publish_review_update(
     if result["outcome"] == "no_change":
         require_current_issue(state)
         require_linked_pull_requests(state)
+        require_linked_pull_request_issue_numbers(state)
         require_markers_unchanged(state)
         acknowledge_markers(state, state["target"]["sha"], result)
         return
@@ -1845,6 +1943,7 @@ def publish_review_update(
     )
     require_current_issue(state)
     require_linked_pull_requests(state)
+    require_linked_pull_request_issue_numbers(state)
     require_markers_unchanged(state)
     push_commit(
         workspace,
@@ -1863,6 +1962,7 @@ def publish_review_update(
         raise ImplementationError(
             "pull request head did not advance to the published commit"
         )
+    require_linked_pull_request_issue_numbers(state)
     require_markers_still_actionable(state)
     acknowledge_markers(state, commit_sha, result)
 

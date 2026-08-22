@@ -268,6 +268,74 @@ class EventSelectionTest(unittest.TestCase):
         self.assertEqual(prepare.call_count, 101)
         self.assertIn("per_page=100&page=2", run.call_args_list[1].args[0][0])
 
+    def test_discovery_skips_already_notified_blocked_issues(self):
+        blocked = [issue(number=number) for number in range(1, 101)]
+        blocked_states = [
+            {
+                "action": "blocked",
+                "issue": {"number": value["number"]},
+                "reason": "The issue is blocked.",
+                "linked_pull_requests": [],
+            }
+            for value in blocked
+        ]
+        with patch.object(
+            IMPLEMENTATION,
+            "run_gh_json",
+            side_effect=[
+                blocked,
+                [issue(number=101)],
+            ],
+        ) as run, patch.object(
+            IMPLEMENTATION,
+            "prepare_issue_state",
+            side_effect=[
+                *blocked_states,
+                {"action": "recover", "issue": {"number": 101}},
+            ],
+        ), patch.object(
+            IMPLEMENTATION,
+            "issue_comment_marker_exists",
+            return_value=True,
+        ) as marker_exists:
+            self.assertEqual(
+                IMPLEMENTATION.discover_issues(
+                    "aws/example",
+                    "codex:implement",
+                    "codex:no-pr",
+                    1,
+                    "publisher[bot]",
+                ),
+                [101],
+            )
+
+        self.assertEqual(marker_exists.call_count, 100)
+        self.assertTrue(
+            all(
+                call.args[3] == "publisher[bot]"
+                for call in marker_exists.call_args_list
+            )
+        )
+        self.assertIn("per_page=100&page=2", run.call_args_list[1].args[0][0])
+
+    def test_ambiguous_state_has_a_stable_notification_marker(self):
+        state = {
+            "action": "ambiguous",
+            "issue": {"number": 31},
+            "linked_pull_requests": [
+                pull_request(number=44),
+                pull_request(number=45),
+            ],
+        }
+
+        self.assertEqual(
+            IMPLEMENTATION.state_notification_marker(state),
+            (
+                "<!-- codex-implementation-ambiguous issue=31 "
+                "prs=44,45 -->"
+            ),
+        )
+
     def test_exact_review_command_requires_current_write_permission(self):
         event = {
             "action": "created",
@@ -551,6 +619,10 @@ class PreparationPolicyTest(unittest.TestCase):
             return_value=[pull],
         ), patch.object(
             IMPLEMENTATION,
+            "linked_eligible_issues_for_pull_request",
+            return_value=[31],
+        ), patch.object(
+            IMPLEMENTATION,
             "unprocessed_markers",
             return_value=markers,
         ) as unprocessed, patch.object(
@@ -565,6 +637,7 @@ class PreparationPolicyTest(unittest.TestCase):
 
         self.assertEqual(state["action"], "address")
         self.assertEqual(state["target"]["pull_request_number"], 44)
+        self.assertEqual(state["linked_pull_request_issue_numbers"], [31])
         self.assertEqual(state["markers"], markers)
         unprocessed.assert_called_once_with(
             "aws/example",
@@ -584,6 +657,10 @@ class PreparationPolicyTest(unittest.TestCase):
             return_value=[pull],
         ), patch.object(
             IMPLEMENTATION,
+            "linked_eligible_issues_for_pull_request",
+            return_value=[31],
+        ), patch.object(
+            IMPLEMENTATION,
             "unprocessed_markers",
             return_value=[],
         ), patch.object(
@@ -597,6 +674,34 @@ class PreparationPolicyTest(unittest.TestCase):
             state = IMPLEMENTATION.prepare_state()
 
         self.assertEqual(state["action"], "skip")
+
+    def test_linked_pr_closing_multiple_eligible_issues_is_blocked(self):
+        pull = pull_request()
+        with patch.dict(os.environ, environment(), clear=True), patch.object(
+            IMPLEMENTATION,
+            "fetch_issue",
+            return_value=issue(),
+        ), patch.object(
+            IMPLEMENTATION,
+            "linked_open_pull_requests",
+            return_value=[pull],
+        ), patch.object(
+            IMPLEMENTATION,
+            "linked_eligible_issues_for_pull_request",
+            return_value=[31, 32],
+        ), patch.object(
+            IMPLEMENTATION,
+            "repository_metadata",
+            return_value={"default_branch": "main"},
+        ):
+            state = IMPLEMENTATION.prepare_state()
+
+        self.assertEqual(state["action"], "blocked")
+        self.assertEqual(
+            state["linked_pull_request_issue_numbers"],
+            [31, 32],
+        )
+        self.assertIn("exactly this open, eligible issue", state["reason"])
 
     def test_multiple_linked_prs_are_reported_as_ambiguous(self):
         with patch.dict(os.environ, environment(), clear=True), patch.object(
@@ -1166,6 +1271,9 @@ class ValidationPolicyTest(unittest.TestCase):
             "require_linked_pull_requests",
         ), patch.object(
             IMPLEMENTATION,
+            "require_linked_pull_request_issue_numbers",
+        ) as require_issue_numbers, patch.object(
+            IMPLEMENTATION,
             "require_markers_unchanged",
         ) as require_full, patch.object(
             IMPLEMENTATION,
@@ -1193,7 +1301,83 @@ class ValidationPolicyTest(unittest.TestCase):
             )
 
         self.assertEqual(require_full.call_count, 2)
+        self.assertEqual(require_issue_numbers.call_count, 3)
         require_immutable.assert_called_once_with(state)
+
+    def test_review_acknowledgement_revalidates_pr_issue_ownership(self):
+        prepared_pull = pull_request()
+        state = {
+            "repository": "aws/example",
+            "issue": {"number": 31},
+            "linked_pull_requests": [prepared_pull],
+            "markers": [marker()],
+            "target": {
+                "ref": prepared_pull["head_ref"],
+                "sha": prepared_pull["head_sha"],
+                "pull_request_number": prepared_pull["number"],
+            },
+        }
+        result = {
+            "outcome": "no_change",
+            "summary": "No change required.",
+            "validation": [],
+        }
+        with patch.object(
+            IMPLEMENTATION,
+            "require_current_issue",
+        ), patch.object(
+            IMPLEMENTATION,
+            "require_linked_pull_requests",
+        ), patch.object(
+            IMPLEMENTATION,
+            "require_linked_pull_request_issue_numbers",
+            side_effect=[
+                None,
+                IMPLEMENTATION.ImplementationError(
+                    "pull request issue ownership changed during the run"
+                ),
+            ],
+        ), patch.object(
+            IMPLEMENTATION,
+            "require_markers_unchanged",
+        ), patch.object(
+            IMPLEMENTATION,
+            "acknowledge_markers",
+        ) as acknowledge:
+            with self.assertRaisesRegex(
+                IMPLEMENTATION.ImplementationError,
+                "issue ownership changed",
+            ):
+                IMPLEMENTATION.publish_review_update(
+                    state,
+                    result,
+                    Path("/change.patch"),
+                    Path("/workspace"),
+                )
+
+        acknowledge.assert_not_called()
+
+    def test_pr_issue_ownership_must_match_prepared_state(self):
+        state = {
+            "repository": "aws/example",
+            "implementation_label": "codex:implement",
+            "no_pr_label": "codex:no-pr",
+            "issue": {"number": 31},
+            "linked_pull_request_issue_numbers": [31],
+            "target": {"pull_request_number": 44},
+        }
+        with patch.object(
+            IMPLEMENTATION,
+            "linked_eligible_issues_for_pull_request",
+            return_value=[31, 32],
+        ):
+            with self.assertRaisesRegex(
+                IMPLEMENTATION.ImplementationError,
+                "issue ownership changed",
+            ):
+                IMPLEMENTATION.require_linked_pull_request_issue_numbers(
+                    state
+                )
 
     def test_workflow_changes_require_explicit_opt_in(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1269,43 +1453,54 @@ class ValidationPolicyTest(unittest.TestCase):
                         workspace,
                     )
 
-    def test_push_is_non_force_and_anchored_to_remote_sha(self):
+    def test_push_uses_exact_force_with_lease(self):
         workspace = Path("/workspace")
-        with patch.object(
-            IMPLEMENTATION,
-            "repository_name",
-            return_value="aws/example",
-        ), patch.object(
-            IMPLEMENTATION,
-            "branch_ref",
-            return_value={"ref": "feature", "sha": "a" * 40},
-        ), patch.object(
-            IMPLEMENTATION,
-            "validate_git_branch",
-        ), patch.object(
-            IMPLEMENTATION,
-            "run_command",
-            return_value=IMPLEMENTATION.subprocess.CompletedProcess(
-                args=[],
-                returncode=0,
-                stdout="",
-                stderr="",
-            ),
-        ) as run:
-            IMPLEMENTATION.push_commit(workspace, "feature", "a" * 40)
-
-        command = run.call_args.args[0]
-        self.assertEqual(
-            command,
-            [
-                "git",
-                "push",
-                "--porcelain",
-                "origin",
-                "HEAD:refs/heads/feature",
-            ],
+        cases = (
+            ("a" * 40, {"ref": "feature", "sha": "a" * 40}, "a" * 40),
+            (None, None, ""),
         )
-        self.assertNotIn("--force", command)
+        for expected_sha, current, lease_sha in cases:
+            with self.subTest(expected_sha=expected_sha), patch.object(
+                IMPLEMENTATION,
+                "repository_name",
+                return_value="aws/example",
+            ), patch.object(
+                IMPLEMENTATION,
+                "branch_ref",
+                return_value=current,
+            ), patch.object(
+                IMPLEMENTATION,
+                "validate_git_branch",
+            ), patch.object(
+                IMPLEMENTATION,
+                "run_command",
+                return_value=IMPLEMENTATION.subprocess.CompletedProcess(
+                    args=[],
+                    returncode=0,
+                    stdout="",
+                    stderr="",
+                ),
+            ) as run:
+                IMPLEMENTATION.push_commit(
+                    workspace,
+                    "feature",
+                    expected_sha,
+                )
+
+            self.assertEqual(
+                run.call_args.args[0],
+                [
+                    "git",
+                    "push",
+                    "--porcelain",
+                    (
+                        "--force-with-lease=refs/heads/feature:"
+                        f"{lease_sha}"
+                    ),
+                    "origin",
+                    "HEAD:refs/heads/feature",
+                ],
+            )
 
     def test_label_creation_tolerates_a_cross_issue_race(self):
         with patch.object(
@@ -1483,6 +1678,16 @@ class WorkflowPolicyTest(unittest.TestCase):
             "sandbox_workspace_write.exclude_tmpdir_env_var=true",
             block,
         )
+        self.assertIn("GIT_OPTIONAL_LOCKS=0", block)
+        self.assertIn("HOME=/home/codex-implement", block)
+        self.assertIn(
+            (
+                'shell_environment_policy.set={HOME="/home/codex-implement",'
+                'GIT_OPTIONAL_LOCKS="0"}'
+            ),
+            block,
+        )
+        self.assertNotIn("--skip-git-repo-check", block)
         self.assertIn("--disable multi_agent", block)
         self.assertIn("-o root", block)
         self.assertIn("-m 440", block)
@@ -1576,23 +1781,43 @@ class WorkflowPolicyTest(unittest.TestCase):
             '"$GITHUB_WORKSPACE/.git"',
             USER_SCRIPT,
         )
-        self.assertIn('sudo chmod -R g-w,o-rwx "$GITHUB_WORKSPACE/.git"', USER_SCRIPT)
+        self.assertIn(
+            'sudo chmod -R g-w,o-rwx "$GITHUB_WORKSPACE/.git"',
+            USER_SCRIPT,
+        )
+        self.assertIn(
+            'git config --global --add safe.directory "$GITHUB_WORKSPACE"',
+            USER_SCRIPT,
+        )
+        self.assertIn("GIT_OPTIONAL_LOCKS=0", USER_SCRIPT)
+        self.assertIn(
+            'git -C "$GITHUB_WORKSPACE" rev-parse --verify HEAD',
+            USER_SCRIPT,
+        )
         harden = USER_SCRIPT.index(
             'sudo chmod -R u+rwX,go-rwx "$GITHUB_WORKSPACE"'
         )
         restore_root = USER_SCRIPT.index(
             'sudo chmod 1770 "$GITHUB_WORKSPACE"'
         )
+        safe_directory = USER_SCRIPT.index(
+            'git config --global --add safe.directory "$GITHUB_WORKSPACE"'
+        )
         read_check = USER_SCRIPT.index(
             'sudo -u "$implementation_user" test -r '
             '"$GITHUB_WORKSPACE/.git/HEAD"'
+        )
+        git_check = USER_SCRIPT.index(
+            'git -C "$GITHUB_WORKSPACE" rev-parse --verify HEAD'
         )
         write_check = USER_SCRIPT.index(
             'sudo -u "$implementation_user" test -w "$GITHUB_WORKSPACE"'
         )
         self.assertLess(harden, restore_root)
-        self.assertLess(restore_root, read_check)
-        self.assertLess(read_check, write_check)
+        self.assertLess(restore_root, safe_directory)
+        self.assertLess(safe_directory, read_check)
+        self.assertLess(read_check, git_check)
+        self.assertLess(git_check, write_check)
 
 
 if __name__ == "__main__":
