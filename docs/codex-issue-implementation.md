@@ -109,6 +109,9 @@ Pass optional inputs from the caller job:
 - `allow-workflow-changes` defaults to `false`. When false, a model result that
   changes `.github/workflows/**` is rejected before publication.
 
+Label matching follows GitHub's case-insensitive behavior. Existing labels can
+therefore use different casing from the configured values.
+
 The schedule in the caller controls run frequency. Scheduled and manual
 discovery scans the oldest open eligible issues until it finds up to
 `max-issues` issues with pending reconciliation work. Issues whose linked pull
@@ -209,6 +212,9 @@ The workflow:
   workflow revision;
 - checks out an exact default-branch or pull-request-head SHA without
   persisted GitHub credentials;
+- disables writable-checkout project instructions and exec-policy rules, then
+  supplies only `AGENTS.md`, `AGENTS.override.md`, and `CONTRIBUTING.md` files
+  read from the exact default-branch or pull-request-base commit;
 - runs Codex as an unprivileged user with a writable worktree, read-only Git
   metadata, an exact safe-directory registration, and optional Git locks
   disabled;
@@ -222,7 +228,9 @@ The workflow:
   commands;
 - never places the publication token or automatic `GITHUB_TOKEN` in the Codex
   step;
-- accepts only a closed JSON result contract and a size-limited Git patch;
+- accepts only a closed JSON result contract, bounds individual and cumulative
+  staged blob content before diff generation, and streams the Git patch under
+  a separate hard size limit;
 - rejects gitlinks, runtime credentials in model-authored result text, raw
   staged blobs, and patch metadata, protected workflow renames or edits, stale
   state, and changes outside the checked-out repository;

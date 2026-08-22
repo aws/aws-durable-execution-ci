@@ -23,6 +23,12 @@ MAX_CONTEXT_BYTES = 1_000_000
 MAX_ISSUES_PER_RUN = 10
 MAX_PATCH_BYTES = 5_000_000
 MAX_REVIEW_COMMENTS = 1_000
+MAX_STAGED_BLOB_BYTES = 5_000_000
+MAX_STAGED_CONTENT_BYTES = 5_000_000
+MAX_TRUSTED_INSTRUCTION_BYTES = 500_000
+TRUSTED_INSTRUCTION_FILENAMES = frozenset(
+    ("AGENTS.md", "AGENTS.override.md", "CONTRIBUTING.md")
+)
 ISSUE_SEMANTIC_FIELDS = (
     "number",
     "node_id",
@@ -240,6 +246,10 @@ def labels_from_issue(issue: dict[str, Any]) -> set[str]:
     return names
 
 
+def normalized_label_names(names: set[str]) -> set[str]:
+    return {name.casefold() for name in names}
+
+
 def fetch_issue(repository: str, issue_number: int) -> dict[str, Any]:
     issue = run_gh_json([f"repos/{repository}/issues/{issue_number}"])
     if (
@@ -256,11 +266,14 @@ def issue_is_eligible(
     label: str,
     excluded_label: str | None = None,
 ) -> bool:
-    labels = labels_from_issue(issue)
+    labels = normalized_label_names(labels_from_issue(issue))
     return (
         issue.get("state") == "open"
-        and label in labels
-        and (excluded_label is None or excluded_label not in labels)
+        and label.casefold() in labels
+        and (
+            excluded_label is None
+            or excluded_label.casefold() not in labels
+        )
     )
 
 
@@ -278,6 +291,7 @@ query($owner: String!, $name: String!, $number: Int!) {
           isDraft
           url
           baseRefName
+          baseRefOid
           headRefName
           headRefOid
           headRepository {
@@ -360,6 +374,7 @@ def linked_open_pull_requests(
             "draft": pull_request.get("isDraft"),
             "url": pull_request.get("url"),
             "base_ref": pull_request.get("baseRefName"),
+            "base_sha": pull_request.get("baseRefOid"),
             "head_ref": pull_request.get("headRefName"),
             "head_sha": pull_request.get("headRefOid"),
             "head_repository": (
@@ -418,13 +433,14 @@ def linked_eligible_issues_for_pull_request(
             continue
         label_nodes = issue.get("labels", {}).get("nodes", [])
         label_names = {
-            value.get("name")
+            value["name"].casefold()
             for value in label_nodes
             if isinstance(value, dict)
             and isinstance(value.get("name"), str)
         }
-        if label in label_names and (
-            excluded_label is None or excluded_label not in label_names
+        if label.casefold() in label_names and (
+            excluded_label is None
+            or excluded_label.casefold() not in label_names
         ):
             issue_numbers.append(issue["number"])
     return sorted(set(issue_numbers))
@@ -754,12 +770,12 @@ def discover_issues(
                 continue
             labels = issue.get("labels", [])
             label_names = {
-                value.get("name")
+                value["name"].casefold()
                 for value in labels
                 if isinstance(value, dict)
                 and isinstance(value.get("name"), str)
             }
-            if excluded_label in label_names:
+            if excluded_label.casefold() in label_names:
                 continue
             state = prepare_issue_state(
                 repository,
@@ -857,7 +873,8 @@ def resolve_work_items(event_name: str, event: dict[str, Any]) -> list[int]:
             and issue.get("state") == "open"
             and type(issue.get("number")) is int
             and isinstance(event_label, dict)
-            and event_label.get("name") == label
+            and isinstance(event_label.get("name"), str)
+            and event_label["name"].casefold() == label.casefold()
         ):
             return [issue["number"]]
         return []
@@ -961,6 +978,7 @@ def prepare_issue_state(
         if (
             not isinstance(pull_request["head_ref"], str)
             or not isinstance(pull_request["head_sha"], str)
+            or not isinstance(pull_request["base_sha"], str)
         ):
             state["action"] = "blocked"
             state["reason"] = (
@@ -1003,6 +1021,7 @@ def prepare_issue_state(
             "repository": repository,
             "ref": pull_request["head_ref"],
             "sha": pull_request["head_sha"],
+            "trusted_instruction_sha": pull_request["base_sha"],
             "pull_request_number": pull_request["number"],
         }
         return state
@@ -1051,6 +1070,7 @@ def prepare_issue_state(
         "repository": repository,
         "ref": default_branch,
         "sha": default_ref["sha"],
+        "trusted_instruction_sha": default_ref["sha"],
     }
     return state
 
@@ -1106,6 +1126,10 @@ def prepare_command(state_path: Path, context_path: Path) -> None:
     write_output("target_repository", target.get("repository", ""))
     write_output("target_ref", target.get("ref", ""))
     write_output("target_sha", target.get("sha", ""))
+    write_output(
+        "trusted_instruction_sha",
+        target.get("trusted_instruction_sha", ""),
+    )
     write_output(
         "pull_request_number",
         str(target.get("pull_request_number", "")),
@@ -1181,7 +1205,6 @@ def changed_paths(workspace: Path) -> list[str]:
 
 def staged_blob_oids(workspace: Path, paths: list[str]) -> list[str]:
     blob_oids: list[str] = []
-    seen_oids: set[str] = set()
     for path in paths:
         result = run_command(
             ["git", "ls-files", "--stage", "-z", "--", path],
@@ -1207,10 +1230,44 @@ def staged_blob_oids(workspace: Path, paths: list[str]) -> list[str]:
                 raise ImplementationError(
                     "model changes must not add or modify gitlinks"
                 )
-            if object_id not in seen_oids:
-                seen_oids.add(object_id)
-                blob_oids.append(object_id)
+            blob_oids.append(object_id)
     return blob_oids
+
+
+def validate_staged_blob_sizes(
+    workspace: Path,
+    object_ids: list[str],
+) -> None:
+    total_size = 0
+    for object_id in object_ids:
+        result = run_command(
+            ["git", "cat-file", "-s", object_id],
+            cwd=workspace,
+        )
+        if result.returncode != 0:
+            raise ImplementationError(
+                result.stderr.strip()
+                or "failed to inspect staged blob size"
+            )
+        try:
+            size = int(result.stdout.strip())
+        except ValueError as error:
+            raise ImplementationError(
+                "git returned an invalid staged blob size"
+            ) from error
+        if size < 0:
+            raise ImplementationError(
+                "git returned an invalid staged blob size"
+            )
+        if size > MAX_STAGED_BLOB_BYTES:
+            raise ImplementationError(
+                "model staged blob exceeds the size limit"
+            )
+        total_size += size
+        if total_size > MAX_STAGED_CONTENT_BYTES:
+            raise ImplementationError(
+                "model staged content exceeds the size limit"
+            )
 
 
 def runtime_credential_values() -> list[bytes]:
@@ -1275,6 +1332,175 @@ def staged_blobs_contain_runtime_credential(
     return False
 
 
+def create_model_patch(workspace: Path, patch_path: Path) -> str:
+    temporary = patch_path.with_name(f".{patch_path.name}.tmp")
+    temporary.unlink(missing_ok=True)
+    credentials = runtime_credential_values()
+    overlap = (
+        max((len(value) for value in credentials), default=0) - 1
+    )
+    digest = hashlib.sha256()
+    total_size = 0
+    process: subprocess.Popen[bytes] | None = None
+    try:
+        try:
+            process = subprocess.Popen(
+                [
+                    "git",
+                    "diff",
+                    "--cached",
+                    "--binary",
+                    "--full-index",
+                ],
+                cwd=workspace,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+            )
+        except OSError as error:
+            raise ImplementationError("failed to run git") from error
+        assert process.stdout is not None
+        tail = b""
+        with process.stdout, temporary.open("wb") as file:
+            while chunk := process.stdout.read(65_536):
+                total_size += len(chunk)
+                if total_size > MAX_PATCH_BYTES:
+                    process.kill()
+                    process.wait()
+                    raise ImplementationError(
+                        "model patch exceeds the size limit"
+                    )
+                content = tail + chunk
+                if any(value in content for value in credentials):
+                    process.kill()
+                    process.wait()
+                    raise ImplementationError(
+                        "model patch contains a runtime credential"
+                    )
+                tail = content[-overlap:] if overlap else b""
+                digest.update(chunk)
+                file.write(chunk)
+        if process.wait() != 0:
+            raise ImplementationError("failed to create the model patch")
+        temporary.replace(patch_path)
+    except BaseException:
+        if process is not None:
+            if process.poll() is None:
+                process.kill()
+            process.wait()
+        temporary.unlink(missing_ok=True)
+        raise
+    return digest.hexdigest()
+
+
+def trusted_instructions_command(
+    state_path: Path,
+    output_path: Path,
+    workspace: Path,
+) -> None:
+    state = read_json(state_path, "prepared state")
+    if (
+        not isinstance(state, dict)
+        or state.get("action") not in ("implement", "address")
+    ):
+        raise ImplementationError("prepared state does not require a model")
+    instruction_sha = state.get("target", {}).get(
+        "trusted_instruction_sha"
+    )
+    if (
+        not isinstance(instruction_sha, str)
+        or re.fullmatch(r"[0-9a-f]{40}", instruction_sha) is None
+    ):
+        raise ImplementationError(
+            "prepared state has an invalid trusted instruction revision"
+        )
+    commit = run_command(
+        ["git", "cat-file", "-e", f"{instruction_sha}^{{commit}}"],
+        cwd=workspace,
+    )
+    if commit.returncode != 0:
+        raise ImplementationError(
+            "trusted instruction revision is not available"
+        )
+    tree = run_command(
+        ["git", "ls-tree", "-r", "-z", "--full-tree", instruction_sha],
+        cwd=workspace,
+    )
+    if tree.returncode != 0:
+        raise ImplementationError("failed to inspect trusted instructions")
+
+    files: list[dict[str, str]] = []
+    total_size = 0
+    for record in tree.stdout.split("\0"):
+        if not record:
+            continue
+        try:
+            metadata, path = record.split("\t", 1)
+            mode, object_type, object_id = metadata.split()
+        except ValueError as error:
+            raise ImplementationError(
+                "git returned invalid trusted instruction metadata"
+            ) from error
+        if (
+            path.rsplit("/", 1)[-1] not in TRUSTED_INSTRUCTION_FILENAMES
+            or object_type != "blob"
+            or mode not in ("100644", "100755")
+        ):
+            continue
+        size_result = run_command(
+            ["git", "cat-file", "-s", object_id],
+            cwd=workspace,
+        )
+        if size_result.returncode != 0:
+            raise ImplementationError(
+                "failed to inspect trusted instruction size"
+            )
+        try:
+            size = int(size_result.stdout.strip())
+        except ValueError as error:
+            raise ImplementationError(
+                "git returned an invalid trusted instruction size"
+            ) from error
+        if size < 0:
+            raise ImplementationError(
+                "git returned an invalid trusted instruction size"
+            )
+        total_size += size
+        if total_size > MAX_TRUSTED_INSTRUCTION_BYTES:
+            raise ImplementationError(
+                "trusted repository instructions exceed the size limit"
+            )
+        try:
+            content_result = subprocess.run(
+                ["git", "cat-file", "blob", object_id],
+                check=False,
+                cwd=workspace,
+                capture_output=True,
+            )
+        except OSError as error:
+            raise ImplementationError(
+                "failed to read trusted repository instructions"
+            ) from error
+        if content_result.returncode != 0:
+            raise ImplementationError(
+                "failed to read trusted repository instructions"
+            )
+        try:
+            content = content_result.stdout.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise ImplementationError(
+                "trusted repository instructions must be UTF-8"
+            ) from error
+        files.append({"path": path, "content": content})
+
+    write_json(
+        output_path,
+        {
+            "source_sha": instruction_sha,
+            "files": files,
+        },
+    )
+
+
 def validate_model_command(
     result_path: Path,
     state_path: Path,
@@ -1310,6 +1536,7 @@ def validate_model_command(
     git_output(["add", "--all"], workspace)
     paths = changed_paths(workspace)
     object_ids = staged_blob_oids(workspace, paths)
+    validate_staged_blob_sizes(workspace, object_ids)
     if staged_blobs_contain_runtime_credential(workspace, object_ids):
         raise ImplementationError(
             "model staged content contains a runtime credential"
@@ -1333,23 +1560,6 @@ def validate_model_command(
             or "model changes fail git diff --check"
         )
 
-    try:
-        patch_result = subprocess.run(
-            ["git", "diff", "--cached", "--binary", "--full-index"],
-            check=False,
-            cwd=workspace,
-            capture_output=True,
-        )
-    except OSError as error:
-        raise ImplementationError("failed to run git") from error
-    if patch_result.returncode != 0:
-        raise ImplementationError("failed to create the model patch")
-    patch = patch_result.stdout
-    if len(patch) > MAX_PATCH_BYTES:
-        raise ImplementationError("model patch exceeds the size limit")
-    if contains_runtime_credential(patch):
-        raise ImplementationError("model patch contains a runtime credential")
-
     has_changes = bool(paths)
     if result["outcome"] == "changed" and not has_changes:
         raise ImplementationError(
@@ -1360,13 +1570,13 @@ def validate_model_command(
             "model reported no_change with repository changes"
         )
 
-    patch_path.write_bytes(patch)
+    patch_sha256 = create_model_patch(workspace, patch_path)
     artifact = {
         "version": 1,
         "state_digest": stable_digest(state),
         "result": result,
         "changed_paths": paths,
-        "patch_sha256": hashlib.sha256(patch).hexdigest(),
+        "patch_sha256": patch_sha256,
     }
     write_json(artifact_path, artifact)
     write_output("outcome", result["outcome"])
@@ -2096,6 +2306,11 @@ def parse_arguments() -> argparse.Namespace:
     prepare.add_argument("state_path", type=Path)
     prepare.add_argument("context_path", type=Path)
 
+    trusted_instructions = subparsers.add_parser("trusted-instructions")
+    trusted_instructions.add_argument("state_path", type=Path)
+    trusted_instructions.add_argument("output_path", type=Path)
+    trusted_instructions.add_argument("workspace", type=Path)
+
     validate = subparsers.add_parser("validate-model")
     validate.add_argument("result_path", type=Path)
     validate.add_argument("state_path", type=Path)
@@ -2119,6 +2334,12 @@ def main() -> int:
             resolve_command(arguments.event_path)
         elif arguments.command == "prepare":
             prepare_command(arguments.state_path, arguments.context_path)
+        elif arguments.command == "trusted-instructions":
+            trusted_instructions_command(
+                arguments.state_path,
+                arguments.output_path,
+                arguments.workspace,
+            )
         elif arguments.command == "validate-model":
             validate_model_command(
                 arguments.result_path,

@@ -433,6 +433,7 @@ jobs:
           output_file="${output_dir}/result.json"
           output_schema="${output_dir}/schema.json"
           prompt_file="${RUNNER_TEMP}/codex-implementation-prompt.md"
+          trusted_instructions="${RUNNER_TEMP}/codex-trusted-instructions.json"
           credential_proxy_dir="${RUNNER_TEMP}/codex-credential-proxy"
           credential_port_file="${credential_proxy_dir}/port"
           credential_log="${credential_proxy_dir}/server.log"
@@ -449,8 +450,19 @@ jobs:
           }
           trap cleanup EXIT
 
+          python3 \
+            "$TOOLKIT_PATH/scripts/codex_issue_implementation.py" \
+            trusted-instructions \
+            "${RUNNER_TEMP}/codex-implementation-state.json" \
+            "$trusted_instructions" \
+            "$GITHUB_WORKSPACE"
+
           {
             cat "$trusted_prompt"
+            printf '\n\n%s\n' '```json'
+            cat "$trusted_instructions"
+            printf '%s\n' '```'
+            printf '\n\n%s\n' 'Untrusted reconciliation context follows:'
             printf '\n\n%s\n' '```json'
             cat "${RUNNER_TEMP}/codex-implementation-context.json"
             printf '%s\n' '```'
@@ -569,6 +581,7 @@ jobs:
               "model_reasoning_effort=\"${CODEX_REASONING_EFFORT}\"" \
             --config 'model_provider="amazon-bedrock"' \
             --config 'web_search="disabled"' \
+            --config 'project_doc_max_bytes=0' \
             --config 'allow_login_shell=false' \
             --config 'history.persistence="none"' \
             --config 'sandbox_workspace_write.network_access=false' \
@@ -582,6 +595,7 @@ jobs:
               'shell_environment_policy.exclude=["AWS_*","GH_*","GITHUB_*"]' \
             exec \
             --ignore-user-config \
+            --ignore-rules \
             --cd "$GITHUB_WORKSPACE" \
             --output-last-message "$output_file" \
             --output-schema "$output_schema" \
