@@ -4,9 +4,13 @@ on:
   workflow_call:
     inputs:
       issue-number:
-        description: Eligible issue number to reconcile
+        description: Issue number to reconcile
         required: true
         type: number
+      address-only:
+        description: Restrict reconciliation to existing review feedback
+        required: true
+        type: boolean
       publication-actor:
         description: Automatic token actor used for idempotency markers
         required: true
@@ -137,6 +141,7 @@ jobs:
       - name: Re-fetch issue and pull request state
         id: prepare
         env:
+          ADDRESS_ONLY: ${{ inputs['address-only'] }}
           CODEX_PUBLISH_ACTOR: ${{ inputs['publication-actor'] }}
           GH_TOKEN: ${{ github.token }}
           IMPLEMENTATION_LABEL: >-

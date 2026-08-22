@@ -76,6 +76,15 @@ def positive_integer(value: str, description: str) -> int:
     return parsed
 
 
+def boolean_from_environment(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name, str(default).lower()).strip().lower()
+    if value == "true":
+        return True
+    if value == "false":
+        return False
+    raise ImplementationError(f"{name} must be true or false")
+
+
 def configured_label(name: str, default: str) -> str:
     value = os.environ.get(name, "").strip() or default
     if (
@@ -400,10 +409,10 @@ def linked_open_pull_requests(
     return sorted(pull_requests, key=lambda value: value["number"])
 
 
-def linked_eligible_issues_for_pull_request(
+def linked_issue_numbers_for_pull_request(
     repository: str,
     pull_request_number: int,
-    label: str,
+    label: str | None = None,
     excluded_label: str | None = None,
 ) -> list[int]:
     owner, name = repository.split("/")
@@ -439,6 +448,9 @@ def linked_eligible_issues_for_pull_request(
             or type(issue.get("number")) is not int
         ):
             continue
+        if label is None:
+            issue_numbers.append(issue["number"])
+            continue
         label_connection = issue.get("labels")
         if not isinstance(label_connection, dict):
             raise ImplementationError(
@@ -466,6 +478,30 @@ def linked_eligible_issues_for_pull_request(
         ):
             issue_numbers.append(issue["number"])
     return sorted(set(issue_numbers))
+
+
+def linked_open_issues_for_pull_request(
+    repository: str,
+    pull_request_number: int,
+) -> list[int]:
+    return linked_issue_numbers_for_pull_request(
+        repository,
+        pull_request_number,
+    )
+
+
+def linked_eligible_issues_for_pull_request(
+    repository: str,
+    pull_request_number: int,
+    label: str,
+    excluded_label: str | None = None,
+) -> list[int]:
+    return linked_issue_numbers_for_pull_request(
+        repository,
+        pull_request_number,
+        label,
+        excluded_label,
+    )
 
 
 def collaborator_has_write_permission(
@@ -828,8 +864,6 @@ def discover_issues(
 def resolve_review_event(
     repository: str,
     event: dict[str, Any],
-    label: str,
-    excluded_label: str,
 ) -> list[int]:
     comment = event.get("comment")
     pull_request = event.get("pull_request")
@@ -855,16 +889,14 @@ def resolve_review_event(
     pull_request_number = pull_request.get("number")
     if type(pull_request_number) is not int:
         return []
-    issue_numbers = linked_eligible_issues_for_pull_request(
+    issue_numbers = linked_open_issues_for_pull_request(
         repository,
         pull_request_number,
-        label,
-        excluded_label,
     )
     if len(issue_numbers) != 1:
         print(
             "::warning::Review command must resolve to exactly one open, "
-            "eligible issue."
+            "linked issue."
         )
         return []
     return issue_numbers
@@ -907,8 +939,6 @@ def resolve_work_items(event_name: str, event: dict[str, Any]) -> list[int]:
         return resolve_review_event(
             repository,
             event,
-            label,
-            excluded_label,
         )
 
     if event_name in ("schedule", "workflow_dispatch", "workflow_call"):
@@ -927,14 +957,19 @@ def resolve_command(event_path: Path) -> None:
     event = read_json(event_path, "GitHub event")
     if not isinstance(event, dict):
         raise ImplementationError("GitHub event must be an object")
+    event_name = require_environment("GITHUB_EVENT_NAME")
     issue_numbers = resolve_work_items(
-        require_environment("GITHUB_EVENT_NAME"),
+        event_name,
         event,
     )
     unique_numbers = list(dict.fromkeys(issue_numbers))
+    address_only = event_name == "pull_request_review_comment"
     matrix = {
         "include": [
-            {"issue_number": issue_number}
+            {
+                "issue_number": issue_number,
+                "address_only": address_only,
+            }
             for issue_number in unique_numbers
         ]
     }
@@ -956,6 +991,7 @@ def prepare_issue_state(
     excluded_label: str,
     actor: str,
     issue: dict[str, Any],
+    address_only: bool = False,
 ) -> dict[str, Any]:
     issue_number = issue.get("number")
     if type(issue_number) is not int or "pull_request" in issue:
@@ -970,6 +1006,7 @@ def prepare_issue_state(
         "repository": repository,
         "implementation_label": label,
         "no_pr_label": excluded_label,
+        "address_only": address_only,
         "publication_actor": actor,
         "issue": snapshot,
         "branch": deterministic_branch(issue_number),
@@ -980,7 +1017,10 @@ def prepare_issue_state(
         "target": None,
     }
 
-    if not issue_is_eligible(issue, label, state["no_pr_label"]):
+    if address_only:
+        if issue.get("state") != "open":
+            return state
+    elif not issue_is_eligible(issue, label, state["no_pr_label"]):
         return state
 
     if len(linked_pull_requests) > 1:
@@ -1015,18 +1055,29 @@ def prepare_issue_state(
                 "as its head, so the workflow will not push to it."
             )
             return state
-        linked_issue_numbers = linked_eligible_issues_for_pull_request(
-            repository,
-            pull_request["number"],
-            label,
-            excluded_label,
-        )
+        if address_only:
+            linked_issue_numbers = linked_open_issues_for_pull_request(
+                repository,
+                pull_request["number"],
+            )
+        else:
+            linked_issue_numbers = linked_eligible_issues_for_pull_request(
+                repository,
+                pull_request["number"],
+                label,
+                excluded_label,
+            )
         state["linked_pull_request_issue_numbers"] = linked_issue_numbers
         if linked_issue_numbers != [issue_number]:
             state["action"] = "blocked"
+            qualification = (
+                "open issue"
+                if address_only
+                else "open, eligible issue"
+            )
             state["reason"] = (
-                "The linked pull request must close exactly this open, "
-                "eligible issue before the workflow can update it."
+                "The linked pull request must close exactly this "
+                f"{qualification} before the workflow can update it."
             )
             return state
         validate_git_branch(pull_request["head_ref"])
@@ -1046,6 +1097,9 @@ def prepare_issue_state(
             "trusted_instruction_sha": pull_request["base_sha"],
             "pull_request_number": pull_request["number"],
         }
+        return state
+
+    if address_only:
         return state
 
     existing_branch = branch_ref(
@@ -1116,6 +1170,7 @@ def prepare_state() -> dict[str, Any]:
         excluded_label,
         publication_actor(),
         fetch_issue(repository, issue_number),
+        boolean_from_environment("ADDRESS_ONLY"),
     )
 
 
@@ -1702,15 +1757,24 @@ def publication_plan_command(
     write_output("target_sha", target.get("sha", ""))
 
 
-def require_current_issue(state: dict[str, Any]) -> dict[str, Any]:
-    issue_number = state["issue"]["number"]
-    issue = fetch_issue(state["repository"], issue_number)
-    if not issue_is_eligible(
+def issue_is_currently_actionable(
+    state: dict[str, Any],
+    issue: dict[str, Any],
+) -> bool:
+    if state.get("address_only") is True:
+        return issue.get("state") == "open" and "pull_request" not in issue
+    return issue_is_eligible(
         issue,
         state["implementation_label"],
         state["no_pr_label"],
-    ):
-        raise ImplementationError("issue is no longer open and eligible")
+    )
+
+
+def require_current_issue(state: dict[str, Any]) -> dict[str, Any]:
+    issue_number = state["issue"]["number"]
+    issue = fetch_issue(state["repository"], issue_number)
+    if not issue_is_currently_actionable(state, issue):
+        raise ImplementationError("issue is no longer open or eligible")
     if issue_snapshot(issue) != state["issue"]:
         raise ImplementationError(
             "issue changed during the run; retry with the latest state"
@@ -1723,12 +1787,8 @@ def require_current_issue_semantics(
 ) -> dict[str, Any]:
     issue_number = state["issue"]["number"]
     issue = fetch_issue(state["repository"], issue_number)
-    if not issue_is_eligible(
-        issue,
-        state["implementation_label"],
-        state["no_pr_label"],
-    ):
-        raise ImplementationError("issue is no longer open and eligible")
+    if not issue_is_currently_actionable(state, issue):
+        raise ImplementationError("issue is no longer open or eligible")
     if issue_semantic_snapshot(issue) != prepared_issue_semantic_snapshot(
         state["issue"]
     ):
@@ -1755,12 +1815,18 @@ def require_linked_pull_requests(
 def require_linked_pull_request_issue_numbers(
     state: dict[str, Any],
 ) -> list[int]:
-    current = linked_eligible_issues_for_pull_request(
-        state["repository"],
-        state["target"]["pull_request_number"],
-        state["implementation_label"],
-        state["no_pr_label"],
-    )
+    if state.get("address_only") is True:
+        current = linked_open_issues_for_pull_request(
+            state["repository"],
+            state["target"]["pull_request_number"],
+        )
+    else:
+        current = linked_eligible_issues_for_pull_request(
+            state["repository"],
+            state["target"]["pull_request_number"],
+            state["implementation_label"],
+            state["no_pr_label"],
+        )
     if current != state["linked_pull_request_issue_numbers"]:
         raise ImplementationError(
             "pull request issue ownership changed during the run"
@@ -2172,6 +2238,7 @@ def publish_blocked(state: dict[str, Any]) -> None:
         state["no_pr_label"],
         state["publication_actor"],
         issue,
+        state.get("address_only") is True,
     )
     if (
         current["action"] != "blocked"

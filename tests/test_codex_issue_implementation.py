@@ -103,6 +103,7 @@ def marker(command_id=700):
 
 def environment(**overrides):
     values = {
+        "ADDRESS_ONLY": "false",
         "GITHUB_REPOSITORY": "aws/example",
         "IMPLEMENTATION_LABEL": "codex:implement",
         "NO_PR_LABEL": "codex:no-pr",
@@ -183,6 +184,44 @@ class EventSelectionTest(unittest.TestCase):
             self.assertEqual(
                 IMPLEMENTATION.resolve_work_items("issues", event),
                 [],
+            )
+
+    def test_review_command_matrix_marks_work_as_address_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            event_path = root / "event.json"
+            output_path = root / "output"
+            event_path.write_text("{}", encoding="utf-8")
+            with patch.dict(
+                os.environ,
+                environment(
+                    GITHUB_EVENT_NAME="pull_request_review_comment",
+                    GITHUB_OUTPUT=str(output_path),
+                ),
+                clear=True,
+            ), patch.object(
+                IMPLEMENTATION,
+                "resolve_work_items",
+                return_value=[31],
+            ):
+                IMPLEMENTATION.resolve_command(event_path)
+
+            outputs = dict(
+                line.split("=", 1)
+                for line in output_path.read_text(
+                    encoding="utf-8"
+                ).splitlines()
+            )
+            self.assertEqual(
+                json.loads(outputs["matrix"]),
+                {
+                    "include": [
+                        {
+                            "issue_number": 31,
+                            "address_only": True,
+                        }
+                    ]
+                },
             )
 
     def test_issue_eligibility_matches_labels_case_insensitively(self):
@@ -296,6 +335,48 @@ class EventSelectionTest(unittest.TestCase):
                     "codex:implement",
                     "codex:no-pr",
                 )
+
+    def test_linked_open_issues_ignore_automation_labels(self):
+        response = {
+            "repository": {
+                "pullRequest": {
+                    "state": "OPEN",
+                    "closingIssuesReferences": {
+                        "nodes": [
+                            {
+                                "number": 31,
+                                "state": "OPEN",
+                                "labels": {
+                                    "nodes": [{"name": "codex:no-pr"}],
+                                    "pageInfo": {"hasNextPage": True},
+                                },
+                            },
+                            {
+                                "number": 32,
+                                "state": "CLOSED",
+                                "labels": {
+                                    "nodes": [],
+                                    "pageInfo": {"hasNextPage": False},
+                                },
+                            },
+                        ],
+                        "pageInfo": {"hasNextPage": False},
+                    },
+                }
+            }
+        }
+        with patch.object(
+            IMPLEMENTATION,
+            "run_graphql",
+            return_value=response,
+        ):
+            self.assertEqual(
+                IMPLEMENTATION.linked_open_issues_for_pull_request(
+                    "aws/example",
+                    44,
+                ),
+                [31],
+            )
 
     def test_automation_labels_must_be_distinct(self):
         with patch.dict(
@@ -533,15 +614,13 @@ class EventSelectionTest(unittest.TestCase):
             return_value=True,
         ), patch.object(
             IMPLEMENTATION,
-            "linked_eligible_issues_for_pull_request",
+            "linked_open_issues_for_pull_request",
             return_value=[31],
         ):
             self.assertEqual(
                 IMPLEMENTATION.resolve_review_event(
                     "aws/example",
                     event,
-                    "codex:implement",
-                    "codex:no-pr",
                 ),
                 [31],
             )
@@ -555,8 +634,6 @@ class EventSelectionTest(unittest.TestCase):
                 IMPLEMENTATION.resolve_review_event(
                     "aws/example",
                     event,
-                    "codex:implement",
-                    "codex:no-pr",
                 ),
                 [],
             )
@@ -580,8 +657,6 @@ class EventSelectionTest(unittest.TestCase):
                 IMPLEMENTATION.resolve_review_event(
                     "aws/example",
                     event,
-                    "codex:implement",
-                    "codex:no-pr",
                 ),
                 [],
             )
@@ -598,8 +673,6 @@ class EventSelectionTest(unittest.TestCase):
                 IMPLEMENTATION.resolve_review_event(
                     "aws/example",
                     event,
-                    "codex:implement",
-                    "codex:no-pr",
                 ),
                 [],
             )
@@ -837,6 +910,78 @@ class PreparationPolicyTest(unittest.TestCase):
             44,
             "publisher[bot]",
         )
+
+    def test_address_only_updates_unlabeled_linked_issue(self):
+        pull = pull_request()
+        markers = [marker()]
+        candidate = issue(
+            labels=[
+                {"name": "enhancement"},
+                {"name": "codex:no-pr"},
+            ]
+        )
+        with patch.dict(
+            os.environ,
+            environment(ADDRESS_ONLY="true"),
+            clear=True,
+        ), patch.object(
+            IMPLEMENTATION,
+            "fetch_issue",
+            return_value=candidate,
+        ), patch.object(
+            IMPLEMENTATION,
+            "linked_open_pull_requests",
+            return_value=[pull],
+        ), patch.object(
+            IMPLEMENTATION,
+            "linked_open_issues_for_pull_request",
+            return_value=[31],
+        ) as linked_issues, patch.object(
+            IMPLEMENTATION,
+            "linked_eligible_issues_for_pull_request",
+        ) as linked_eligible, patch.object(
+            IMPLEMENTATION,
+            "unprocessed_markers",
+            return_value=markers,
+        ), patch.object(
+            IMPLEMENTATION,
+            "repository_metadata",
+            return_value={"default_branch": "main"},
+        ), patch.object(
+            IMPLEMENTATION,
+            "validate_git_branch",
+        ):
+            state = IMPLEMENTATION.prepare_state()
+
+        self.assertEqual(state["action"], "address")
+        self.assertTrue(state["address_only"])
+        self.assertEqual(state["linked_pull_request_issue_numbers"], [31])
+        linked_issues.assert_called_once_with("aws/example", 44)
+        linked_eligible.assert_not_called()
+
+    def test_address_only_never_starts_new_issue_implementation(self):
+        candidate = issue(labels=[{"name": "enhancement"}])
+        with patch.dict(
+            os.environ,
+            environment(ADDRESS_ONLY="true"),
+            clear=True,
+        ), patch.object(
+            IMPLEMENTATION,
+            "fetch_issue",
+            return_value=candidate,
+        ), patch.object(
+            IMPLEMENTATION,
+            "linked_open_pull_requests",
+            return_value=[],
+        ), patch.object(
+            IMPLEMENTATION,
+            "branch_ref",
+        ) as branch_ref:
+            state = IMPLEMENTATION.prepare_state()
+
+        self.assertEqual(state["action"], "skip")
+        self.assertTrue(state["address_only"])
+        branch_ref.assert_not_called()
 
     def test_linked_pr_without_review_markers_is_not_actionable(self):
         pull = pull_request()
@@ -1737,6 +1882,39 @@ class ValidationPolicyTest(unittest.TestCase):
             ):
                 IMPLEMENTATION.require_current_issue(state)
 
+    def test_address_only_current_issue_does_not_require_labels(self):
+        candidate = issue(labels=[{"name": "enhancement"}])
+        state = {
+            "repository": "aws/example",
+            "implementation_label": "codex:implement",
+            "no_pr_label": "codex:no-pr",
+            "address_only": True,
+            "issue": IMPLEMENTATION.issue_snapshot(candidate),
+        }
+        with patch.object(
+            IMPLEMENTATION,
+            "fetch_issue",
+            return_value=candidate,
+        ):
+            self.assertEqual(
+                IMPLEMENTATION.require_current_issue(state),
+                candidate,
+            )
+
+        with patch.object(
+            IMPLEMENTATION,
+            "fetch_issue",
+            return_value=issue(
+                state="closed",
+                labels=[{"name": "enhancement"}],
+            ),
+        ):
+            with self.assertRaisesRegex(
+                IMPLEMENTATION.ImplementationError,
+                "no longer open",
+            ):
+                IMPLEMENTATION.require_current_issue(state)
+
     def test_no_pr_gate_ignores_only_updated_at(self):
         prepared = IMPLEMENTATION.issue_snapshot(issue())
         state = {
@@ -2269,6 +2447,34 @@ class ValidationPolicyTest(unittest.TestCase):
                     state
                 )
 
+    def test_address_only_ownership_ignores_issue_labels(self):
+        state = {
+            "repository": "aws/example",
+            "implementation_label": "codex:implement",
+            "no_pr_label": "codex:no-pr",
+            "address_only": True,
+            "issue": {"number": 31},
+            "linked_pull_request_issue_numbers": [31],
+            "target": {"pull_request_number": 44},
+        }
+        with patch.object(
+            IMPLEMENTATION,
+            "linked_open_issues_for_pull_request",
+            return_value=[31],
+        ) as linked_open, patch.object(
+            IMPLEMENTATION,
+            "linked_eligible_issues_for_pull_request",
+        ) as linked_eligible:
+            self.assertEqual(
+                IMPLEMENTATION.require_linked_pull_request_issue_numbers(
+                    state
+                ),
+                [31],
+            )
+
+        linked_open.assert_called_once_with("aws/example", 44)
+        linked_eligible.assert_not_called()
+
     def test_blocked_publication_recomputes_the_blocking_condition(self):
         current_issue = issue()
         state = {
@@ -2306,6 +2512,7 @@ class ValidationPolicyTest(unittest.TestCase):
             "codex:no-pr",
             "publisher[bot]",
             current_issue,
+            False,
         )
         post.assert_not_called()
 
@@ -2652,6 +2859,14 @@ class WorkflowPolicyTest(unittest.TestCase):
         self.assertIn(
             "issue-number: ${{ matrix.issue_number }}",
             implement.group(1),
+        )
+        self.assertIn(
+            "address-only: ${{ matrix.address_only }}",
+            implement.group(1),
+        )
+        self.assertIn(
+            "ADDRESS_ONLY: ${{ inputs['address-only'] }}",
+            reconcile.group(1),
         )
         resolve = re.search(
             r"(?ms)^  resolve:\n(.*?)(?=^  implement:)",

@@ -178,6 +178,7 @@ jobs:
     uses: ./.github/workflows/codex-issue-worker.yml
     with:
       issue-number: ${{ matrix.issue_number }}
+      address-only: ${{ matrix.address_only }}
       publication-actor: ${{ needs.resolve.outputs.publish_actor }}
       implementation-label: >-
         ${{ inputs['implementation-label'] || 'codex:implement' }}
