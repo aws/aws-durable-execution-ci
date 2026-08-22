@@ -27,6 +27,7 @@ FEEDBACK_CURSOR_PATTERN = re.compile(
 AUTOMATION_TRAILER = "Codex-Automation: issue-implementation"
 ISSUE_SNAPSHOT_TRAILER = "Codex-Issue-Snapshot"
 MAX_CONTEXT_BYTES = 1_000_000
+MAX_DISCOVERY_CANDIDATES_PER_RUN = 25
 MAX_ISSUES_PER_RUN = 10
 MAX_PATCH_BYTES = 5_000_000
 MAX_REVIEW_COMMENTS = 1_000
@@ -324,6 +325,9 @@ query($owner: String!, $name: String!, $number: Int!) {
         nodes {
           number
           state
+          repository {
+            nameWithOwner
+          }
         }
         pageInfo {
           hasNextPage
@@ -346,7 +350,7 @@ query(
     pullRequest(number: $number) {
       reviews(first: 100, after: $cursor) {
         nodes {
-          databaseId
+          fullDatabaseId
           body
           state
           submittedAt
@@ -470,10 +474,10 @@ def fetch_pull_request(
     }
 
 
-def linked_open_issues_for_pull_request(
+def linked_open_issue_references(
     repository: str,
     pull_request_number: int,
-) -> list[int]:
+) -> list[dict[str, Any]]:
     owner, name = repository.split("/")
     data = run_graphql(
         PULL_REQUEST_ISSUES_QUERY,
@@ -499,16 +503,35 @@ def linked_open_issues_for_pull_request(
             "pull request closes more issues than the workflow supports"
         )
 
-    issue_numbers: list[int] = []
+    issue_references: list[dict[str, Any]] = []
     for issue in nodes:
-        if (
-            not isinstance(issue, dict)
-            or issue.get("state") != "OPEN"
-            or type(issue.get("number")) is not int
-        ):
+        if not isinstance(issue, dict) or issue.get("state") != "OPEN":
             continue
-        issue_numbers.append(issue["number"])
-    return sorted(set(issue_numbers))
+        issue_repository = issue.get("repository")
+        if (
+            type(issue.get("number")) is not int
+            or not isinstance(issue_repository, dict)
+            or not isinstance(
+                issue_repository.get("nameWithOwner"),
+                str,
+            )
+        ):
+            raise ImplementationError(
+                "GitHub returned invalid linked issues"
+            )
+        issue_references.append(
+            {
+                "repository": issue_repository["nameWithOwner"],
+                "number": issue["number"],
+            }
+        )
+    return sorted(
+        issue_references,
+        key=lambda value: (
+            value["repository"].casefold(),
+            value["number"],
+        ),
+    )
 
 
 def collaborator_has_write_permission(
@@ -591,9 +614,17 @@ def pull_request_reviews(
                 )
             author = review.get("author")
             commit = review.get("commit")
+            full_database_id = review.get("fullDatabaseId")
+            if (
+                not isinstance(full_database_id, str)
+                or re.fullmatch(r"[1-9][0-9]*", full_database_id) is None
+            ):
+                raise ImplementationError(
+                    "GitHub returned invalid pull request reviews"
+                )
             reviews.append(
                 {
-                    "id": review.get("databaseId"),
+                    "id": int(full_database_id),
                     "body": review.get("body"),
                     "state": review.get("state"),
                     "commit_id": (
@@ -1282,16 +1313,68 @@ def issue_state_work_item(
     return work_item("pull_request", pull_request["number"])
 
 
+def read_discovery_cursor(
+    path: Path,
+    repository: str,
+) -> int:
+    if not path.exists():
+        return 0
+    cursor = read_json(path, "discovery cursor")
+    if (
+        not isinstance(cursor, dict)
+        or cursor.get("version") != 1
+        or cursor.get("repository") != repository
+        or type(cursor.get("after_number")) is not int
+        or cursor["after_number"] < 0
+    ):
+        raise ImplementationError("discovery cursor is invalid")
+    return cursor["after_number"]
+
+
+def write_discovery_cursor(
+    path: Path,
+    repository: str,
+    after_number: int,
+) -> None:
+    if type(after_number) is not int or after_number < 0:
+        raise ImplementationError("discovery cursor is invalid")
+    write_json(
+        path,
+        {
+            "version": 1,
+            "repository": repository,
+            "after_number": after_number,
+        },
+    )
+
+
+def configured_discovery_cursor_path() -> Path:
+    value = require_environment("DISCOVERY_CURSOR_PATH")
+    path = Path(value)
+    if not path.is_absolute():
+        raise ImplementationError(
+            "DISCOVERY_CURSOR_PATH must be an absolute path"
+        )
+    return path
+
+
 def discover_work_items(
     repository: str,
     excluded_label: str,
     maximum: int,
     actor: str,
+    cursor_path: Path | None = None,
 ) -> list[dict[str, Any]]:
     work_items: list[dict[str, Any]] = []
     seen: set[tuple[str, int]] = set()
+    after_number = (
+        read_discovery_cursor(cursor_path, repository)
+        if cursor_path is not None
+        else 0
+    )
+    scanned_candidates = 0
     page = 1
-    while len(work_items) < maximum:
+    while True:
         response = run_gh_json(
             [
                 f"repos/{repository}/issues?state=open"
@@ -1307,6 +1390,15 @@ def discover_work_items(
             ):
                 continue
             number = candidate["number"]
+            if number <= after_number:
+                continue
+            if (
+                cursor_path is not None
+                and scanned_candidates
+                >= MAX_DISCOVERY_CANDIDATES_PER_RUN
+            ):
+                return work_items
+            scanned_candidates += 1
             if "pull_request" in candidate:
                 state = prepare_pull_request_state(
                     repository,
@@ -1314,6 +1406,12 @@ def discover_work_items(
                     fetch_pull_request(repository, number),
                 )
                 if state["action"] != "address":
+                    if cursor_path is not None:
+                        write_discovery_cursor(
+                            cursor_path,
+                            repository,
+                            number,
+                        )
                     continue
                 item = work_item("pull_request", number)
             else:
@@ -1325,6 +1423,12 @@ def discover_work_items(
                 )
                 item = issue_state_work_item(state, number)
             if state["action"] == "skip":
+                if cursor_path is not None:
+                    write_discovery_cursor(
+                        cursor_path,
+                        repository,
+                        number,
+                    )
                 continue
             notification_marker = state_notification_marker(state)
             if notification_marker is not None:
@@ -1338,18 +1442,41 @@ def discover_work_items(
                     notification_marker,
                     actor,
                 ):
+                    if cursor_path is not None:
+                        write_discovery_cursor(
+                            cursor_path,
+                            repository,
+                            number,
+                        )
                     continue
             item_key = (item["kind"], item["number"])
             if item_key in seen:
+                if cursor_path is not None:
+                    write_discovery_cursor(
+                        cursor_path,
+                        repository,
+                        number,
+                    )
                 continue
             seen.add(item_key)
             work_items.append(item)
+            if cursor_path is not None:
+                write_discovery_cursor(
+                    cursor_path,
+                    repository,
+                    number,
+                )
             if len(work_items) == maximum:
                 return work_items
         if len(response) < 100:
+            if cursor_path is not None:
+                write_discovery_cursor(
+                    cursor_path,
+                    repository,
+                    0,
+                )
             return work_items
         page += 1
-    return work_items
 
 
 def resolve_issue_comment_event(
@@ -1476,6 +1603,7 @@ def resolve_work_items(
             excluded_label,
             maximum,
             publication_actor(),
+            configured_discovery_cursor_path(),
         )
 
     return []
@@ -1563,7 +1691,7 @@ def prepare_issue_state(
         "issue": snapshot,
         "branch": deterministic_branch(issue_number),
         "linked_pull_requests": [],
-        "linked_pull_request_issue_numbers": [],
+        "linked_pull_request_issues": [],
         "pull_request": None,
         "default_branch": None,
         "markers": [],
@@ -1614,12 +1742,17 @@ def prepare_issue_state(
                 "as its head, so the workflow will not push to it."
             )
             return state
-        linked_issue_numbers = linked_open_issues_for_pull_request(
+        linked_issues = linked_open_issue_references(
             repository,
             pull_request["number"],
         )
-        state["linked_pull_request_issue_numbers"] = linked_issue_numbers
-        if linked_issue_numbers != [issue_number]:
+        state["linked_pull_request_issues"] = linked_issues
+        if linked_issues != [
+            {
+                "repository": repository,
+                "number": issue_number,
+            }
+        ]:
             state["action"] = "blocked"
             state["reason"] = (
                 "The linked pull request must close exactly this open "
@@ -1721,7 +1854,7 @@ def prepare_pull_request_state(
         "issue": None,
         "branch": None,
         "linked_pull_requests": [],
-        "linked_pull_request_issue_numbers": [],
+        "linked_pull_request_issues": [],
         "pull_request": pull_request,
         "default_branch": None,
         "markers": [],
@@ -2407,14 +2540,14 @@ def require_linked_pull_requests(
     return current
 
 
-def require_linked_pull_request_issue_numbers(
+def require_linked_pull_request_issues(
     state: dict[str, Any],
-) -> list[int]:
-    current = linked_open_issues_for_pull_request(
+) -> list[dict[str, Any]]:
+    current = linked_open_issue_references(
         state["repository"],
         state["target"]["pull_request_number"],
     )
-    if current != state["linked_pull_request_issue_numbers"]:
+    if current != state["linked_pull_request_issues"]:
         raise ImplementationError(
             "pull request issue ownership changed during the run"
         )
@@ -3134,7 +3267,7 @@ def publish_review_update(
     if issue_scoped:
         require_current_issue(state)
         require_linked_pull_requests(state)
-        require_linked_pull_request_issue_numbers(state)
+        require_linked_pull_request_issues(state)
     require_current_pull_request(state)
     require_markers_unchanged(state)
 
@@ -3142,7 +3275,7 @@ def publish_review_update(
         if issue_scoped:
             require_current_issue(state)
             require_linked_pull_requests(state)
-            require_linked_pull_request_issue_numbers(state)
+            require_linked_pull_request_issues(state)
         require_current_pull_request(state)
         require_markers_unchanged(state)
         acknowledge_markers(state, state["target"]["sha"], result)
@@ -3154,7 +3287,7 @@ def publish_review_update(
     if issue_scoped:
         require_current_issue(state)
         require_linked_pull_requests(state)
-        require_linked_pull_request_issue_numbers(state)
+        require_linked_pull_request_issues(state)
     require_current_pull_request(state)
     require_markers_unchanged(state)
     require_pull_request_head_not_default(state)
@@ -3175,7 +3308,7 @@ def publish_review_update(
             raise ImplementationError(
                 "linked pull request did not advance to the published commit"
             )
-        require_linked_pull_request_issue_numbers(state)
+        require_linked_pull_request_issues(state)
     require_markers_still_actionable(state)
     acknowledge_markers(state, commit_sha, result)
 

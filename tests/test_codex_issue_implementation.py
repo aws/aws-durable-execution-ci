@@ -162,6 +162,10 @@ def issue_item(number=31):
     return {"kind": "issue", "number": number}
 
 
+def issue_reference(number=31, repository="aws/example"):
+    return {"repository": repository, "number": number}
+
+
 def pull_request_item(number=44):
     return {"kind": "pull_request", "number": number}
 
@@ -174,6 +178,9 @@ def environment(**overrides):
         "ISSUE_NUMBER": "31",
         "PULL_REQUEST_NUMBER": "0",
         "CODEX_PUBLISH_ACTOR": "publisher[bot]",
+        "DISCOVERY_CURSOR_PATH": (
+            "/runner-temp/codex-issue-discovery/cursor.json"
+        ),
     }
     values.update(overrides)
     return values
@@ -544,10 +551,16 @@ class EventSelectionTest(unittest.TestCase):
                             {
                                 "number": 31,
                                 "state": "OPEN",
+                                "repository": {
+                                    "nameWithOwner": "aws/example",
+                                },
                             },
                             {
                                 "number": 32,
                                 "state": "CLOSED",
+                                "repository": {
+                                    "nameWithOwner": "aws/example",
+                                },
                             },
                         ],
                         "pageInfo": {"hasNextPage": False},
@@ -561,11 +574,54 @@ class EventSelectionTest(unittest.TestCase):
             return_value=response,
         ):
             self.assertEqual(
-                IMPLEMENTATION.linked_open_issues_for_pull_request(
+                IMPLEMENTATION.linked_open_issue_references(
                     "aws/example",
                     44,
                 ),
-                [31],
+                [issue_reference()],
+            )
+
+    def test_linked_open_issues_preserve_repository_identity(self):
+        response = {
+            "repository": {
+                "pullRequest": {
+                    "state": "OPEN",
+                    "closingIssuesReferences": {
+                        "nodes": [
+                            {
+                                "number": 31,
+                                "state": "OPEN",
+                                "repository": {
+                                    "nameWithOwner": "aws/example",
+                                },
+                            },
+                            {
+                                "number": 31,
+                                "state": "OPEN",
+                                "repository": {
+                                    "nameWithOwner": "other/example",
+                                },
+                            },
+                        ],
+                        "pageInfo": {"hasNextPage": False},
+                    },
+                }
+            }
+        }
+        with patch.object(
+            IMPLEMENTATION,
+            "run_graphql",
+            return_value=response,
+        ):
+            self.assertEqual(
+                IMPLEMENTATION.linked_open_issue_references(
+                    "aws/example",
+                    44,
+                ),
+                [
+                    issue_reference(),
+                    issue_reference(repository="other/example"),
+                ],
             )
 
     def test_linked_issue_connection_must_not_be_truncated(self):
@@ -594,7 +650,7 @@ class EventSelectionTest(unittest.TestCase):
                 IMPLEMENTATION.ImplementationError,
                 "closes more issues than the workflow supports",
             ):
-                IMPLEMENTATION.linked_open_issues_for_pull_request(
+                IMPLEMENTATION.linked_open_issue_references(
                     "aws/example",
                     44,
                 )
@@ -620,7 +676,7 @@ class EventSelectionTest(unittest.TestCase):
                     "reviews": {
                         "nodes": [
                             {
-                                "databaseId": 750,
+                                "fullDatabaseId": "4294967296",
                                 "body": "Edited review summary.",
                                 "state": "CHANGES_REQUESTED",
                                 "submittedAt": "2026-08-22T00:02:00Z",
@@ -655,7 +711,7 @@ class EventSelectionTest(unittest.TestCase):
             reviews,
             [
                 {
-                    "id": 750,
+                    "id": 4294967296,
                     "body": "Edited review summary.",
                     "state": "CHANGES_REQUESTED",
                     "commit_id": "b" * 40,
@@ -729,6 +785,7 @@ class EventSelectionTest(unittest.TestCase):
             "codex:no-pr",
             2,
             "publisher[bot]",
+            Path("/runner-temp/codex-issue-discovery/cursor.json"),
         )
 
     def test_discovery_recovers_pending_pr_without_a_linked_issue(self):
@@ -900,6 +957,83 @@ class EventSelectionTest(unittest.TestCase):
 
         self.assertEqual(prepare.call_count, 101)
         self.assertIn("per_page=100&page=2", run.call_args_list[1].args[0][0])
+
+    def test_discovery_cursor_resumes_after_candidate_budget(self):
+        candidates = [
+            issue(number=1),
+            issue(number=2),
+            issue(number=3),
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            cursor_path = Path(directory) / "cursor.json"
+            with patch.object(
+                IMPLEMENTATION,
+                "MAX_DISCOVERY_CANDIDATES_PER_RUN",
+                2,
+            ), patch.object(
+                IMPLEMENTATION,
+                "run_gh_json",
+                return_value=candidates,
+            ), patch.object(
+                IMPLEMENTATION,
+                "prepare_issue_state",
+                side_effect=[
+                    {"action": "skip"},
+                    {"action": "skip"},
+                ],
+            ) as first_prepare:
+                self.assertEqual(
+                    IMPLEMENTATION.discover_work_items(
+                        "aws/example",
+                        "codex:no-pr",
+                        1,
+                        "publisher[bot]",
+                        cursor_path,
+                    ),
+                    [],
+                )
+
+            self.assertEqual(first_prepare.call_count, 2)
+            self.assertEqual(
+                IMPLEMENTATION.read_discovery_cursor(
+                    cursor_path,
+                    "aws/example",
+                ),
+                2,
+            )
+
+            with patch.object(
+                IMPLEMENTATION,
+                "MAX_DISCOVERY_CANDIDATES_PER_RUN",
+                2,
+            ), patch.object(
+                IMPLEMENTATION,
+                "run_gh_json",
+                return_value=candidates,
+            ), patch.object(
+                IMPLEMENTATION,
+                "prepare_issue_state",
+                return_value={"action": "implement"},
+            ) as second_prepare:
+                self.assertEqual(
+                    IMPLEMENTATION.discover_work_items(
+                        "aws/example",
+                        "codex:no-pr",
+                        1,
+                        "publisher[bot]",
+                        cursor_path,
+                    ),
+                    [issue_item(3)],
+                )
+
+            second_prepare.assert_called_once()
+            self.assertEqual(
+                IMPLEMENTATION.read_discovery_cursor(
+                    cursor_path,
+                    "aws/example",
+                ),
+                3,
+            )
 
     def test_discovery_skips_already_notified_blocked_issues(self):
         blocked = [issue(number=number) for number in range(1, 101)]
@@ -1857,8 +1991,8 @@ class PreparationPolicyTest(unittest.TestCase):
             return_value=[pull],
         ), patch.object(
             IMPLEMENTATION,
-            "linked_open_issues_for_pull_request",
-            return_value=[31],
+            "linked_open_issue_references",
+            return_value=[issue_reference()],
         ), patch.object(
             IMPLEMENTATION,
             "unprocessed_markers",
@@ -1879,7 +2013,10 @@ class PreparationPolicyTest(unittest.TestCase):
             state["target"]["trusted_instruction_sha"],
             pull["base_sha"],
         )
-        self.assertEqual(state["linked_pull_request_issue_numbers"], [31])
+        self.assertEqual(
+            state["linked_pull_request_issues"],
+            [issue_reference()],
+        )
         self.assertEqual(state["markers"], markers)
         self.assertEqual(state["default_branch"], "main")
         unprocessed.assert_called_once_with(
@@ -1974,8 +2111,8 @@ class PreparationPolicyTest(unittest.TestCase):
             return_value=[pull],
         ), patch.object(
             IMPLEMENTATION,
-            "linked_open_issues_for_pull_request",
-            return_value=[31],
+            "linked_open_issue_references",
+            return_value=[issue_reference()],
         ), patch.object(
             IMPLEMENTATION,
             "unprocessed_markers",
@@ -2004,8 +2141,11 @@ class PreparationPolicyTest(unittest.TestCase):
             return_value=[pull],
         ), patch.object(
             IMPLEMENTATION,
-            "linked_open_issues_for_pull_request",
-            return_value=[31, 32],
+            "linked_open_issue_references",
+            return_value=[
+                issue_reference(),
+                issue_reference(32),
+            ],
         ), patch.object(
             IMPLEMENTATION,
             "repository_metadata",
@@ -2015,8 +2155,11 @@ class PreparationPolicyTest(unittest.TestCase):
 
         self.assertEqual(state["action"], "blocked")
         self.assertEqual(
-            state["linked_pull_request_issue_numbers"],
-            [31, 32],
+            state["linked_pull_request_issues"],
+            [
+                issue_reference(),
+                issue_reference(32),
+            ],
         )
         self.assertIn("exactly this open issue", state["reason"])
 
@@ -3379,7 +3522,7 @@ class ValidationPolicyTest(unittest.TestCase):
             "require_linked_pull_requests",
         ), patch.object(
             IMPLEMENTATION,
-            "require_linked_pull_request_issue_numbers",
+            "require_linked_pull_request_issues",
         ) as require_issue_numbers, patch.object(
             IMPLEMENTATION,
             "require_current_pull_request",
@@ -3456,7 +3599,7 @@ class ValidationPolicyTest(unittest.TestCase):
                     "require_linked_pull_requests",
                 ), patch.object(
                     IMPLEMENTATION,
-                    "require_linked_pull_request_issue_numbers",
+                    "require_linked_pull_request_issues",
                 ), patch.object(
                     IMPLEMENTATION,
                     "require_current_pull_request",
@@ -3534,7 +3677,7 @@ class ValidationPolicyTest(unittest.TestCase):
             "require_linked_pull_requests",
         ), patch.object(
             IMPLEMENTATION,
-            "require_linked_pull_request_issue_numbers",
+            "require_linked_pull_request_issues",
             side_effect=[
                 None,
                 IMPLEMENTATION.ImplementationError(
@@ -3569,19 +3712,22 @@ class ValidationPolicyTest(unittest.TestCase):
             "repository": "aws/example",
             "no_pr_label": "codex:no-pr",
             "issue": {"number": 31},
-            "linked_pull_request_issue_numbers": [31],
+            "linked_pull_request_issues": [issue_reference()],
             "target": {"pull_request_number": 44},
         }
         with patch.object(
             IMPLEMENTATION,
-            "linked_open_issues_for_pull_request",
-            return_value=[31, 32],
+            "linked_open_issue_references",
+            return_value=[
+                issue_reference(),
+                issue_reference(32),
+            ],
         ):
             with self.assertRaisesRegex(
                 IMPLEMENTATION.ImplementationError,
                 "issue ownership changed",
             ):
-                IMPLEMENTATION.require_linked_pull_request_issue_numbers(
+                IMPLEMENTATION.require_linked_pull_request_issues(
                     state
                 )
 
@@ -3607,7 +3753,7 @@ class ValidationPolicyTest(unittest.TestCase):
             "require_current_issue",
         ) as require_issue, patch.object(
             IMPLEMENTATION,
-            "linked_open_issues_for_pull_request",
+            "linked_open_issue_references",
         ) as linked_issues, patch.object(
             IMPLEMENTATION,
             "require_markers_unchanged",
@@ -4075,6 +4221,28 @@ class WorkflowPolicyTest(unittest.TestCase):
             "            ${{ inputs['no-pr-label'] || "
             "env.DEFAULT_NO_PR_LABEL }}",
             resolve.group(1),
+        )
+
+    def test_scheduled_discovery_restores_and_saves_cursor(self):
+        self.assertIn(
+            "uses: actions/cache/restore@"
+            "55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
+            WORKFLOW,
+        )
+        self.assertIn(
+            "uses: actions/cache/save@"
+            "55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
+            WORKFLOW,
+        )
+        self.assertIn(
+            "DISCOVERY_CURSOR_PATH: >-\n"
+            "            ${{ runner.temp }}/"
+            "codex-issue-discovery/cursor.json",
+            WORKFLOW,
+        )
+        self.assertIn(
+            "codex-issue-discovery-${{ github.repository_id }}-",
+            WORKFLOW,
         )
 
     def test_implementation_label_is_not_part_of_the_workflow_contract(self):

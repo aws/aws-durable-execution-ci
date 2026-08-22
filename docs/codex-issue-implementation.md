@@ -128,17 +128,21 @@ Pass optional inputs from the caller job:
 The configured no-PR label follows GitHub's case-insensitive label behavior.
 
 The schedule in the caller controls run frequency. Scheduled and manual
-discovery scans open issues and pull requests in creation order until it finds
-up to `max-issues` pending work items. This recovers authorized `/ai implement`
-commands and unprocessed `/ai address` commands even when the pull request does
-not close an eligible issue. Across webhook and recovery resolution, address
-work is always emitted as a pull request work item, including when it was found
-through a linked issue, so duplicate issue-scoped and pull-request-scoped
-workers cannot target the same review command. Blocked or ambiguous issues
-consume a slot until their current state is reported; later discovery runs skip
-the same actor-authored notification marker and continue scanning. A manual run
-can pass `issue-number` to reconcile one issue directly, but the worker still
-requires an authorized implementation command.
+discovery scans open issues and pull requests in creation order until they find
+up to `max-issues` pending work items. Each run evaluates at most 25 new
+candidates and persists the last evaluated issue number in the Actions cache,
+so the next run resumes later in the list instead of repeatedly spending its
+budget on the oldest inactive issues. Reaching the end resets the cursor for a
+new cycle. This recovers authorized `/ai implement` commands and unprocessed
+`/ai address` commands even when the pull request does not close an eligible
+issue. Across webhook and recovery resolution, address work is always emitted
+as a pull request work item, including when it was found through a linked issue,
+so duplicate issue-scoped and pull-request-scoped workers cannot target the
+same review command. Blocked or ambiguous issues consume a slot until their
+current state is reported; later discovery runs skip the same actor-authored
+notification marker and continue scanning. A manual run can pass `issue-number`
+to reconcile one issue directly, but the worker still requires an authorized
+implementation command.
 
 ## Issue and pull request behavior
 
