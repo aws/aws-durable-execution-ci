@@ -556,6 +556,86 @@ class ValidationPolicyTest(unittest.TestCase):
             ):
                 IMPLEMENTATION.require_current_issue(state)
 
+    def test_default_branch_designation_change_invalidates_prepared_state(self):
+        state = {
+            "repository": "aws/example",
+            "target": {
+                "ref": "main",
+                "sha": "a" * 40,
+            },
+        }
+        with patch.object(
+            IMPLEMENTATION,
+            "repository_metadata",
+            return_value={"default_branch": "trunk"},
+        ), patch.object(
+            IMPLEMENTATION,
+            "branch_ref",
+        ) as branch:
+            with self.assertRaisesRegex(
+                IMPLEMENTATION.ImplementationError,
+                "designation changed",
+            ):
+                IMPLEMENTATION.require_default_branch_unchanged(state)
+
+        branch.assert_not_called()
+
+    def test_implementation_revalidates_default_branch_at_each_gate(self):
+        state = {
+            "repository": "aws/example",
+            "issue": {"number": 31},
+            "branch": "implement-issue-31",
+            "target": {
+                "ref": "main",
+                "sha": "a" * 40,
+            },
+        }
+        result = {
+            "outcome": "changed",
+            "summary": "Implemented the issue.",
+            "validation": ["python3 -m unittest"],
+        }
+        commit_sha = "b" * 40
+        with patch.object(
+            IMPLEMENTATION,
+            "require_current_issue",
+        ), patch.object(
+            IMPLEMENTATION,
+            "require_linked_pull_requests",
+        ), patch.object(
+            IMPLEMENTATION,
+            "require_default_branch_unchanged",
+        ) as require_default, patch.object(
+            IMPLEMENTATION,
+            "apply_patch_and_commit",
+            return_value=commit_sha,
+        ), patch.object(
+            IMPLEMENTATION,
+            "push_commit",
+        ), patch.object(
+            IMPLEMENTATION,
+            "branch_ref",
+            return_value={
+                "ref": "implement-issue-31",
+                "sha": commit_sha,
+            },
+        ), patch.object(
+            IMPLEMENTATION,
+            "linked_open_pull_requests",
+            return_value=[],
+        ), patch.object(
+            IMPLEMENTATION,
+            "create_draft_pull_request",
+        ):
+            IMPLEMENTATION.publish_implementation(
+                state,
+                result,
+                Path("/change.patch"),
+                Path("/workspace"),
+            )
+
+        self.assertEqual(require_default.call_count, 3)
+
     def test_workflow_changes_require_explicit_opt_in(self):
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

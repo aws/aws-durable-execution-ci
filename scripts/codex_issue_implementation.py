@@ -630,6 +630,22 @@ def branch_ref(
     return {"ref": branch, "sha": sha}
 
 
+def require_default_branch_unchanged(state: dict[str, Any]) -> None:
+    repository = state["repository"]
+    target = state["target"]
+    metadata = repository_metadata(repository)
+    if metadata["default_branch"] != target["ref"]:
+        raise ImplementationError(
+            "default branch designation changed during the run"
+        )
+
+    current_default = branch_ref(repository, target["ref"])
+    if current_default is None or current_default["sha"] != target["sha"]:
+        raise ImplementationError(
+            "default branch head changed during the run"
+        )
+
+
 def commit_has_automation_trailers(
     repository: str, sha: str, issue_number: int
 ) -> bool:
@@ -1546,13 +1562,7 @@ def publish_implementation(
 ) -> None:
     require_current_issue(state)
     require_linked_pull_requests(state)
-    current_default = branch_ref(
-        state["repository"], state["target"]["ref"]
-    )
-    if current_default is None or current_default["sha"] != state["target"]["sha"]:
-        raise ImplementationError(
-            "default branch changed during the run; retry from the new head"
-        )
+    require_default_branch_unchanged(state)
 
     issue_number = state["issue"]["number"]
     if result["outcome"] == "no_change":
@@ -1608,13 +1618,7 @@ def publish_implementation(
     )
     require_current_issue(state)
     require_linked_pull_requests(state)
-    current_default = branch_ref(
-        state["repository"], state["target"]["ref"]
-    )
-    if current_default is None or current_default["sha"] != state["target"]["sha"]:
-        raise ImplementationError(
-            "default branch changed immediately before publication"
-        )
+    require_default_branch_unchanged(state)
     push_commit(workspace, state["branch"], None)
     published_branch = branch_ref(state["repository"], state["branch"])
     if published_branch is None or published_branch["sha"] != commit_sha:
@@ -1624,13 +1628,7 @@ def publish_implementation(
             "a linked pull request appeared before pull request creation"
         )
     require_current_issue(state)
-    current_default = branch_ref(
-        state["repository"], state["target"]["ref"]
-    )
-    if current_default is None or current_default["sha"] != state["target"]["sha"]:
-        raise ImplementationError(
-            "default branch changed before pull request creation"
-        )
+    require_default_branch_unchanged(state)
     create_draft_pull_request(state, result)
 
 

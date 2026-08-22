@@ -163,7 +163,7 @@ of these change after model execution:
 
 - issue identity, body, state, or labels;
 - linked pull request count or identity;
-- default branch or pull request head SHA;
+- default branch designation or SHA, or pull request head SHA;
 - unprocessed authorized review markers;
 - deterministic implementation branch state.
 
