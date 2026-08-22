@@ -11,7 +11,8 @@
     "summary": {
       "type": "string",
       "minLength": 1,
-      "maxLength": 2000
+      "maxLength": 2000,
+      "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F]*[^\\s\\u0000-\\u001F\\u007F-\\u009F][^\\u0000-\\u001F\\u007F-\\u009F]*$"
     },
     "validation": {
       "type": "array",
@@ -19,7 +20,8 @@
       "items": {
         "type": "string",
         "minLength": 1,
-        "maxLength": 500
+        "maxLength": 500,
+        "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F]*[^\\s\\u0000-\\u001F\\u007F-\\u009F][^\\u0000-\\u001F\\u007F-\\u009F]*$"
       }
     }
   },

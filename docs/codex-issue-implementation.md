@@ -40,10 +40,10 @@ permissions: {}
 jobs:
   implement:
     permissions:
-      contents: write
+      contents: read
       id-token: write
-      issues: write
-      pull-requests: write
+      issues: read
+      pull-requests: read
     uses: aws/aws-durable-execution-ci/.github/workflows/codex-issue-implementation.yml@<full-commit-sha>
     with:
       issue-number: ${{ inputs['issue-number'] || '' }}
@@ -65,10 +65,18 @@ label to an open issue starts reconciliation immediately. The daily schedule
 recovers missed events, failed runs, and branches pushed before pull request
 creation completed.
 
-Create an `ai-pr-review-runtime` environment with a `BEDROCK_ROLE_ARN` secret.
-The secret must contain the IAM role that GitHub's OIDC provider can assume.
-Do not add required reviewers or a wait timer unless every implementation run
-should require manual approval.
+Create an `ai-pr-review-runtime` environment with these secrets:
+
+- `BEDROCK_ROLE_ARN`: the IAM role that GitHub's OIDC provider can assume.
+- `CODEX_PUBLISH_TOKEN`: a fine-grained personal access token or valid GitHub
+  App installation token with contents, issues, and pull request write access
+  to the consuming repository.
+
+The publication token is required because pushes and pull requests created by
+the automatic `GITHUB_TOKEN` do not trigger most subsequent workflow runs.
+Keep the token in the protected environment so it is released only to the
+trusted publication steps. Do not add required reviewers or a wait timer unless
+every implementation run should require manual approval.
 
 The workflow creates the default `codex:no-pr` label if it needs to mark an
 issue that requires no repository change. Creating it in advance is
@@ -76,9 +84,8 @@ recommended so its color and description follow repository conventions.
 Issues carrying `codex:no-pr` are excluded from scheduled discovery. Remove
 that label before asking Codex to reconsider the issue.
 
-GitHub Actions must be allowed to create and approve pull requests as required
-by the consuming repository's organization and repository settings. The
-workflow creates draft pull requests and does not merge or approve them.
+The publication credential and repository settings must allow draft pull
+request creation. The workflow does not merge or approve pull requests.
 
 ## Configuration
 
@@ -127,7 +134,9 @@ opens one draft pull request whose body closes the issue.
 
 If a workflow-owned branch was pushed but pull request creation failed, a
 later run recognizes commit trailers on that branch and retries only pull
-request creation. An unrelated branch with the deterministic name is not
+request creation. Recovery is refused when any open or closed pull request has
+already used that branch, so closing a generated draft does not cause a
+replacement. An unrelated branch with the deterministic name is not
 overwritten.
 
 With exactly one linked open pull request, Codex runs only when that pull
@@ -193,14 +202,14 @@ The workflow:
   hooks, image, browser, computer, and multi-agent tools disabled;
 - exposes only the Bedrock credential chain to the Codex process and removes
   AWS, GitHub, key, secret, and token variables from spawned shell commands;
-- never places a GitHub token in the Codex step;
+- never places the publication token or automatic `GITHUB_TOKEN` in the Codex
+  step;
 - accepts only a closed JSON result contract and a size-limited Git patch;
 - rejects gitlinks, leaked runtime credentials, unexpected workflow changes,
   stale state, and changes outside the checked-out repository;
 - re-checks all mutation preconditions in the publication step before the
-  GitHub token is used.
+  publication token is used.
 
-The worker job needs write permissions because issue-scoped concurrency must
-remain held continuously across model execution and publication. The GitHub
-token is scoped to the trusted publication step's environment and is not
-available to Codex.
+The automatic `GITHUB_TOKEN` is read-only in the worker. The separate
+publication token is passed only to the publication checkout and mutation step,
+after model execution, and is not available to Codex.

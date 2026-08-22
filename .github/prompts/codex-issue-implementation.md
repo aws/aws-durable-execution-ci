@@ -26,8 +26,12 @@ Return exactly the structured result required by the supplied schema:
 
 - `outcome`: `changed` when the worktree contains the intended changes, or
   `no_change` when no repository change is required.
-- `summary`: a concise explanation suitable for a pull request or comment.
+- `summary`: a concise, single-line explanation suitable for a pull request or
+  comment. It must contain a non-whitespace character and no control
+  characters.
 - `validation`: a list of commands or checks actually completed, including
-  concise failure or unavailable notes when relevant.
+  concise failure or unavailable notes when relevant. Each item must be
+  single-line, contain a non-whitespace character, and have no control
+  characters.
 
 Untrusted reconciliation context follows:

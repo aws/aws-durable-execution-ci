@@ -93,6 +93,9 @@ on:
       BEDROCK_ROLE_ARN:
         description: IAM role used to invoke Codex on Amazon Bedrock
         required: false
+      CODEX_PUBLISH_TOKEN:
+        description: GitHub App token or fine-grained PAT used for publication
+        required: false
 
 permissions: {}
 
@@ -154,10 +157,10 @@ jobs:
     environment: ai-pr-review-runtime
     timeout-minutes: 60
     permissions:
-      contents: write
+      contents: read
       id-token: write
-      issues: write
-      pull-requests: write
+      issues: read
+      pull-requests: read
 
     steps:
       # Scripts and prompts are copied out of the worktree before the target
@@ -193,6 +196,7 @@ jobs:
         env:
           ALLOW_WORKFLOW_CHANGES: >-
             ${{ inputs['allow-workflow-changes'] || false }}
+          CODEX_PUBLISH_TOKEN: ${{ secrets.CODEX_PUBLISH_TOKEN }}
           CODEX_MODEL: ${{ inputs['model'] || env.DEFAULT_CODEX_MODEL }}
           CODEX_REASONING_EFFORT: >-
             ${{ inputs['reasoning-effort'] ||
@@ -223,6 +227,11 @@ jobs:
 
           if [[ -z "$IMPLEMENTATION_LABEL" || -z "$NO_PR_LABEL" ]]; then
             echo "::error::Automation labels must be non-empty."
+            exit 1
+          fi
+
+          if [[ -z "$CODEX_PUBLISH_TOKEN" ]]; then
+            echo "::error::CODEX_PUBLISH_TOKEN must be configured."
             exit 1
           fi
 
@@ -460,6 +469,7 @@ jobs:
           repository: ${{ steps.prepare.outputs.target_repository }}
           ref: ${{ steps.prepare.outputs.target_sha }}
           fetch-depth: 0
+          token: ${{ secrets.CODEX_PUBLISH_TOKEN }}
           persist-credentials: true
 
       - name: Revalidate and publish
@@ -470,7 +480,7 @@ jobs:
             steps.model.outcome == 'success'
           )
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.CODEX_PUBLISH_TOKEN }}
           IMPLEMENTATION_LABEL: >-
             ${{ inputs['implementation-label'] ||
                 env.DEFAULT_IMPLEMENTATION_LABEL }}

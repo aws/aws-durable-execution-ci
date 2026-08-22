@@ -131,7 +131,7 @@ def run_gh_json(
     command = ["gh", "api", *arguments]
     encoded_input = None
     if input_value is not None:
-        command.extend(("--input", "-"))
+        command.extend(("--method", "POST", "--input", "-"))
         encoded_input = json.dumps(
             input_value,
             ensure_ascii=True,
@@ -630,6 +630,20 @@ def branch_ref(
     return {"ref": branch, "sha": sha}
 
 
+def branch_has_pull_request_history(repository: str, branch: str) -> bool:
+    owner = repository.split("/", 1)[0]
+    encoded_head = urllib.parse.quote(f"{owner}:{branch}", safe="")
+    response = run_gh_json(
+        [
+            f"repos/{repository}/pulls?state=all&head={encoded_head}"
+            "&per_page=1"
+        ]
+    )
+    if not isinstance(response, list):
+        raise ImplementationError("GitHub returned invalid branch pull requests")
+    return bool(response)
+
+
 def require_default_branch_unchanged(state: dict[str, Any]) -> None:
     repository = state["repository"]
     target = state["target"]
@@ -665,32 +679,39 @@ def discover_issues(
     maximum: int,
 ) -> list[int]:
     encoded_label = urllib.parse.quote(label, safe="")
-    response = run_gh_json(
-        [
-            f"repos/{repository}/issues?state=open&labels={encoded_label}"
-            f"&sort=created&direction=asc&per_page={maximum}"
-        ]
-    )
-    if not isinstance(response, list):
-        raise ImplementationError("GitHub returned an invalid issue list")
     issue_numbers: list[int] = []
-    for issue in response:
-        if (
-            not isinstance(issue, dict)
-            or "pull_request" in issue
-            or type(issue.get("number")) is not int
-        ):
-            continue
-        labels = issue.get("labels", [])
-        label_names = {
-            value.get("name")
-            for value in labels
-            if isinstance(value, dict)
-            and isinstance(value.get("name"), str)
-        }
-        if excluded_label not in label_names:
-            issue_numbers.append(issue["number"])
-    return issue_numbers[:maximum]
+    page = 1
+    while len(issue_numbers) < maximum:
+        response = run_gh_json(
+            [
+                f"repos/{repository}/issues?state=open&labels={encoded_label}"
+                f"&sort=created&direction=asc&per_page=100&page={page}"
+            ]
+        )
+        if not isinstance(response, list):
+            raise ImplementationError("GitHub returned an invalid issue list")
+        for issue in response:
+            if (
+                not isinstance(issue, dict)
+                or "pull_request" in issue
+                or type(issue.get("number")) is not int
+            ):
+                continue
+            labels = issue.get("labels", [])
+            label_names = {
+                value.get("name")
+                for value in labels
+                if isinstance(value, dict)
+                and isinstance(value.get("name"), str)
+            }
+            if excluded_label not in label_names:
+                issue_numbers.append(issue["number"])
+                if len(issue_numbers) == maximum:
+                    return issue_numbers
+        if len(response) < 100:
+            return issue_numbers
+        page += 1
+    return issue_numbers
 
 
 def resolve_review_event(
@@ -892,28 +913,30 @@ def prepare_state() -> dict[str, Any]:
         allow_not_found=True,
     )
     if existing_branch is not None:
-        if commit_has_automation_trailers(
+        state["target"] = {
+            "repository": repository,
+            "ref": existing_branch["ref"],
+            "sha": existing_branch["sha"],
+        }
+        if not commit_has_automation_trailers(
             repository,
             existing_branch["sha"],
             issue_number,
         ):
-            state["action"] = "recover"
-            state["target"] = {
-                "repository": repository,
-                "ref": existing_branch["ref"],
-                "sha": existing_branch["sha"],
-            }
-        else:
             state["action"] = "blocked"
-            state["target"] = {
-                "repository": repository,
-                "ref": existing_branch["ref"],
-                "sha": existing_branch["sha"],
-            }
             state["reason"] = (
                 f"The deterministic branch `{state['branch']}` already "
                 "exists without this workflow's commit trailers."
             )
+        elif branch_has_pull_request_history(repository, state["branch"]):
+            state["action"] = "blocked"
+            state["reason"] = (
+                f"The deterministic branch `{state['branch']}` already has "
+                "pull request history, so the workflow will not open a "
+                "replacement pull request."
+            )
+        else:
+            state["action"] = "recover"
         return state
 
     metadata = repository_metadata(repository)
@@ -974,6 +997,18 @@ def prepare_command(state_path: Path, context_path: Path) -> None:
     )
 
 
+def valid_model_text(value: Any, maximum: int) -> bool:
+    return (
+        isinstance(value, str)
+        and bool(value.strip())
+        and len(value) <= maximum
+        and not any(
+            ord(character) < 0x20 or 0x7F <= ord(character) <= 0x9F
+            for character in value
+        )
+    )
+
+
 def validate_model_result(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict) or set(value) != {
         "outcome",
@@ -989,14 +1024,7 @@ def validate_model_result(value: Any) -> dict[str, Any]:
     validation = value["validation"]
     if outcome not in ("changed", "no_change"):
         raise ImplementationError("model outcome must be changed or no_change")
-    if (
-        not isinstance(summary, str)
-        or not summary.strip()
-        or len(summary) > 2_000
-        or "\n" in summary
-        or "\r" in summary
-        or not summary.isprintable()
-    ):
+    if not valid_model_text(summary, 2_000):
         raise ImplementationError(
             "model summary must be a non-empty string up to 2000 characters"
         )
@@ -1004,12 +1032,7 @@ def validate_model_result(value: Any) -> dict[str, Any]:
         not isinstance(validation, list)
         or len(validation) > 50
         or any(
-            not isinstance(item, str)
-            or not item.strip()
-            or len(item) > 500
-            or "\n" in item
-            or "\r" in item
-            or not item.isprintable()
+            not valid_model_text(item, 500)
             for item in validation
         )
     ):
@@ -1217,10 +1240,49 @@ def current_marker_snapshot(state: dict[str, Any]) -> list[dict[str, Any]]:
     return unprocessed_markers(state["repository"], pull_request_number)
 
 
+def marker_acknowledgement_snapshot(
+    markers: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    immutable_thread_fields = (
+        "id",
+        "in_reply_to_id",
+        "author",
+        "body",
+        "created_at",
+    )
+    return [
+        {
+            "command_id": marker.get("command_id"),
+            "author": marker.get("author"),
+            "thread_root_id": marker.get("thread_root_id"),
+            "thread": [
+                {
+                    field: comment.get(field)
+                    for field in immutable_thread_fields
+                }
+                for comment in marker.get("thread", [])
+                if isinstance(comment, dict)
+            ],
+        }
+        for marker in markers
+        if isinstance(marker, dict)
+    ]
+
+
 def require_markers_unchanged(state: dict[str, Any]) -> None:
     if current_marker_snapshot(state) != state["markers"]:
         raise ImplementationError(
             "review commands changed during the run; retry reconciliation"
+        )
+
+
+def require_markers_still_actionable(state: dict[str, Any]) -> None:
+    current = marker_acknowledgement_snapshot(current_marker_snapshot(state))
+    prepared = marker_acknowledgement_snapshot(state["markers"])
+    if current != prepared:
+        raise ImplementationError(
+            "review commands changed before acknowledgement; retry "
+            "reconciliation"
         )
 
 
@@ -1551,6 +1613,10 @@ def publish_recovery(state: dict[str, Any]) -> None:
         state["issue"]["number"],
     ):
         raise ImplementationError("recovery branch is not workflow-owned")
+    if branch_has_pull_request_history(state["repository"], state["branch"]):
+        raise ImplementationError(
+            "recovery branch acquired pull request history during the run"
+        )
     create_draft_pull_request(state, None)
 
 
@@ -1629,6 +1695,11 @@ def publish_implementation(
         )
     require_current_issue(state)
     require_default_branch_unchanged(state)
+    if branch_has_pull_request_history(state["repository"], state["branch"]):
+        raise ImplementationError(
+            "implementation branch acquired pull request history before "
+            "pull request creation"
+        )
     create_draft_pull_request(state, result)
 
 
@@ -1679,7 +1750,7 @@ def publish_review_update(
         raise ImplementationError(
             "pull request head did not advance to the published commit"
         )
-    require_markers_unchanged(state)
+    require_markers_still_actionable(state)
     acknowledge_markers(state, commit_sha, result)
 
 

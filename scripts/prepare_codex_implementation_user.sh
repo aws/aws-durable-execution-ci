@@ -26,12 +26,11 @@ sudo install \
 # Keep Git metadata read-only while allowing Codex to edit the worktree.
 sudo chown -R "${implementation_user}:${implementation_user}" "$GITHUB_WORKSPACE"
 sudo chown "runner:${implementation_user}" "$GITHUB_WORKSPACE"
-sudo chmod 1770 "$GITHUB_WORKSPACE"
 sudo chown -R "runner:${implementation_user}" "$GITHUB_WORKSPACE/.git"
+sudo chmod -R u+rwX,go-rwx "$GITHUB_WORKSPACE"
 sudo chmod -R g-w,o-rwx "$GITHUB_WORKSPACE/.git"
 sudo chmod -R g+rX "$GITHUB_WORKSPACE/.git"
-sudo chmod -R u+rwX,go-rwx "$GITHUB_WORKSPACE"
-sudo chmod -R g+rX "$GITHUB_WORKSPACE/.git"
+sudo chmod 1770 "$GITHUB_WORKSPACE"
 
 if ! sudo -u "$implementation_user" test -r "$GITHUB_WORKSPACE/.git/HEAD"; then
   echo "$implementation_user cannot read the repository metadata" >&2
