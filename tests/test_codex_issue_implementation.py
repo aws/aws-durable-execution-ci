@@ -715,6 +715,10 @@ class PreparationPolicyTest(unittest.TestCase):
             return_value={"default_branch": "main"},
         ), patch.object(
             IMPLEMENTATION,
+            "branch_has_pull_request_history",
+            return_value=False,
+        ), patch.object(
+            IMPLEMENTATION,
             "validate_git_branch",
         ):
             state = IMPLEMENTATION.prepare_state()
@@ -974,6 +978,39 @@ class PreparationPolicyTest(unittest.TestCase):
         self.assertEqual(state["action"], "blocked")
         self.assertIn("pull request history", state["reason"])
 
+    def test_deleted_workflow_branch_with_prior_pr_is_not_recreated(self):
+        with patch.dict(os.environ, environment(), clear=True), patch.object(
+            IMPLEMENTATION,
+            "fetch_issue",
+            return_value=issue(),
+        ), patch.object(
+            IMPLEMENTATION,
+            "linked_open_pull_requests",
+            return_value=[],
+        ), patch.object(
+            IMPLEMENTATION,
+            "branch_ref",
+            return_value=None,
+        ) as branch, patch.object(
+            IMPLEMENTATION,
+            "branch_has_pull_request_history",
+            return_value=True,
+        ), patch.object(
+            IMPLEMENTATION,
+            "repository_metadata",
+        ) as metadata:
+            state = IMPLEMENTATION.prepare_state()
+
+        self.assertEqual(state["action"], "blocked")
+        self.assertIsNone(state["target"])
+        self.assertIn("pull request history", state["reason"])
+        branch.assert_called_once_with(
+            "aws/example",
+            "implement-issue-31",
+            allow_not_found=True,
+        )
+        metadata.assert_not_called()
+
 
 class ValidationPolicyTest(unittest.TestCase):
     def test_json_body_api_calls_explicitly_use_post(self):
@@ -1094,6 +1131,114 @@ class ValidationPolicyTest(unittest.TestCase):
                     "command": "git push",
                 }
             )
+
+    def test_publication_plan_checks_out_only_changed_model_results(self):
+        for outcome, changed_paths, patch_content, expected_checkout in (
+            ("changed", ["src/example.py"], b"validated patch", "true"),
+            ("no_change", [], b"", "false"),
+        ):
+            with self.subTest(outcome=outcome):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    state = {
+                        "version": 1,
+                        "action": "implement",
+                        "repository": "aws/example",
+                        "target": {
+                            "repository": "aws/example",
+                            "sha": "a" * 40,
+                        },
+                    }
+                    artifact = {
+                        "version": 1,
+                        "state_digest": IMPLEMENTATION.stable_digest(state),
+                        "result": {
+                            "outcome": outcome,
+                            "summary": "Publication plan.",
+                            "validation": [],
+                        },
+                        "changed_paths": changed_paths,
+                        "patch_sha256": IMPLEMENTATION.hashlib.sha256(
+                            patch_content
+                        ).hexdigest(),
+                    }
+                    state_path = root / "state.json"
+                    artifact_path = root / "artifact.json"
+                    patch_path = root / "change.patch"
+                    output_path = root / "output"
+                    state_path.write_text(
+                        json.dumps(state),
+                        encoding="utf-8",
+                    )
+                    artifact_path.write_text(
+                        json.dumps(artifact),
+                        encoding="utf-8",
+                    )
+                    patch_path.write_bytes(patch_content)
+
+                    with patch.dict(
+                        os.environ,
+                        {"GITHUB_OUTPUT": str(output_path)},
+                        clear=True,
+                    ):
+                        IMPLEMENTATION.publication_plan_command(
+                            state_path,
+                            artifact_path,
+                            patch_path,
+                        )
+
+                    outputs = dict(
+                        line.split("=", 1)
+                        for line in output_path.read_text(
+                            encoding="utf-8"
+                        ).splitlines()
+                    )
+                    self.assertEqual(outputs["action"], "implement")
+                    self.assertEqual(
+                        outputs["checkout"],
+                        expected_checkout,
+                    )
+                    self.assertEqual(
+                        outputs["target_repository"],
+                        "aws/example",
+                    )
+                    self.assertEqual(outputs["target_sha"], "a" * 40)
+
+    def test_non_model_publication_plan_does_not_require_artifacts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state_path = root / "state.json"
+            output_path = root / "output"
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "action": "blocked",
+                        "target": None,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.dict(
+                os.environ,
+                {"GITHUB_OUTPUT": str(output_path)},
+                clear=True,
+            ):
+                IMPLEMENTATION.publication_plan_command(
+                    state_path,
+                    root / "missing-artifact.json",
+                    root / "missing.patch",
+                )
+
+            outputs = dict(
+                line.split("=", 1)
+                for line in output_path.read_text(
+                    encoding="utf-8"
+                ).splitlines()
+            )
+            self.assertEqual(outputs["action"], "blocked")
+            self.assertEqual(outputs["checkout"], "false")
 
     def test_model_result_rejects_multiline_publication_text(self):
         with self.assertRaisesRegex(
@@ -1696,6 +1841,55 @@ class ValidationPolicyTest(unittest.TestCase):
 
         self.assertEqual(require_default.call_count, 3)
 
+    def test_implementation_rechecks_branch_history_before_push(self):
+        state = {
+            "repository": "aws/example",
+            "issue": {"number": 31},
+            "branch": "implement-issue-31",
+            "target": {
+                "ref": "main",
+                "sha": "a" * 40,
+            },
+        }
+        result = {
+            "outcome": "changed",
+            "summary": "Implemented the issue.",
+            "validation": [],
+        }
+        with patch.object(
+            IMPLEMENTATION,
+            "require_current_issue",
+        ), patch.object(
+            IMPLEMENTATION,
+            "require_linked_pull_requests",
+        ), patch.object(
+            IMPLEMENTATION,
+            "require_default_branch_unchanged",
+        ), patch.object(
+            IMPLEMENTATION,
+            "apply_patch_and_commit",
+            return_value="b" * 40,
+        ), patch.object(
+            IMPLEMENTATION,
+            "branch_has_pull_request_history",
+            return_value=True,
+        ), patch.object(
+            IMPLEMENTATION,
+            "push_commit",
+        ) as push:
+            with self.assertRaisesRegex(
+                IMPLEMENTATION.ImplementationError,
+                "history before push",
+            ):
+                IMPLEMENTATION.publish_implementation(
+                    state,
+                    result,
+                    Path("/change.patch"),
+                    Path("/workspace"),
+                )
+
+        push.assert_not_called()
+
     def test_review_update_uses_immutable_marker_check_after_push(self):
         prepared_pull = pull_request()
         state = {
@@ -2177,41 +2371,42 @@ class WorkflowPolicyTest(unittest.TestCase):
                 self.assertIn(trigger, WORKFLOW)
 
     def test_workers_share_issue_scoped_non_cancelling_concurrency(self):
-        self.assertIn(
-            "codex-issue-${{ github.repository_id }}-"
-            "${{ matrix.issue_number }}",
-            WORKFLOW,
-        )
         reconcile = re.search(
-            r"(?ms)^  reconcile:\n(.*)\Z",
+            r"(?ms)^  reconcile:\n(.*?)(?=^  publish:)",
             WORKFLOW,
         )
-        assert reconcile is not None
+        publish = re.search(
+            r"(?ms)^  publish:\n(.*)\Z",
+            WORKFLOW,
+        )
+        assert reconcile is not None and publish is not None
+        concurrency_group = (
+            "codex-issue-${{ github.repository_id }}-"
+            "${{ matrix.issue_number }}"
+        )
+        self.assertIn(concurrency_group, reconcile.group(1))
+        self.assertIn(concurrency_group, publish.group(1))
         self.assertIn("cancel-in-progress: false", reconcile.group(1))
+        self.assertIn("cancel-in-progress: false", publish.group(1))
         self.assertIn(
             "matrix: ${{ fromJSON(needs.resolve.outputs.matrix) }}",
             reconcile.group(1),
+        )
+        self.assertIn(
+            "matrix: ${{ fromJSON(needs.resolve.outputs.matrix) }}",
+            publish.group(1),
         )
         resolve = re.search(
             r"(?ms)^  resolve:\n(.*?)(?=^  reconcile:)",
             WORKFLOW,
         )
-        publisher = re.search(
-            r"(?ms)^  resolve_publication_actor:\n(.*?)(?=^  resolve:)",
-            WORKFLOW,
-        )
-        assert resolve is not None and publisher is not None
+        assert resolve is not None
         self.assertNotIn("environment:", resolve.group(1))
-        self.assertIn("needs: resolve_publication_actor", resolve.group(1))
-        self.assertIn("always()", resolve.group(1))
         self.assertIn(
             "environment: ai-pr-review-runtime",
-            publisher.group(1),
+            reconcile.group(1),
         )
-        self.assertIn(
-            "github.event_name == 'schedule'",
-            publisher.group(1),
-        )
+        self.assertNotIn("environment:", publish.group(1))
 
     def test_file_sparse_checkout_disables_cone_mode(self):
         checkout = re.search(
@@ -2310,14 +2505,23 @@ class WorkflowPolicyTest(unittest.TestCase):
     def test_publication_revalidates_after_model_execution(self):
         self.assertLess(
             WORKFLOW.index("Implement current issue work with Codex"),
-            WORKFLOW.index("Revalidate and publish"),
+            WORKFLOW.index(
+                "Revalidate and publish with event-suppressing token"
+            ),
         )
+        self.assertIn("Upload validated publication bundle", WORKFLOW)
+        self.assertIn("Download validated publication bundle", WORKFLOW)
         self.assertIn("persist-credentials: false", WORKFLOW)
         self.assertIn("persist-credentials: true", WORKFLOW)
 
-    def test_publication_uses_token_that_triggers_followup_workflows(self):
-        self.assertIn(
-            'if [[ -z "$CODEX_PUBLISH_TOKEN" ]]',
+    def test_publication_is_isolated_and_uses_automatic_token(self):
+        self.assertNotIn("CODEX_PUBLISH_TOKEN", WORKFLOW)
+        reconcile = re.search(
+            r"(?ms)^  reconcile:\n(.*?)(?=^  publish:)",
+            WORKFLOW,
+        )
+        publish_job = re.search(
+            r"(?ms)^  publish:\n(.*)\Z",
             WORKFLOW,
         )
         checkout = re.search(
@@ -2326,12 +2530,8 @@ class WorkflowPolicyTest(unittest.TestCase):
             WORKFLOW,
         )
         publish = re.search(
-            r"(?ms)^      - name: Revalidate and publish\n"
-            r"(.*?)(?=^      - name:|\Z)",
-            WORKFLOW,
-        )
-        config = re.search(
-            r"(?ms)^      - name: Validate Codex implementation configuration\n"
+            r"(?ms)^      - name: "
+            r"Revalidate and publish with event-suppressing token\n"
             r"(.*?)(?=^      - name:|\Z)",
             WORKFLOW,
         )
@@ -2346,40 +2546,46 @@ class WorkflowPolicyTest(unittest.TestCase):
             WORKFLOW,
         )
         assert (
-            checkout is not None
+            reconcile is not None
+            and publish_job is not None
+            and checkout is not None
             and publish is not None
-            and config is not None
             and prepare is not None
             and publisher is not None
         )
+        self.assertIn("contents: read", reconcile.group(1))
+        self.assertNotIn("contents: write", reconcile.group(1))
+        self.assertIn("contents: write", publish_job.group(1))
+        self.assertIn("issues: write", publish_job.group(1))
+        self.assertIn("pull-requests: write", publish_job.group(1))
         self.assertIn(
-            "token: ${{ secrets.CODEX_PUBLISH_TOKEN }}",
+            "actions/upload-artifact@",
+            reconcile.group(1),
+        )
+        self.assertIn(
+            "actions/download-artifact@",
+            publish_job.group(1),
+        )
+        self.assertIn(
+            "token: ${{ github.token }}",
             checkout.group(1),
         )
         self.assertIn(
-            "GH_TOKEN: ${{ secrets.CODEX_PUBLISH_TOKEN }}",
+            "GH_TOKEN: ${{ github.token }}",
             publish.group(1),
         )
-        self.assertNotIn("secrets.GITHUB_TOKEN", publish.group(1))
+        self.assertIn("publication-plan", publish_job.group(1))
         self.assertIn(
             "query { viewer { login } }",
             publisher.group(1),
         )
         self.assertIn(
-            "query { viewer { login } }",
-            config.group(1),
-        )
-        self.assertIn(
             "echo \"publish_actor=$publish_actor\"",
             publisher.group(1),
-        )
-        self.assertIn(
-            "echo \"publish_actor=$publish_actor\"",
-            config.group(1),
         )
         self.assertIn(
             "CODEX_PUBLISH_ACTOR: "
-            "${{ steps.config.outputs.publish_actor }}",
+            "${{ needs.resolve.outputs.publish_actor }}",
             prepare.group(1),
         )
 

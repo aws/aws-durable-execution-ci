@@ -40,10 +40,10 @@ permissions: {}
 jobs:
   implement:
     permissions:
-      contents: read
+      contents: write
       id-token: write
-      issues: read
-      pull-requests: read
+      issues: write
+      pull-requests: write
     uses: aws/aws-durable-execution-ci/.github/workflows/codex-issue-implementation.yml@<full-commit-sha>
     with:
       issue-number: ${{ inputs['issue-number'] || '' }}
@@ -65,18 +65,21 @@ label to an open issue starts reconciliation immediately. The daily schedule
 recovers missed events, failed runs, and branches pushed before pull request
 creation completed.
 
-Create an `ai-pr-review-runtime` environment with these secrets:
+Create an `ai-pr-review-runtime` environment with this secret:
 
 - `BEDROCK_ROLE_ARN`: the IAM role that GitHub's OIDC provider can assume.
-- `CODEX_PUBLISH_TOKEN`: a fine-grained personal access token or valid GitHub
-  App installation token with contents, issues, and pull request write access
-  to the consuming repository.
 
-The publication token is required because pushes and pull requests created by
-the automatic `GITHUB_TOKEN` do not trigger most subsequent workflow runs.
-Keep the token in the protected environment so it is released only to the
-trusted actor-resolution and publication steps. Do not add required reviewers
-or a wait timer unless every implementation run should require manual approval.
+Allow GitHub Actions to create pull requests in the repository settings. The
+caller must grant the reusable workflow contents, issues, and pull request
+write permissions as shown above; a called workflow cannot elevate permissions
+that the caller withheld.
+
+Publication intentionally uses the automatic `GITHUB_TOKEN`. Pushes, pull
+requests, comments, and labels created by that token do not trigger ordinary
+`push` or `pull_request` workflows, so model-authored code is not executed
+automatically with repository secrets. Repositories can provide a separately
+reviewed, secretless manual validation workflow for generated drafts. Any
+validation with privileged credentials should require human approval.
 
 The workflow creates the default `codex:no-pr` label if it needs to mark an
 issue that requires no repository change. Creating it in advance is
@@ -84,8 +87,8 @@ recommended so its color and description follow repository conventions.
 Issues carrying `codex:no-pr` are excluded from scheduled discovery. Remove
 that label before asking Codex to reconsider the issue.
 
-The publication credential and repository settings must allow draft pull
-request creation. The workflow does not merge or approve pull requests.
+The repository settings must allow the automatic token to create draft pull
+requests. The workflow does not merge or approve pull requests.
 
 ## Configuration
 
@@ -147,8 +150,8 @@ request creation. The trailers include a semantic digest of the issue title,
 body, state, and labels; recovery is blocked when the current issue no longer
 matches the work that produced the branch. Recovery is also refused when any
 open or closed pull request has already used that branch, so closing a
-generated draft does not cause a replacement. An unrelated branch with the
-deterministic name is not overwritten.
+generated draft and deleting its branch does not cause a replacement or orphan
+branch. An unrelated branch with the deterministic name is not overwritten.
 
 With exactly one linked open pull request, Codex runs only when that pull
 request closes exactly that one open, eligible issue and has an unprocessed
@@ -226,17 +229,19 @@ The workflow:
   hooks, image, browser, computer, and multi-agent tools disabled;
 - removes AWS, GitHub, key, secret, and token variables from spawned shell
   commands;
-- never places the publication token or automatic `GITHUB_TOKEN` in the Codex
-  step;
+- never places a write-enabled automatic `GITHUB_TOKEN` in the Codex step;
+- transfers only the validated state, artifact, and bounded patch to a separate
+  write-enabled publication job;
 - accepts only a closed JSON result contract, bounds individual and cumulative
   staged blob content before diff generation, and streams the Git patch under
   a separate hard size limit;
 - rejects gitlinks, runtime credentials in model-authored result text, raw
   staged blobs, and patch metadata, protected workflow renames or edits, stale
-  state, and changes outside the checked-out repository;
-- re-checks all mutation preconditions in the publication step before the
-  publication token is used.
+  state, prior pull request history, and changes outside the checked-out
+  repository;
+- re-checks all mutation preconditions in the publication job before the
+  event-suppressing automatic token is used.
 
-The automatic `GITHUB_TOKEN` is read-only in the worker. The separate
-publication token is passed only to trusted actor-resolution, publication
-checkout, and mutation steps, and is not available to Codex.
+The model job has a read-only automatic token. The separate publication job is
+the only job with contents, issues, and pull request write permissions, and it
+does not receive the Bedrock environment or its credentials.

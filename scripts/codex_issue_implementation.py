@@ -1060,6 +1060,15 @@ def prepare_issue_state(
             state["action"] = "recover"
         return state
 
+    if branch_has_pull_request_history(repository, state["branch"]):
+        state["action"] = "blocked"
+        state["reason"] = (
+            f"The deterministic branch `{state['branch']}` already has "
+            "pull request history, so the workflow will not open a "
+            "replacement pull request."
+        )
+        return state
+
     metadata = repository_metadata(repository)
     default_branch = metadata["default_branch"]
     validate_git_branch(default_branch)
@@ -1609,6 +1618,56 @@ def validate_artifact(
     if (result["outcome"] == "changed") != bool(paths):
         raise ImplementationError("model artifact outcome is inconsistent")
     return result
+
+
+def read_model_patch(patch_path: Path) -> bytes:
+    try:
+        if patch_path.stat().st_size > MAX_PATCH_BYTES:
+            raise ImplementationError("model patch exceeds the size limit")
+        return patch_path.read_bytes()
+    except OSError as error:
+        raise ImplementationError("model patch is not readable") from error
+
+
+def publication_plan_command(
+    state_path: Path,
+    artifact_path: Path,
+    patch_path: Path,
+) -> None:
+    state = read_json(state_path, "prepared state")
+    if not isinstance(state, dict) or state.get("version") != 1:
+        raise ImplementationError("prepared state is invalid")
+    action = state.get("action")
+    if action not in (
+        "skip",
+        "ambiguous",
+        "blocked",
+        "recover",
+        "implement",
+        "address",
+    ):
+        raise ImplementationError("prepared state has an invalid action")
+
+    checkout = False
+    if action in ("implement", "address"):
+        artifact = read_json(artifact_path, "model artifact")
+        result = validate_artifact(
+            artifact,
+            state,
+            read_model_patch(patch_path),
+        )
+        checkout = result["outcome"] == "changed"
+
+    target = state.get("target") or {}
+    if checkout and (
+        target.get("repository") != state.get("repository")
+        or re.fullmatch(r"[0-9a-f]{40}", target.get("sha", "")) is None
+    ):
+        raise ImplementationError("prepared state has an invalid target")
+    write_output("action", action)
+    write_output("checkout", str(checkout).lower())
+    write_output("target_repository", target.get("repository", ""))
+    write_output("target_sha", target.get("sha", ""))
 
 
 def require_current_issue(state: dict[str, Any]) -> dict[str, Any]:
@@ -2185,6 +2244,12 @@ def publish_implementation(
     require_current_issue(state)
     require_linked_pull_requests(state)
     require_default_branch_unchanged(state)
+    if branch_has_pull_request_history(
+        state["repository"], state["branch"]
+    ):
+        raise ImplementationError(
+            "implementation branch acquired pull request history before push"
+        )
     push_commit(workspace, state["branch"], None)
     published_branch = branch_ref(state["repository"], state["branch"])
     if published_branch is None or published_branch["sha"] != commit_sha:
@@ -2284,10 +2349,7 @@ def publish_command(
         raise ImplementationError("prepared state has an invalid action")
 
     artifact = read_json(artifact_path, "model artifact")
-    try:
-        patch = patch_path.read_bytes()
-    except OSError as error:
-        raise ImplementationError("model patch is not readable") from error
+    patch = read_model_patch(patch_path)
     result = validate_artifact(artifact, state, patch)
     if action == "implement":
         publish_implementation(state, result, patch_path, workspace)
@@ -2310,6 +2372,11 @@ def parse_arguments() -> argparse.Namespace:
     trusted_instructions.add_argument("state_path", type=Path)
     trusted_instructions.add_argument("output_path", type=Path)
     trusted_instructions.add_argument("workspace", type=Path)
+
+    publication_plan = subparsers.add_parser("publication-plan")
+    publication_plan.add_argument("state_path", type=Path)
+    publication_plan.add_argument("artifact_path", type=Path)
+    publication_plan.add_argument("patch_path", type=Path)
 
     validate = subparsers.add_parser("validate-model")
     validate.add_argument("result_path", type=Path)
@@ -2339,6 +2406,12 @@ def main() -> int:
                 arguments.state_path,
                 arguments.output_path,
                 arguments.workspace,
+            )
+        elif arguments.command == "publication-plan":
+            publication_plan_command(
+                arguments.state_path,
+                arguments.artifact_path,
+                arguments.patch_path,
             )
         elif arguments.command == "validate-model":
             validate_model_command(

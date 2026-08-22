@@ -93,9 +93,6 @@ on:
       BEDROCK_ROLE_ARN:
         description: IAM role used to invoke Codex on Amazon Bedrock
         required: false
-      CODEX_PUBLISH_TOKEN:
-        description: GitHub App token or fine-grained PAT used for publication
-        required: false
 
 permissions: {}
 
@@ -107,52 +104,8 @@ env:
   DEFAULT_REASONING_EFFORT: high
 
 jobs:
-  resolve_publication_actor:
-    name: Resolve publication actor
-    if: >-
-      github.event_name == 'schedule' ||
-      github.event_name == 'workflow_dispatch' ||
-      github.event_name == 'workflow_call'
-    runs-on: ubuntu-latest
-    environment: ai-pr-review-runtime
-    timeout-minutes: 5
-    permissions: {}
-    outputs:
-      publish_actor: ${{ steps.publisher.outputs.publish_actor }}
-
-    steps:
-      - name: Resolve publication actor
-        id: publisher
-        env:
-          CODEX_PUBLISH_TOKEN: ${{ secrets.CODEX_PUBLISH_TOKEN }}
-        run: |
-          set -euo pipefail
-
-          if [[ -z "$CODEX_PUBLISH_TOKEN" ]]; then
-            echo "::error::CODEX_PUBLISH_TOKEN must be configured."
-            exit 1
-          fi
-
-          publish_actor="$(
-            GH_TOKEN="$CODEX_PUBLISH_TOKEN" gh api graphql \
-              --field query='query { viewer { login } }' \
-              --jq '.data.viewer.login'
-          )"
-          if [[ ! "$publish_actor" =~ ^[A-Za-z0-9-]+(\[bot\])?$ ]]; then
-            echo "::error::Could not resolve the publication token actor."
-            exit 1
-          fi
-          echo "publish_actor=$publish_actor" >> "$GITHUB_OUTPUT"
-
   resolve:
     name: Resolve eligible issues
-    needs: resolve_publication_actor
-    if: >-
-      always() &&
-      (
-        needs.resolve_publication_actor.result == 'success' ||
-        needs.resolve_publication_actor.result == 'skipped'
-      )
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -162,6 +115,7 @@ jobs:
     outputs:
       matrix: ${{ steps.resolve.outputs.matrix }}
       count: ${{ steps.resolve.outputs.count }}
+      publish_actor: ${{ steps.publisher.outputs.publish_actor }}
 
     steps:
       - name: Check out Codex implementation toolkit
@@ -172,12 +126,30 @@ jobs:
           sparse-checkout: scripts
           persist-credentials: false
 
+      - name: Resolve publication actor
+        id: publisher
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          publish_actor="$(
+            gh api graphql \
+              --field query='query { viewer { login } }' \
+              --jq '.data.viewer.login'
+          )"
+          if [[ ! "$publish_actor" =~ ^[A-Za-z0-9-]+(\[bot\])?$ ]]; then
+            echo "::error::Could not resolve the automatic token actor."
+            exit 1
+          fi
+          echo "publish_actor=$publish_actor" >> "$GITHUB_OUTPUT"
+
       - name: Resolve work to issue numbers
         id: resolve
         env:
           CODEX_PUBLISH_ACTOR: >-
-            ${{ needs.resolve_publication_actor.outputs.publish_actor }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            ${{ steps.publisher.outputs.publish_actor }}
+          GH_TOKEN: ${{ github.token }}
           IMPLEMENTATION_LABEL: >-
             ${{ inputs['implementation-label'] ||
                 env.DEFAULT_IMPLEMENTATION_LABEL }}
@@ -247,7 +219,6 @@ jobs:
         env:
           ALLOW_WORKFLOW_CHANGES: >-
             ${{ inputs['allow-workflow-changes'] || false }}
-          CODEX_PUBLISH_TOKEN: ${{ secrets.CODEX_PUBLISH_TOKEN }}
           CODEX_MODEL: ${{ inputs['model'] || env.DEFAULT_CODEX_MODEL }}
           CODEX_REASONING_EFFORT: >-
             ${{ inputs['reasoning-effort'] ||
@@ -282,33 +253,17 @@ jobs:
             exit 1
           fi
 
-          if [[ -z "$CODEX_PUBLISH_TOKEN" ]]; then
-            echo "::error::CODEX_PUBLISH_TOKEN must be configured."
-            exit 1
-          fi
-
-          publish_actor="$(
-            GH_TOKEN="$CODEX_PUBLISH_TOKEN" gh api graphql \
-              --field query='query { viewer { login } }' \
-              --jq '.data.viewer.login'
-          )"
-          if [[ ! "$publish_actor" =~ ^[A-Za-z0-9-]+(\[bot\])?$ ]]; then
-            echo "::error::Could not resolve the publication token actor."
-            exit 1
-          fi
-
           {
             echo "model=$CODEX_MODEL"
             echo "reasoning_effort=$CODEX_REASONING_EFFORT"
             echo "allow_workflow_changes=$ALLOW_WORKFLOW_CHANGES"
-            echo "publish_actor=$publish_actor"
           } >> "$GITHUB_OUTPUT"
 
       - name: Re-fetch issue and pull request state
         id: prepare
         env:
-          CODEX_PUBLISH_ACTOR: ${{ steps.config.outputs.publish_actor }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CODEX_PUBLISH_ACTOR: ${{ needs.resolve.outputs.publish_actor }}
+          GH_TOKEN: ${{ github.token }}
           IMPLEMENTATION_LABEL: >-
             ${{ inputs['implementation-label'] ||
                 env.DEFAULT_IMPLEMENTATION_LABEL }}
@@ -632,38 +587,118 @@ jobs:
             AWS_CONTAINER_AUTHORIZATION_TOKEN \
             CODEX_CREDENTIAL_PROXY_TOKEN
 
-      - name: Check out exact publication target
+      - name: Upload validated publication bundle
         if: >-
-          steps.prepare.outputs.run_model == 'true' &&
-          steps.model.outputs.outcome == 'changed'
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: ${{ steps.prepare.outputs.target_repository }}
-          ref: ${{ steps.prepare.outputs.target_sha }}
-          fetch-depth: 0
-          token: ${{ secrets.CODEX_PUBLISH_TOKEN }}
-          persist-credentials: true
-
-      - name: Revalidate and publish
-        if: >-
-          steps.prepare.outputs.action != 'skip' &&
+          always() &&
+          steps.prepare.outcome == 'success' &&
           (
             steps.prepare.outputs.run_model != 'true' ||
             steps.model.outcome == 'success'
           )
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: codex-implementation-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.issue_number }}
+          path: |
+            ${{ runner.temp }}/codex-implementation-state.json
+            ${{ runner.temp }}/codex-implementation-artifact.json
+            ${{ runner.temp }}/codex-implementation.patch
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish issue ${{ matrix.issue_number }}
+    needs: [resolve, reconcile]
+    if: >-
+      always() &&
+      needs.resolve.result == 'success' &&
+      needs.resolve.outputs.count != '0' &&
+      needs.reconcile.result != 'cancelled'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.resolve.outputs.matrix) }}
+    concurrency:
+      group: >-
+        codex-issue-${{ github.repository_id }}-${{ matrix.issue_number }}
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+
+    steps:
+      - name: Load trusted publication toolkit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .codex-publication-toolkit
+          sparse-checkout: scripts/codex_issue_implementation.py
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Reserve trusted publication toolkit
         env:
-          GH_TOKEN: ${{ secrets.CODEX_PUBLISH_TOKEN }}
+          TOOLKIT_PATH: ${{ runner.temp }}/codex-publication-toolkit
+        run: |
+          set -euo pipefail
+
+          install -d -m 755 "$TOOLKIT_PATH/scripts"
+          cp \
+            .codex-publication-toolkit/scripts/codex_issue_implementation.py \
+            "$TOOLKIT_PATH/scripts/"
+          chmod -R a-w "$TOOLKIT_PATH"
+
+      - name: Download validated publication bundle
+        id: download
+        continue-on-error: true
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: codex-implementation-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.issue_number }}
+          path: ${{ runner.temp }}/codex-publication
+
+      - name: Resolve publication plan
+        id: plan
+        if: steps.download.outcome == 'success'
+        env:
+          TOOLKIT_PATH: ${{ runner.temp }}/codex-publication-toolkit
+        run: >-
+          python3 "$TOOLKIT_PATH/scripts/codex_issue_implementation.py"
+          publication-plan
+          "${RUNNER_TEMP}/codex-publication/codex-implementation-state.json"
+          "${RUNNER_TEMP}/codex-publication/codex-implementation-artifact.json"
+          "${RUNNER_TEMP}/codex-publication/codex-implementation.patch"
+
+      - name: Check out exact publication target
+        if: >-
+          steps.download.outcome == 'success' &&
+          steps.plan.outputs.checkout == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ steps.plan.outputs.target_repository }}
+          ref: ${{ steps.plan.outputs.target_sha }}
+          fetch-depth: 0
+          token: ${{ github.token }}
+          persist-credentials: true
+
+      - name: Revalidate and publish with event-suppressing token
+        if: >-
+          steps.download.outcome == 'success' &&
+          steps.plan.outputs.action != 'skip'
+        env:
+          GH_TOKEN: ${{ github.token }}
           IMPLEMENTATION_LABEL: >-
             ${{ inputs['implementation-label'] ||
                 env.DEFAULT_IMPLEMENTATION_LABEL }}
           ISSUE_NUMBER: ${{ matrix.issue_number }}
           NO_PR_LABEL: >-
             ${{ inputs['no-pr-label'] || env.DEFAULT_NO_PR_LABEL }}
-          TOOLKIT_PATH: ${{ runner.temp }}/codex-implementation-toolkit
+          TOOLKIT_PATH: ${{ runner.temp }}/codex-publication-toolkit
         run: >-
           python3 "$TOOLKIT_PATH/scripts/codex_issue_implementation.py"
           publish
-          "${RUNNER_TEMP}/codex-implementation-state.json"
-          "${RUNNER_TEMP}/codex-implementation-artifact.json"
-          "${RUNNER_TEMP}/codex-implementation.patch"
+          "${RUNNER_TEMP}/codex-publication/codex-implementation-state.json"
+          "${RUNNER_TEMP}/codex-publication/codex-implementation-artifact.json"
+          "${RUNNER_TEMP}/codex-publication/codex-implementation.patch"
           "$GITHUB_WORKSPACE"
