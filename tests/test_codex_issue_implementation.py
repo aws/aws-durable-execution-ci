@@ -2789,6 +2789,11 @@ class WorkflowPolicyTest(unittest.TestCase):
             r"(?ms)^  publish:\n(.*)\Z",
             WORKER_WORKFLOW,
         )
+        download = re.search(
+            r"(?ms)^      - name: Download validated publication bundle\n"
+            r"(.*?)(?=^      - name:|\Z)",
+            WORKER_WORKFLOW,
+        )
         checkout = re.search(
             r"(?ms)^      - name: Check out exact publication target\n"
             r"(.*?)(?=^      - name:|\Z)",
@@ -2813,6 +2818,7 @@ class WorkflowPolicyTest(unittest.TestCase):
         assert (
             reconcile is not None
             and publish_job is not None
+            and download is not None
             and checkout is not None
             and publish is not None
             and prepare is not None
@@ -2831,6 +2837,11 @@ class WorkflowPolicyTest(unittest.TestCase):
             "actions/download-artifact@",
             publish_job.group(1),
         )
+        self.assertIn(
+            "if: needs.reconcile.result == 'success'",
+            download.group(1),
+        )
+        self.assertNotIn("continue-on-error", download.group(1))
         self.assertIn(
             "token: ${{ github.token }}",
             checkout.group(1),
