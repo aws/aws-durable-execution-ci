@@ -126,16 +126,19 @@ directly.
 
 ## Issue and pull request behavior
 
-For every selected issue, the worker re-fetches the issue, labels, linked pull
-requests, branch SHA, and unprocessed review commands after acquiring this
-concurrency group:
+For every selected issue, the entry workflow starts one reusable worker that
+owns the complete reconcile and publication pipeline. The worker re-fetches
+the issue, labels, linked pull requests, branch SHA, and unprocessed review
+commands after acquiring this workflow-level concurrency group:
 
 ```text
 codex-issue-<repository-id>-<issue-number>
 ```
 
-Runs for one issue are serialized without cancellation. Different issue
-numbers remain independent matrix jobs and can run in parallel.
+A running pipeline cannot be canceled between model execution and publication
+by a newer event for the same issue. GitHub may replace an older pending worker
+before it starts, since the newer worker will reconcile fresher state. Different
+issue numbers remain independent matrix jobs and can run in parallel.
 
 With no linked open pull request, Codex checks out the exact current default
 branch revision. A change is committed to the deterministic

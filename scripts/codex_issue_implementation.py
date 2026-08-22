@@ -321,6 +321,9 @@ query($owner: String!, $name: String!, $number: Int!) {
             nodes {
               name
             }
+            pageInfo {
+              hasNextPage
+            }
           }
         }
         pageInfo {
@@ -431,7 +434,21 @@ def linked_eligible_issues_for_pull_request(
             or type(issue.get("number")) is not int
         ):
             continue
-        label_nodes = issue.get("labels", {}).get("nodes", [])
+        label_connection = issue.get("labels")
+        if not isinstance(label_connection, dict):
+            raise ImplementationError(
+                "GitHub returned invalid linked issue labels"
+            )
+        label_nodes = label_connection.get("nodes")
+        label_page_info = label_connection.get("pageInfo")
+        if (
+            not isinstance(label_nodes, list)
+            or not isinstance(label_page_info, dict)
+            or label_page_info.get("hasNextPage") is not False
+        ):
+            raise ImplementationError(
+                "linked issue has more labels than the workflow supports"
+            )
         label_names = {
             value["name"].casefold()
             for value in label_nodes
@@ -1216,7 +1233,15 @@ def staged_blob_oids(workspace: Path, paths: list[str]) -> list[str]:
     blob_oids: list[str] = []
     for path in paths:
         result = run_command(
-            ["git", "ls-files", "--stage", "-z", "--", path],
+            [
+                "git",
+                "--literal-pathspecs",
+                "ls-files",
+                "--stage",
+                "-z",
+                "--",
+                path,
+            ],
             cwd=workspace,
         )
         if result.returncode != 0:

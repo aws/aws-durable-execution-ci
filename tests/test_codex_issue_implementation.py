@@ -14,6 +14,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = (
     REPO_ROOT / ".github/workflows/codex-issue-implementation.yml"
 ).read_text(encoding="utf-8")
+WORKER_WORKFLOW = (
+    REPO_ROOT / ".github/workflows/codex-issue-worker.yml"
+).read_text(encoding="utf-8")
 PROMPT = (
     REPO_ROOT / ".github/prompts/codex-issue-implementation.md"
 ).read_text(encoding="utf-8")
@@ -213,7 +216,10 @@ class EventSelectionTest(unittest.TestCase):
                                 "labels": {
                                     "nodes": [
                                         {"name": "CODEX:IMPLEMENT"}
-                                    ]
+                                    ],
+                                    "pageInfo": {
+                                        "hasNextPage": False
+                                    },
                                 },
                             },
                             {
@@ -223,7 +229,10 @@ class EventSelectionTest(unittest.TestCase):
                                     "nodes": [
                                         {"name": "codex:implement"},
                                         {"name": "Codex:No-PR"},
-                                    ]
+                                    ],
+                                    "pageInfo": {
+                                        "hasNextPage": False
+                                    },
                                 },
                             },
                         ],
@@ -246,6 +255,47 @@ class EventSelectionTest(unittest.TestCase):
                 ),
                 [31],
             )
+
+    def test_linked_issue_with_truncated_labels_is_rejected(self):
+        response = {
+            "repository": {
+                "pullRequest": {
+                    "state": "OPEN",
+                    "closingIssuesReferences": {
+                        "nodes": [
+                            {
+                                "number": 31,
+                                "state": "OPEN",
+                                "labels": {
+                                    "nodes": [
+                                        {"name": "codex:implement"}
+                                    ],
+                                    "pageInfo": {
+                                        "hasNextPage": True
+                                    },
+                                },
+                            }
+                        ],
+                        "pageInfo": {"hasNextPage": False},
+                    },
+                }
+            }
+        }
+        with patch.object(
+            IMPLEMENTATION,
+            "run_graphql",
+            return_value=response,
+        ):
+            with self.assertRaisesRegex(
+                IMPLEMENTATION.ImplementationError,
+                "more labels than the workflow supports",
+            ):
+                IMPLEMENTATION.linked_eligible_issues_for_pull_request(
+                    "aws/example",
+                    44,
+                    "codex:implement",
+                    "codex:no-pr",
+                )
 
     def test_automation_labels_must_be_distinct(self):
         with patch.dict(
@@ -1493,6 +1543,47 @@ class ValidationPolicyTest(unittest.TestCase):
             self.assertFalse(patch_path.exists())
             self.assertFalse((root / ".change.patch.tmp").exists())
 
+    def test_pathspec_magic_filename_is_inspected_literally(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace, sha = initialize_repository(root)
+            magic_path = workspace / ":(exclude)*"
+            magic_path.write_bytes(b"\0" + (b"x" * 2_048))
+            paths = write_model_inputs(root, sha)
+            state_path, result_path, artifact_path, patch_path = paths
+
+            with patch.dict(
+                os.environ,
+                {"ALLOW_WORKFLOW_CHANGES": "false"},
+                clear=True,
+            ), patch.object(
+                IMPLEMENTATION,
+                "MAX_STAGED_BLOB_BYTES",
+                1_024,
+            ), patch.object(
+                IMPLEMENTATION,
+                "MAX_STAGED_CONTENT_BYTES",
+                4_096,
+            ), patch.object(
+                IMPLEMENTATION,
+                "create_model_patch",
+            ) as create_patch:
+                with self.assertRaisesRegex(
+                    IMPLEMENTATION.ImplementationError,
+                    "staged blob exceeds the size limit",
+                ):
+                    IMPLEMENTATION.validate_model_command(
+                        result_path,
+                        state_path,
+                        artifact_path,
+                        patch_path,
+                        workspace,
+                    )
+
+            create_patch.assert_not_called()
+            self.assertFalse(artifact_path.exists())
+            self.assertFalse(patch_path.exists())
+
     def test_oversized_binary_blob_is_rejected_before_diff(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -2370,34 +2461,48 @@ class WorkflowPolicyTest(unittest.TestCase):
             with self.subTest(trigger=trigger):
                 self.assertIn(trigger, WORKFLOW)
 
-    def test_workers_share_issue_scoped_non_cancelling_concurrency(self):
+    def test_each_issue_uses_one_workflow_scoped_concurrency_boundary(self):
+        implement = re.search(
+            r"(?ms)^  implement:\n(.*)\Z",
+            WORKFLOW,
+        )
         reconcile = re.search(
             r"(?ms)^  reconcile:\n(.*?)(?=^  publish:)",
-            WORKFLOW,
+            WORKER_WORKFLOW,
         )
         publish = re.search(
             r"(?ms)^  publish:\n(.*)\Z",
-            WORKFLOW,
+            WORKER_WORKFLOW,
         )
-        assert reconcile is not None and publish is not None
+        assert (
+            implement is not None
+            and reconcile is not None
+            and publish is not None
+        )
         concurrency_group = (
             "codex-issue-${{ github.repository_id }}-"
-            "${{ matrix.issue_number }}"
+            "${{ inputs['issue-number'] }}"
         )
-        self.assertIn(concurrency_group, reconcile.group(1))
-        self.assertIn(concurrency_group, publish.group(1))
-        self.assertIn("cancel-in-progress: false", reconcile.group(1))
-        self.assertIn("cancel-in-progress: false", publish.group(1))
-        self.assertIn(
-            "matrix: ${{ fromJSON(needs.resolve.outputs.matrix) }}",
-            reconcile.group(1),
+        self.assertIn(concurrency_group, WORKER_WORKFLOW)
+        self.assertEqual(WORKER_WORKFLOW.count(concurrency_group), 1)
+        self.assertEqual(
+            WORKER_WORKFLOW.count("cancel-in-progress: false"),
+            1,
         )
         self.assertIn(
             "matrix: ${{ fromJSON(needs.resolve.outputs.matrix) }}",
-            publish.group(1),
+            implement.group(1),
+        )
+        self.assertIn(
+            "uses: ./.github/workflows/codex-issue-worker.yml",
+            implement.group(1),
+        )
+        self.assertIn(
+            "issue-number: ${{ matrix.issue_number }}",
+            implement.group(1),
         )
         resolve = re.search(
-            r"(?ms)^  resolve:\n(.*?)(?=^  reconcile:)",
+            r"(?ms)^  resolve:\n(.*?)(?=^  implement:)",
             WORKFLOW,
         )
         assert resolve is not None
@@ -2407,12 +2512,14 @@ class WorkflowPolicyTest(unittest.TestCase):
             reconcile.group(1),
         )
         self.assertNotIn("environment:", publish.group(1))
+        self.assertNotIn("concurrency:", reconcile.group(1))
+        self.assertNotIn("concurrency:", publish.group(1))
 
     def test_file_sparse_checkout_disables_cone_mode(self):
         checkout = re.search(
             r"(?ms)^      - name: Load trusted Codex implementation toolkit\n"
             r"(.*?)(?=^      - name:|\Z)",
-            WORKFLOW,
+            WORKER_WORKFLOW,
         )
         assert checkout is not None
         self.assertIn("sparse-checkout-cone-mode: false", checkout.group(1))
@@ -2423,7 +2530,7 @@ class WorkflowPolicyTest(unittest.TestCase):
             "${{ format('{0}', inputs['max-issues']) ||\n"
             "                env.DEFAULT_MAX_ISSUES }}"
         )
-        self.assertEqual(WORKFLOW.count(expression), 2)
+        self.assertEqual(WORKFLOW.count(expression), 1)
 
     def test_resolver_receives_configured_no_pr_label(self):
         resolve = re.search(
@@ -2443,7 +2550,7 @@ class WorkflowPolicyTest(unittest.TestCase):
         model = re.search(
             r"(?ms)^      - name: Implement current issue work with Codex\n"
             r"(.*?)(?=^      - name:|\Z)",
-            WORKFLOW,
+            WORKER_WORKFLOW,
         )
         assert model is not None
         block = model.group(1)
@@ -2471,7 +2578,7 @@ class WorkflowPolicyTest(unittest.TestCase):
             block,
         )
         self.assertNotIn("--skip-git-repo-check", block)
-        self.assertNotIn("codex-implementation-env", WORKFLOW)
+        self.assertNotIn("codex-implementation-env", WORKER_WORKFLOW)
         self.assertIn(
             "AWS_CONTAINER_CREDENTIALS_FULL_URI=\"$credential_uri\"",
             block,
@@ -2504,41 +2611,47 @@ class WorkflowPolicyTest(unittest.TestCase):
 
     def test_publication_revalidates_after_model_execution(self):
         self.assertLess(
-            WORKFLOW.index("Implement current issue work with Codex"),
-            WORKFLOW.index(
+            WORKER_WORKFLOW.index("Implement current issue work with Codex"),
+            WORKER_WORKFLOW.index(
                 "Revalidate and publish with event-suppressing token"
             ),
         )
-        self.assertIn("Upload validated publication bundle", WORKFLOW)
-        self.assertIn("Download validated publication bundle", WORKFLOW)
-        self.assertIn("persist-credentials: false", WORKFLOW)
-        self.assertIn("persist-credentials: true", WORKFLOW)
+        self.assertIn(
+            "Upload validated publication bundle",
+            WORKER_WORKFLOW,
+        )
+        self.assertIn(
+            "Download validated publication bundle",
+            WORKER_WORKFLOW,
+        )
+        self.assertIn("persist-credentials: false", WORKER_WORKFLOW)
+        self.assertIn("persist-credentials: true", WORKER_WORKFLOW)
 
     def test_publication_is_isolated_and_uses_automatic_token(self):
-        self.assertNotIn("CODEX_PUBLISH_TOKEN", WORKFLOW)
+        self.assertNotIn("CODEX_PUBLISH_TOKEN", WORKER_WORKFLOW)
         reconcile = re.search(
             r"(?ms)^  reconcile:\n(.*?)(?=^  publish:)",
-            WORKFLOW,
+            WORKER_WORKFLOW,
         )
         publish_job = re.search(
             r"(?ms)^  publish:\n(.*)\Z",
-            WORKFLOW,
+            WORKER_WORKFLOW,
         )
         checkout = re.search(
             r"(?ms)^      - name: Check out exact publication target\n"
             r"(.*?)(?=^      - name:|\Z)",
-            WORKFLOW,
+            WORKER_WORKFLOW,
         )
         publish = re.search(
             r"(?ms)^      - name: "
             r"Revalidate and publish with event-suppressing token\n"
             r"(.*?)(?=^      - name:|\Z)",
-            WORKFLOW,
+            WORKER_WORKFLOW,
         )
         prepare = re.search(
             r"(?ms)^      - name: Re-fetch issue and pull request state\n"
             r"(.*?)(?=^      - name:|\Z)",
-            WORKFLOW,
+            WORKER_WORKFLOW,
         )
         publisher = re.search(
             r"(?ms)^      - name: Resolve publication actor\n"
@@ -2585,7 +2698,7 @@ class WorkflowPolicyTest(unittest.TestCase):
         )
         self.assertIn(
             "CODEX_PUBLISH_ACTOR: "
-            "${{ needs.resolve.outputs.publish_actor }}",
+            "${{ inputs['publication-actor'] }}",
             prepare.group(1),
         )
 
