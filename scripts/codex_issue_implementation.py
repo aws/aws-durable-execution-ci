@@ -142,6 +142,13 @@ def issue_number_from_environment() -> int:
     )
 
 
+def pull_request_number_from_environment() -> int:
+    return positive_integer(
+        require_environment("PULL_REQUEST_NUMBER"),
+        "PULL_REQUEST_NUMBER",
+    )
+
+
 def run_command(
     command: list[str],
     *,
@@ -409,10 +416,50 @@ def linked_open_pull_requests(
     return sorted(pull_requests, key=lambda value: value["number"])
 
 
-def linked_issue_numbers_for_pull_request(
+def fetch_pull_request(
     repository: str,
     pull_request_number: int,
-    label: str | None = None,
+) -> dict[str, Any]:
+    pull_request = run_gh_json(
+        [f"repos/{repository}/pulls/{pull_request_number}"]
+    )
+    if not isinstance(pull_request, dict):
+        raise ImplementationError("GitHub returned an invalid pull request")
+    base = pull_request.get("base")
+    head = pull_request.get("head")
+    head_repository = (
+        head.get("repo")
+        if isinstance(head, dict)
+        else None
+    )
+    if (
+        pull_request.get("number") != pull_request_number
+        or not isinstance(pull_request.get("state"), str)
+        or not isinstance(base, dict)
+        or not isinstance(head, dict)
+    ):
+        raise ImplementationError("GitHub returned an invalid pull request")
+    return {
+        "number": pull_request_number,
+        "state": pull_request["state"].lower(),
+        "draft": pull_request.get("draft"),
+        "url": pull_request.get("html_url"),
+        "base_ref": base.get("ref"),
+        "base_sha": base.get("sha"),
+        "head_ref": head.get("ref"),
+        "head_sha": head.get("sha"),
+        "head_repository": (
+            head_repository.get("full_name")
+            if isinstance(head_repository, dict)
+            else None
+        ),
+    }
+
+
+def linked_eligible_issues_for_pull_request(
+    repository: str,
+    pull_request_number: int,
+    label: str,
     excluded_label: str | None = None,
 ) -> list[int]:
     owner, name = repository.split("/")
@@ -448,9 +495,6 @@ def linked_issue_numbers_for_pull_request(
             or type(issue.get("number")) is not int
         ):
             continue
-        if label is None:
-            issue_numbers.append(issue["number"])
-            continue
         label_connection = issue.get("labels")
         if not isinstance(label_connection, dict):
             raise ImplementationError(
@@ -478,30 +522,6 @@ def linked_issue_numbers_for_pull_request(
         ):
             issue_numbers.append(issue["number"])
     return sorted(set(issue_numbers))
-
-
-def linked_open_issues_for_pull_request(
-    repository: str,
-    pull_request_number: int,
-) -> list[int]:
-    return linked_issue_numbers_for_pull_request(
-        repository,
-        pull_request_number,
-    )
-
-
-def linked_eligible_issues_for_pull_request(
-    repository: str,
-    pull_request_number: int,
-    label: str,
-    excluded_label: str | None = None,
-) -> list[int]:
-    return linked_issue_numbers_for_pull_request(
-        repository,
-        pull_request_number,
-        label,
-        excluded_label,
-    )
 
 
 def collaborator_has_write_permission(
@@ -889,17 +909,7 @@ def resolve_review_event(
     pull_request_number = pull_request.get("number")
     if type(pull_request_number) is not int:
         return []
-    issue_numbers = linked_open_issues_for_pull_request(
-        repository,
-        pull_request_number,
-    )
-    if len(issue_numbers) != 1:
-        print(
-            "::warning::Review command must resolve to exactly one open, "
-            "linked issue."
-        )
-        return []
-    return issue_numbers
+    return [pull_request_number]
 
 
 def resolve_work_items(event_name: str, event: dict[str, Any]) -> list[int]:
@@ -967,10 +977,16 @@ def resolve_command(event_path: Path) -> None:
     matrix = {
         "include": [
             {
-                "issue_number": issue_number,
+                "issue_number": 0 if address_only else number,
+                "pull_request_number": number if address_only else 0,
                 "address_only": address_only,
+                "work_key": (
+                    f"pr-{number}"
+                    if address_only
+                    else f"issue-{number}"
+                ),
             }
-            for issue_number in unique_numbers
+            for number in unique_numbers
         ]
     }
     encoded_matrix = json.dumps(matrix, separators=(",", ":"))
@@ -991,7 +1007,6 @@ def prepare_issue_state(
     excluded_label: str,
     actor: str,
     issue: dict[str, Any],
-    address_only: bool = False,
 ) -> dict[str, Any]:
     issue_number = issue.get("number")
     if type(issue_number) is not int or "pull_request" in issue:
@@ -1006,21 +1021,19 @@ def prepare_issue_state(
         "repository": repository,
         "implementation_label": label,
         "no_pr_label": excluded_label,
-        "address_only": address_only,
+        "address_only": False,
         "publication_actor": actor,
         "issue": snapshot,
         "branch": deterministic_branch(issue_number),
         "linked_pull_requests": linked_pull_requests,
         "linked_pull_request_issue_numbers": [],
+        "pull_request": None,
         "markers": [],
         "action": "skip",
         "target": None,
     }
 
-    if address_only:
-        if issue.get("state") != "open":
-            return state
-    elif not issue_is_eligible(issue, label, state["no_pr_label"]):
+    if not issue_is_eligible(issue, label, state["no_pr_label"]):
         return state
 
     if len(linked_pull_requests) > 1:
@@ -1029,6 +1042,7 @@ def prepare_issue_state(
 
     if len(linked_pull_requests) == 1:
         pull_request = linked_pull_requests[0]
+        state["pull_request"] = pull_request
         if pull_request["head_repository"] != repository:
             state["action"] = "blocked"
             state["reason"] = (
@@ -1055,29 +1069,18 @@ def prepare_issue_state(
                 "as its head, so the workflow will not push to it."
             )
             return state
-        if address_only:
-            linked_issue_numbers = linked_open_issues_for_pull_request(
-                repository,
-                pull_request["number"],
-            )
-        else:
-            linked_issue_numbers = linked_eligible_issues_for_pull_request(
-                repository,
-                pull_request["number"],
-                label,
-                excluded_label,
-            )
+        linked_issue_numbers = linked_eligible_issues_for_pull_request(
+            repository,
+            pull_request["number"],
+            label,
+            excluded_label,
+        )
         state["linked_pull_request_issue_numbers"] = linked_issue_numbers
         if linked_issue_numbers != [issue_number]:
             state["action"] = "blocked"
-            qualification = (
-                "open issue"
-                if address_only
-                else "open, eligible issue"
-            )
             state["reason"] = (
-                "The linked pull request must close exactly this "
-                f"{qualification} before the workflow can update it."
+                "The linked pull request must close exactly this open, "
+                "eligible issue before the workflow can update it."
             )
             return state
         validate_git_branch(pull_request["head_ref"])
@@ -1097,9 +1100,6 @@ def prepare_issue_state(
             "trusted_instruction_sha": pull_request["base_sha"],
             "pull_request_number": pull_request["number"],
         }
-        return state
-
-    if address_only:
         return state
 
     existing_branch = branch_ref(
@@ -1160,17 +1160,79 @@ def prepare_issue_state(
     return state
 
 
+def prepare_pull_request_state(
+    repository: str,
+    actor: str,
+    pull_request: dict[str, Any],
+) -> dict[str, Any]:
+    if type(pull_request.get("number")) is not int:
+        raise ImplementationError("GitHub returned an invalid pull request")
+    state: dict[str, Any] = {
+        "version": 1,
+        "repository": repository,
+        "address_only": True,
+        "publication_actor": actor,
+        "issue": None,
+        "branch": None,
+        "linked_pull_requests": [],
+        "linked_pull_request_issue_numbers": [],
+        "pull_request": pull_request,
+        "markers": [],
+        "action": "skip",
+        "target": None,
+    }
+    if pull_request.get("state") != "open":
+        return state
+    if pull_request.get("head_repository") != repository:
+        return state
+    metadata = repository_metadata(repository)
+    if (
+        not isinstance(pull_request.get("head_ref"), str)
+        or not isinstance(pull_request.get("head_sha"), str)
+        or not isinstance(pull_request.get("base_sha"), str)
+        or re.fullmatch(r"[0-9a-f]{40}", pull_request["head_sha"]) is None
+        or re.fullmatch(r"[0-9a-f]{40}", pull_request["base_sha"]) is None
+        or pull_request["head_ref"] == metadata["default_branch"]
+    ):
+        return state
+    validate_git_branch(pull_request["head_ref"])
+    markers = unprocessed_markers(
+        repository,
+        pull_request["number"],
+        actor,
+    )
+    if not markers:
+        return state
+    state["action"] = "address"
+    state["markers"] = markers
+    state["target"] = {
+        "repository": repository,
+        "ref": pull_request["head_ref"],
+        "sha": pull_request["head_sha"],
+        "trusted_instruction_sha": pull_request["base_sha"],
+        "pull_request_number": pull_request["number"],
+    }
+    return state
+
+
 def prepare_state() -> dict[str, Any]:
     repository = repository_name()
+    actor = publication_actor()
+    if boolean_from_environment("ADDRESS_ONLY"):
+        pull_request_number = pull_request_number_from_environment()
+        return prepare_pull_request_state(
+            repository,
+            actor,
+            fetch_pull_request(repository, pull_request_number),
+        )
     issue_number = issue_number_from_environment()
     label, excluded_label = automation_labels()
     return prepare_issue_state(
         repository,
         label,
         excluded_label,
-        publication_actor(),
+        actor,
         fetch_issue(repository, issue_number),
-        boolean_from_environment("ADDRESS_ONLY"),
     )
 
 
@@ -1181,11 +1243,7 @@ def model_context(state: dict[str, Any]) -> dict[str, Any]:
         "mode": state["action"],
         "repository": state["repository"],
         "issue": state["issue"],
-        "linked_pull_request": (
-            state["linked_pull_requests"][0]
-            if state["linked_pull_requests"]
-            else None
-        ),
+        "linked_pull_request": state.get("pull_request"),
         "review_markers": state["markers"],
         "security": {
             "content_trust": (
@@ -1757,24 +1815,15 @@ def publication_plan_command(
     write_output("target_sha", target.get("sha", ""))
 
 
-def issue_is_currently_actionable(
-    state: dict[str, Any],
-    issue: dict[str, Any],
-) -> bool:
-    if state.get("address_only") is True:
-        return issue.get("state") == "open" and "pull_request" not in issue
-    return issue_is_eligible(
-        issue,
-        state["implementation_label"],
-        state["no_pr_label"],
-    )
-
-
 def require_current_issue(state: dict[str, Any]) -> dict[str, Any]:
     issue_number = state["issue"]["number"]
     issue = fetch_issue(state["repository"], issue_number)
-    if not issue_is_currently_actionable(state, issue):
-        raise ImplementationError("issue is no longer open or eligible")
+    if not issue_is_eligible(
+        issue,
+        state["implementation_label"],
+        state["no_pr_label"],
+    ):
+        raise ImplementationError("issue is no longer open and eligible")
     if issue_snapshot(issue) != state["issue"]:
         raise ImplementationError(
             "issue changed during the run; retry with the latest state"
@@ -1787,8 +1836,12 @@ def require_current_issue_semantics(
 ) -> dict[str, Any]:
     issue_number = state["issue"]["number"]
     issue = fetch_issue(state["repository"], issue_number)
-    if not issue_is_currently_actionable(state, issue):
-        raise ImplementationError("issue is no longer open or eligible")
+    if not issue_is_eligible(
+        issue,
+        state["implementation_label"],
+        state["no_pr_label"],
+    ):
+        raise ImplementationError("issue is no longer open and eligible")
     if issue_semantic_snapshot(issue) != prepared_issue_semantic_snapshot(
         state["issue"]
     ):
@@ -1815,21 +1868,39 @@ def require_linked_pull_requests(
 def require_linked_pull_request_issue_numbers(
     state: dict[str, Any],
 ) -> list[int]:
-    if state.get("address_only") is True:
-        current = linked_open_issues_for_pull_request(
-            state["repository"],
-            state["target"]["pull_request_number"],
-        )
-    else:
-        current = linked_eligible_issues_for_pull_request(
-            state["repository"],
-            state["target"]["pull_request_number"],
-            state["implementation_label"],
-            state["no_pr_label"],
-        )
+    current = linked_eligible_issues_for_pull_request(
+        state["repository"],
+        state["target"]["pull_request_number"],
+        state["implementation_label"],
+        state["no_pr_label"],
+    )
     if current != state["linked_pull_request_issue_numbers"]:
         raise ImplementationError(
             "pull request issue ownership changed during the run"
+        )
+    return current
+
+
+def require_current_pull_request(
+    state: dict[str, Any],
+    expected_head_sha: str | None = None,
+) -> dict[str, Any]:
+    prepared = state.get("pull_request")
+    if not isinstance(prepared, dict):
+        raise ImplementationError("prepared pull request is invalid")
+    pull_request_number = state["target"]["pull_request_number"]
+    if prepared.get("number") != pull_request_number:
+        raise ImplementationError("prepared pull request is invalid")
+    expected = dict(prepared)
+    if expected_head_sha is not None:
+        expected["head_sha"] = expected_head_sha
+    current = fetch_pull_request(
+        state["repository"],
+        pull_request_number,
+    )
+    if current != expected:
+        raise ImplementationError(
+            "pull request changed during the run; retry reconciliation"
         )
     return current
 
@@ -2108,19 +2179,30 @@ def apply_patch_and_commit(
 
     actual_paths = changed_paths(workspace)
     configure_git(workspace)
-    issue_number = state["issue"]["number"]
-    subject = (
-        f"Implement #{issue_number}"
-        if state["action"] == "implement"
-        else f"Address review feedback for #{issue_number}"
-    )
+    if state["action"] == "implement":
+        issue_number = state["issue"]["number"]
+        subject = f"Implement #{issue_number}"
+        trailers = (
+            f"Codex-Issue: #{issue_number}\n"
+            f"{ISSUE_SNAPSHOT_TRAILER}: "
+            f"{issue_semantic_digest(state['issue'])}"
+        )
+    else:
+        pull_request_number = state["target"]["pull_request_number"]
+        subject = f"Address review feedback for PR #{pull_request_number}"
+        trailers = f"Codex-Pull-Request: #{pull_request_number}"
+        if isinstance(state.get("issue"), dict):
+            issue_number = state["issue"]["number"]
+            trailers += (
+                f"\nCodex-Issue: #{issue_number}\n"
+                f"{ISSUE_SNAPSHOT_TRAILER}: "
+                f"{issue_semantic_digest(state['issue'])}"
+            )
     message = (
         f"{subject}\n\n"
         f"{safe_github_text(result['summary'])}\n\n"
         f"{AUTOMATION_TRAILER}\n"
-        f"Codex-Issue: #{issue_number}\n"
-        f"{ISSUE_SNAPSHOT_TRAILER}: "
-        f"{issue_semantic_digest(state['issue'])}"
+        f"{trailers}"
     )
     commit = run_command(
         ["git", "commit", "-m", message],
@@ -2238,7 +2320,6 @@ def publish_blocked(state: dict[str, Any]) -> None:
         state["no_pr_label"],
         state["publication_actor"],
         issue,
-        state.get("address_only") is True,
     )
     if (
         current["action"] != "blocked"
@@ -2375,22 +2456,20 @@ def publish_review_update(
     patch_path: Path,
     workspace: Path,
 ) -> None:
-    require_current_issue(state)
-    require_linked_pull_requests(state)
-    require_linked_pull_request_issue_numbers(state)
-    require_markers_unchanged(state)
-    pull_request = state["linked_pull_requests"][0]
-    if (
-        pull_request["head_repository"] != state["repository"]
-        or pull_request["head_ref"] != state["target"]["ref"]
-        or pull_request["head_sha"] != state["target"]["sha"]
-    ):
-        raise ImplementationError("pull request head changed during the run")
-
-    if result["outcome"] == "no_change":
+    issue_scoped = isinstance(state.get("issue"), dict)
+    if issue_scoped:
         require_current_issue(state)
         require_linked_pull_requests(state)
         require_linked_pull_request_issue_numbers(state)
+    require_current_pull_request(state)
+    require_markers_unchanged(state)
+
+    if result["outcome"] == "no_change":
+        if issue_scoped:
+            require_current_issue(state)
+            require_linked_pull_requests(state)
+            require_linked_pull_request_issue_numbers(state)
+        require_current_pull_request(state)
         require_markers_unchanged(state)
         acknowledge_markers(state, state["target"]["sha"], result)
         return
@@ -2398,28 +2477,30 @@ def publish_review_update(
     commit_sha = apply_patch_and_commit(
         workspace, patch_path, state, result
     )
-    require_current_issue(state)
-    require_linked_pull_requests(state)
-    require_linked_pull_request_issue_numbers(state)
+    if issue_scoped:
+        require_current_issue(state)
+        require_linked_pull_requests(state)
+        require_linked_pull_request_issue_numbers(state)
+    require_current_pull_request(state)
     require_markers_unchanged(state)
     push_commit(
         workspace,
         state["target"]["ref"],
         state["target"]["sha"],
     )
-    current_pull_requests = linked_open_pull_requests(
-        state["repository"], state["issue"]["number"]
-    )
-    if (
-        len(current_pull_requests) != 1
-        or current_pull_requests[0]["number"]
-        != state["target"]["pull_request_number"]
-        or current_pull_requests[0]["head_sha"] != commit_sha
-    ):
-        raise ImplementationError(
-            "pull request head did not advance to the published commit"
-        )
-    require_linked_pull_request_issue_numbers(state)
+    require_current_pull_request(state, commit_sha)
+    if issue_scoped:
+        require_current_issue(state)
+        expected_pull_request = dict(state["pull_request"])
+        expected_pull_request["head_sha"] = commit_sha
+        if linked_open_pull_requests(
+            state["repository"],
+            state["issue"]["number"],
+        ) != [expected_pull_request]:
+            raise ImplementationError(
+                "linked pull request did not advance to the published commit"
+            )
+        require_linked_pull_request_issue_numbers(state)
     require_markers_still_actionable(state)
     acknowledge_markers(state, commit_sha, result)
 

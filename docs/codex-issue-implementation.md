@@ -1,9 +1,9 @@
 # Codex issue implementation
 
 The reusable Codex issue implementation workflow reconciles explicitly labeled
-issues into draft pull requests. Independently of issue labels, it also updates
-an existing linked pull request when an authorized maintainer marks a review
-thread with:
+issues into draft pull requests. Independently of issue labels or issue
+linkage, it also updates an existing pull request when an authorized maintainer
+marks a review thread with:
 
 ```text
 /codex address
@@ -11,7 +11,8 @@ thread with:
 
 The immediate event triggers and daily schedule belong in each consuming
 repository. The reusable workflow owns discovery, issue-scoped serialization,
-Codex execution through Amazon Bedrock, state revalidation, and publication.
+PR-scoped review serialization, Codex execution through Amazon Bedrock, state
+revalidation, and publication.
 
 ## Caller workflow
 
@@ -67,7 +68,8 @@ recovers missed events, failed runs, and branches pushed before pull request
 creation completed.
 
 The implementation label is not required for `/codex address`. That command is
-restricted to updating an existing linked pull request and never creates a new
+scoped directly to the pull request containing the command; it does not require
+that pull request to close or reference an issue and never creates a new
 implementation branch or pull request.
 
 Create an `ai-pr-review-runtime` environment with this secret:
@@ -133,13 +135,15 @@ directly.
 
 ## Issue and pull request behavior
 
-For every selected issue, the entry workflow starts one reusable worker that
-owns the complete reconcile and publication pipeline. The worker re-fetches
-the issue, labels, linked pull requests, branch SHA, and unprocessed review
-commands after acquiring this workflow-level concurrency group:
+For every selected issue or pull request review command, the entry workflow
+starts one reusable worker that owns the complete reconcile and publication
+pipeline. The worker re-fetches the applicable issue or pull request state,
+branch SHA, and unprocessed review commands after acquiring one of these
+workflow-level concurrency groups:
 
 ```text
-codex-issue-<repository-id>-<issue-number>
+codex-<repository-id>-issue-<issue-number>
+codex-<repository-id>-pr-<pull-request-number>
 ```
 
 A running pipeline cannot be canceled between model execution and publication
@@ -163,14 +167,15 @@ open or closed pull request has already used that branch, so closing a
 generated draft and deleting its branch does not cause a replacement or orphan
 branch. An unrelated branch with the deterministic name is not overwritten.
 
-With exactly one linked open pull request, labeled reconciliation requires that
-pull request to close exactly that one open, eligible issue. Review-command
-runs instead require exactly one open linked issue, regardless of the
-implementation or no-PR labels. The selected issue set is persisted and
-revalidated before pushes and acknowledgements. The head branch must be in the
-current repository; fork branches are never updated. The workflow checks out
-the exact head SHA, applies all currently unprocessed marked feedback in one
-reconciliation, and pushes back to the same branch.
+With exactly one linked open pull request, labeled issue reconciliation
+requires that pull request to close exactly that one open, eligible issue.
+Review-command runs are scoped directly to the pull request containing the
+command and do not inspect closing issue references or issue labels. The pull
+request snapshot is persisted and revalidated before pushes and
+acknowledgements. The head branch must be in the current repository; fork
+branches are never updated. The workflow checks out the exact head SHA, applies
+all currently unprocessed marked feedback in one reconciliation, and pushes
+back to the same branch.
 
 When multiple open pull requests close the issue, the workflow does not choose
 one. It posts a deduplicated issue comment asking a maintainer to remove the
@@ -182,9 +187,9 @@ Post `/codex address` as a reply in the relevant pull request review thread.
 The trimmed body must exactly match that command. General comments, unmarked
 review comments, command variants, and reactions do not start work.
 
-The linked issue must be open, but it does not need `codex:implement` or any
-other label. If the linked pull request disappears before reconciliation, the
-address-only run skips instead of starting new issue implementation.
+No linked issue is required. If the pull request closes, moves to an
+unwritable head, or otherwise changes before reconciliation, the address-only
+run skips or aborts instead of starting issue implementation.
 
 The command author must currently have `write`, `maintain`, or `admin`
 permission. Bot users and users without sufficient repository permission are
@@ -203,9 +208,9 @@ complete prepared state exceeds the overall context size limit.
 The worker treats every run as reconciliation. It aborts publication when any
 of these change after model execution:
 
-- issue identity, body, state, or labels;
-- linked pull request count or identity;
-- the exact mode-appropriate issue set closed by the pull request;
+- issue identity, body, state, or labels for issue-scoped work;
+- linked pull request count, identity, and issue ownership for labeled work;
+- the exact pull request identity, refs, and head SHA for review commands;
 - default branch designation or SHA, or pull request head SHA;
 - unprocessed authorized review markers;
 - deterministic implementation branch state.

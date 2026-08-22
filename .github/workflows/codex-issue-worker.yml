@@ -4,13 +4,21 @@ on:
   workflow_call:
     inputs:
       issue-number:
-        description: Issue number to reconcile
+        description: Issue number, or zero for PR-scoped review work
+        required: true
+        type: number
+      pull-request-number:
+        description: Pull request number, or zero for issue-scoped work
         required: true
         type: number
       address-only:
         description: Restrict reconciliation to existing review feedback
         required: true
         type: boolean
+      work-key:
+        description: Stable issue or pull request concurrency key
+        required: true
+        type: string
       publication-actor:
         description: Automatic token actor used for idempotency markers
         required: true
@@ -44,7 +52,7 @@ permissions: {}
 
 concurrency:
   group: >-
-    codex-issue-${{ github.repository_id }}-${{ inputs['issue-number'] }}
+    codex-${{ github.repository_id }}-${{ inputs['work-key'] }}
   cancel-in-progress: false
 
 env:
@@ -55,7 +63,7 @@ env:
 
 jobs:
   reconcile:
-    name: Reconcile issue ${{ inputs['issue-number'] }}
+    name: Reconcile ${{ inputs['work-key'] }}
     runs-on: ubuntu-latest
     environment: ai-pr-review-runtime
     timeout-minutes: 60
@@ -99,6 +107,7 @@ jobs:
       - name: Validate Codex implementation configuration
         id: config
         env:
+          ADDRESS_ONLY: ${{ inputs['address-only'] }}
           ALLOW_WORKFLOW_CHANGES: >-
             ${{ inputs['allow-workflow-changes'] || false }}
           CODEX_MODEL: ${{ inputs['model'] || env.DEFAULT_CODEX_MODEL }}
@@ -108,8 +117,11 @@ jobs:
           IMPLEMENTATION_LABEL: >-
             ${{ inputs['implementation-label'] ||
                 env.DEFAULT_IMPLEMENTATION_LABEL }}
+          ISSUE_NUMBER: ${{ inputs['issue-number'] }}
           NO_PR_LABEL: >-
             ${{ inputs['no-pr-label'] || env.DEFAULT_NO_PR_LABEL }}
+          PULL_REQUEST_NUMBER: ${{ inputs['pull-request-number'] }}
+          WORK_KEY: ${{ inputs['work-key'] }}
         run: |
           set -euo pipefail
 
@@ -123,6 +135,29 @@ jobs:
               ;;
             *)
               echo "::error::Unsupported Codex reasoning effort."
+              exit 1
+              ;;
+          esac
+
+          case "$ADDRESS_ONLY" in
+            true)
+              if [[ "$ISSUE_NUMBER" != "0" ||
+                    ! "$PULL_REQUEST_NUMBER" =~ ^[1-9][0-9]*$ ||
+                    "$WORK_KEY" != "pr-$PULL_REQUEST_NUMBER" ]]; then
+                echo "::error::Invalid PR-scoped work item."
+                exit 1
+              fi
+              ;;
+            false)
+              if [[ ! "$ISSUE_NUMBER" =~ ^[1-9][0-9]*$ ||
+                    "$PULL_REQUEST_NUMBER" != "0" ||
+                    "$WORK_KEY" != "issue-$ISSUE_NUMBER" ]]; then
+                echo "::error::Invalid issue-scoped work item."
+                exit 1
+              fi
+              ;;
+            *)
+              echo "::error::Address-only must be true or false."
               exit 1
               ;;
           esac
@@ -150,6 +185,7 @@ jobs:
           ISSUE_NUMBER: ${{ inputs['issue-number'] }}
           NO_PR_LABEL: >-
             ${{ inputs['no-pr-label'] || env.DEFAULT_NO_PR_LABEL }}
+          PULL_REQUEST_NUMBER: ${{ inputs['pull-request-number'] }}
           TOOLKIT_PATH: ${{ runner.temp }}/codex-implementation-toolkit
         run: >-
           python3 "$TOOLKIT_PATH/scripts/codex_issue_implementation.py"
@@ -207,7 +243,7 @@ jobs:
         with:
           role-to-assume: ${{ secrets.BEDROCK_ROLE_ARN }}
           role-session-name: >-
-            codex-issue-${{ inputs['issue-number'] }}-${{ github.run_id }}
+            codex-${{ inputs['work-key'] }}-${{ github.run_id }}
           aws-region: us-east-1
           inline-session-policy: |
             {
@@ -477,7 +513,7 @@ jobs:
           )
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: codex-implementation-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs['issue-number'] }}
+          name: codex-implementation-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs['work-key'] }}
           path: |
             ${{ runner.temp }}/codex-implementation-state.json
             ${{ runner.temp }}/codex-implementation-artifact.json
@@ -486,7 +522,7 @@ jobs:
           retention-days: 1
 
   publish:
-    name: Publish issue ${{ inputs['issue-number'] }}
+    name: Publish ${{ inputs['work-key'] }}
     needs: reconcile
     if: >-
       always() &&
@@ -526,7 +562,7 @@ jobs:
         if: needs.reconcile.result == 'success'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: codex-implementation-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs['issue-number'] }}
+          name: codex-implementation-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs['work-key'] }}
           path: ${{ runner.temp }}/codex-publication
 
       - name: Resolve publication plan
@@ -565,6 +601,7 @@ jobs:
           ISSUE_NUMBER: ${{ inputs['issue-number'] }}
           NO_PR_LABEL: >-
             ${{ inputs['no-pr-label'] || env.DEFAULT_NO_PR_LABEL }}
+          PULL_REQUEST_NUMBER: ${{ inputs['pull-request-number'] }}
           TOOLKIT_PATH: ${{ runner.temp }}/codex-publication-toolkit
         run: >-
           python3 "$TOOLKIT_PATH/scripts/codex_issue_implementation.py"

@@ -164,7 +164,7 @@ jobs:
           resolve "$GITHUB_EVENT_PATH"
 
   implement:
-    name: Implement issue ${{ matrix.issue_number }}
+    name: Reconcile ${{ matrix.work_key }}
     needs: resolve
     if: needs.resolve.outputs.count != '0'
     strategy:
@@ -178,7 +178,9 @@ jobs:
     uses: ./.github/workflows/codex-issue-worker.yml
     with:
       issue-number: ${{ matrix.issue_number }}
+      pull-request-number: ${{ matrix.pull_request_number }}
       address-only: ${{ matrix.address_only }}
+      work-key: ${{ matrix.work_key }}
       publication-actor: ${{ needs.resolve.outputs.publish_actor }}
       implementation-label: >-
         ${{ inputs['implementation-label'] || 'codex:implement' }}
