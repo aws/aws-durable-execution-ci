@@ -216,17 +216,24 @@ The command author must currently have `write`, `maintain`, or `admin`
 permission. Bot users and users without sufficient repository permission are
 ignored. `author_association` is not used as authorization.
 
+If publication pushes a Codex review commit but new feedback prevents
+acknowledgement, the retry follows consecutive Codex review commits back to
+the preceding non-automation commit. The original server-recorded push time
+remains the feedback baseline, so the intervening feedback is not hidden by
+the automation push.
+
 After a successful update, the workflow replies in each marked review thread
 and posts a pull request conversation acknowledgement for top-level commands.
-Machine-readable markers contain the command comment IDs and commit SHA, so
-later runs treat those commands as processed. A no-change result is also
-acknowledged, using the unchanged pull request head SHA. Batch acknowledgements
-also record a feedback high-water mark, so a later top-level command on the
-same head includes only newer or subsequently edited feedback. Review threads
-are not resolved automatically. Conversation bodies, review comment bodies,
-and diff hunks are preserved in full; the run fails instead of acknowledging
-feedback when the complete prepared state exceeds the overall context size
-limit.
+Machine-readable markers contain the command kind, command comment IDs, and
+commit SHA, so later runs treat those commands as processed without conflating
+the separate review-comment and issue-comment ID spaces. A no-change result is
+also acknowledged, using the unchanged pull request head SHA. Batch
+acknowledgements also record a feedback high-water mark, so a later top-level
+command on the same head includes only newer or subsequently edited feedback.
+Review threads are not resolved automatically. Conversation bodies, review
+comment bodies, and diff hunks are preserved in full; the run fails instead of
+acknowledging feedback when the complete prepared state exceeds the overall
+context size limit.
 
 ## Revalidation and failure behavior
 
@@ -251,7 +258,9 @@ or publication leaves review markers unprocessed for a later retry.
 
 When Codex determines that a new implementation requires no repository
 change, the workflow applies the non-actionable label and posts a deduplicated
-explanation instead of opening a pull request.
+explanation instead of opening a pull request. It rechecks that the
+deterministic implementation branch is still absent and has no pull request
+history immediately before both the explanation and the label.
 
 ## Security model
 

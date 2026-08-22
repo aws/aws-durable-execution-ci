@@ -17,7 +17,8 @@ from typing import Any
 ADDRESS_COMMAND = "/ai address"
 IMPLEMENT_COMMAND = "/ai implement"
 ACKNOWLEDGEMENT_PATTERN = re.compile(
-    r"<!-- codex-addressed command-id=(\d+) commit=([0-9a-f]{40}) -->"
+    r"<!-- codex-addressed(?: kind=(issue_comment|review_comment))? "
+    r"command-id=(\d+) commit=([0-9a-f]{40}) -->"
 )
 FEEDBACK_CURSOR_PATTERN = re.compile(
     r"<!-- codex-addressed-feedback at=(\d+) "
@@ -27,6 +28,7 @@ FEEDBACK_CURSOR_PATTERN = re.compile(
 AUTOMATION_TRAILER = "Codex-Automation: issue-implementation"
 ISSUE_SNAPSHOT_TRAILER = "Codex-Issue-Snapshot"
 MAX_CONTEXT_BYTES = 1_000_000
+MAX_AUTOMATION_COMMIT_CHAIN = 100
 MAX_DISCOVERY_CANDIDATES_PER_RUN = 25
 MAX_ISSUES_PER_RUN = 10
 MAX_PATCH_BYTES = 5_000_000
@@ -722,27 +724,32 @@ def is_bot_user(user: Any) -> bool:
     )
 
 
-def acknowledged_command_ids(
-    comments: list[dict[str, Any]],
+def acknowledged_commands(
+    review: list[dict[str, Any]],
+    conversation: list[dict[str, Any]],
     actor: str,
-) -> set[int]:
-    acknowledged: set[int] = set()
-    for comment in comments:
-        if not isinstance(comment, dict):
-            continue
-        user = comment.get("user")
-        body = comment.get("body")
-        if (
-            not isinstance(user, dict)
-            or not isinstance(user.get("login"), str)
-            or user["login"].casefold() != actor.casefold()
-            or not isinstance(body, str)
-        ):
-            continue
-        acknowledged.update(
-            int(match.group(1))
-            for match in ACKNOWLEDGEMENT_PATTERN.finditer(body)
-        )
+) -> set[tuple[str, int]]:
+    acknowledged: set[tuple[str, int]] = set()
+    for comments, legacy_kind in (
+        (review, "review_comment"),
+        (conversation, "issue_comment"),
+    ):
+        for comment in comments:
+            if not isinstance(comment, dict):
+                continue
+            user = comment.get("user")
+            body = comment.get("body")
+            if (
+                not isinstance(user, dict)
+                or not isinstance(user.get("login"), str)
+                or user["login"].casefold() != actor.casefold()
+                or not isinstance(body, str)
+            ):
+                continue
+            acknowledged.update(
+                (match.group(1) or legacy_kind, int(match.group(2)))
+                for match in ACKNOWLEDGEMENT_PATTERN.finditer(body)
+            )
     return acknowledged
 
 
@@ -959,8 +966,9 @@ def unprocessed_markers(
     comments = review_comments(repository, pull_request_number)
     conversation = issue_comments(repository, pull_request_number)
     acknowledgement_comments = comments + conversation
-    acknowledged = acknowledged_command_ids(
-        acknowledgement_comments,
+    acknowledged = acknowledged_commands(
+        comments,
+        conversation,
         actor,
     )
     previous_feedback_cursor = acknowledged_feedback_cursor(
@@ -979,7 +987,7 @@ def unprocessed_markers(
         user = comment.get("user")
         if (
             type(command_id) is not int
-            or command_id in acknowledged
+            or ("review_comment", command_id) in acknowledged
             or not isinstance(body, str)
             or body.strip() != ADDRESS_COMMAND
             or type(root_id) is not int
@@ -1029,7 +1037,7 @@ def unprocessed_markers(
         user = comment.get("user")
         if (
             type(command_id) is not int
-            or command_id in acknowledged
+            or ("issue_comment", command_id) in acknowledged
             or not isinstance(body, str)
             or body.strip() != ADDRESS_COMMAND
             or not isinstance(comment.get("created_at"), str)
@@ -1049,10 +1057,15 @@ def unprocessed_markers(
     if batch_commands:
         batch_commands.sort(key=lambda value: value["id"])
         command = batch_commands[-1]
+        feedback_base_sha = review_feedback_base_sha(
+            repository,
+            head_sha,
+            pull_request_number,
+        )
         head_update = pull_request_head_update(
             repository,
             head_ref,
-            head_sha,
+            feedback_base_sha,
         )
         updated_at = head_update["updated_at"]
         head_updated_at = (
@@ -1269,6 +1282,20 @@ def require_default_branch_unchanged(state: dict[str, Any]) -> None:
         )
 
 
+def require_implementation_branch_available(state: dict[str, Any]) -> None:
+    repository = state["repository"]
+    branch = state["branch"]
+    if branch_ref(repository, branch, allow_not_found=True) is not None:
+        raise ImplementationError(
+            "implementation branch appeared during the run"
+        )
+    if branch_has_pull_request_history(repository, branch):
+        raise ImplementationError(
+            "implementation branch acquired pull request history during "
+            "the run"
+        )
+
+
 def commit_has_automation_trailers(
     repository: str,
     sha: str,
@@ -1286,6 +1313,44 @@ def commit_has_automation_trailers(
             in message.splitlines()
         )
     )
+
+
+def review_feedback_base_sha(
+    repository: str,
+    head_sha: str,
+    pull_request_number: int,
+) -> str:
+    if type(pull_request_number) is not int or pull_request_number <= 0:
+        raise ImplementationError("pull request number is invalid")
+    current = head_sha
+    seen: set[str] = set()
+    expected_trailer = f"Codex-Pull-Request: #{pull_request_number}"
+    for _ in range(MAX_AUTOMATION_COMMIT_CHAIN):
+        if re.fullmatch(r"[0-9a-f]{40}", current) is None or current in seen:
+            raise ImplementationError("automation commit chain is invalid")
+        seen.add(current)
+        commit = run_gh_json([f"repos/{repository}/git/commits/{current}"])
+        message = commit.get("message") if isinstance(commit, dict) else None
+        if not isinstance(message, str):
+            raise ImplementationError("GitHub returned an invalid commit")
+        lines = message.splitlines()
+        if (
+            AUTOMATION_TRAILER not in lines
+            or expected_trailer not in lines
+        ):
+            return current
+        parents = commit.get("parents")
+        if not isinstance(parents, list) or len(parents) != 1:
+            raise ImplementationError("automation commit chain is invalid")
+        parent = parents[0]
+        parent_sha = parent.get("sha") if isinstance(parent, dict) else None
+        if (
+            not isinstance(parent_sha, str)
+            or re.fullmatch(r"[0-9a-f]{40}", parent_sha) is None
+        ):
+            raise ImplementationError("automation commit chain is invalid")
+        current = parent_sha
+    raise ImplementationError("automation commit chain is too long")
 
 
 def work_item(kind: str, number: int) -> dict[str, Any]:
@@ -1566,15 +1631,17 @@ def resolve_work_items(
 
     explicit_issue = os.environ.get("REQUESTED_ISSUE_NUMBER", "").strip()
     if explicit_issue:
-        return [
-            work_item(
-                "issue",
-                positive_integer(
-                    explicit_issue,
-                    "REQUESTED_ISSUE_NUMBER",
-                ),
-            )
-        ]
+        issue_number = positive_integer(
+            explicit_issue,
+            "REQUESTED_ISSUE_NUMBER",
+        )
+        state = prepare_issue_state(
+            repository,
+            excluded_label,
+            publication_actor(),
+            fetch_issue(repository, issue_number),
+        )
+        return [issue_state_work_item(state, issue_number)]
 
     if event_name == "issue_comment":
         items = resolve_issue_comment_event(repository, event)
@@ -3039,17 +3106,21 @@ def push_commit(
 
 def acknowledgement_body(
     command_ids: list[int],
+    command_kind: str,
     commit_sha: str,
     result: dict[str, Any],
     cursor: dict[str, Any] | None = None,
 ) -> str:
+    if command_kind not in ("issue_comment", "review_comment"):
+        raise ImplementationError("review command kind is invalid")
     prefix = (
         "Addressed by Codex"
         if result["outcome"] == "changed"
         else "No repository change was required"
     )
     markers = "\n".join(
-        f"<!-- codex-addressed command-id={command_id} "
+        f"<!-- codex-addressed kind={command_kind} "
+        f"command-id={command_id} "
         f"commit={commit_sha} -->"
         for command_id in command_ids
     )
@@ -3075,6 +3146,7 @@ def acknowledge_markers(
     for marker in state["markers"]:
         body = acknowledgement_body(
             marker.get("command_ids") or [marker["command_id"]],
+            marker["command_kind"],
             commit_sha,
             result,
             marker.get("feedback_cursor"),
@@ -3208,6 +3280,7 @@ def publish_implementation(
             f"snapshot={snapshot_digest} -->"
         )
         require_default_branch_unchanged(state)
+        require_implementation_branch_available(state)
         post_issue_comment_once(
             state["repository"],
             issue_number,
@@ -3224,6 +3297,7 @@ def publish_implementation(
                 "issue state changed before no-PR label publication"
             )
         require_default_branch_unchanged(state)
+        require_implementation_branch_available(state)
         add_issue_label(state["repository"], issue_number, label)
         return
 

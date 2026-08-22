@@ -318,6 +318,36 @@ class EventSelectionTest(unittest.TestCase):
                 [pull_request_item()],
             )
 
+    def test_manual_issue_address_work_uses_pull_request_scope(self):
+        with patch.dict(
+            os.environ,
+            environment(
+                MAX_ISSUES="3",
+                REQUESTED_ISSUE_NUMBER="31",
+            ),
+            clear=True,
+        ), patch.object(
+            IMPLEMENTATION,
+            "fetch_issue",
+            return_value=issue(),
+        ) as fetch, patch.object(
+            IMPLEMENTATION,
+            "prepare_issue_state",
+            return_value={
+                "action": "address",
+                "pull_request": pull_request(),
+            },
+        ):
+            self.assertEqual(
+                IMPLEMENTATION.resolve_work_items(
+                    "workflow_dispatch",
+                    {},
+                ),
+                [pull_request_item()],
+            )
+
+        fetch.assert_called_once_with("aws/example", 31)
+
     def test_unauthorized_implementation_comment_is_ignored(self):
         event = {
             "action": "created",
@@ -1376,6 +1406,10 @@ class MarkerPolicyTest(unittest.TestCase):
             return_value=conversation,
         ), patch.object(
             IMPLEMENTATION,
+            "review_feedback_base_sha",
+            return_value="b" * 40,
+        ), patch.object(
+            IMPLEMENTATION,
             "run_gh_json",
             return_value=[
                 {
@@ -1457,6 +1491,10 @@ class MarkerPolicyTest(unittest.TestCase):
             return_value=conversation,
         ), patch.object(
             IMPLEMENTATION,
+            "review_feedback_base_sha",
+            return_value="b" * 40,
+        ), patch.object(
+            IMPLEMENTATION,
             "pull_request_head_update",
             return_value=head_update(),
         ), patch.object(
@@ -1528,11 +1566,169 @@ class MarkerPolicyTest(unittest.TestCase):
             "repos/aws/example/issues/44/comments",
         )
         batch_body = run.call_args_list[1].kwargs["input_value"]["body"]
-        self.assertIn("command-id=900", batch_body)
-        self.assertIn("command-id=901", batch_body)
+        self.assertIn(
+            "kind=issue_comment command-id=900",
+            batch_body,
+        )
+        self.assertIn(
+            "kind=issue_comment command-id=901",
+            batch_body,
+        )
         self.assertIn(
             "kind=conversation_comment id=850",
             batch_body,
+        )
+
+    def test_acknowledgements_are_scoped_by_command_kind(self):
+        review = [
+            {
+                "id": 600,
+                "body": "Please add a test.",
+                "user": {"login": "reviewer", "type": "User"},
+                "created_at": "2026-08-22T00:00:00Z",
+            },
+            {
+                "id": 700,
+                "in_reply_to_id": 600,
+                "body": "/ai address",
+                "user": {"login": "maintainer", "type": "User"},
+                "created_at": "2026-08-22T00:01:00Z",
+            },
+            {
+                "id": 701,
+                "in_reply_to_id": 600,
+                "body": (
+                    "Addressed.\n\n"
+                    "<!-- codex-addressed kind=review_comment "
+                    f"command-id=700 commit={'d' * 40} -->"
+                ),
+                "user": {
+                    "login": "publisher[bot]",
+                    "type": "Bot",
+                },
+                "created_at": "2026-08-22T00:02:00Z",
+            },
+        ]
+        conversation = [
+            implementation_comment(
+                command_id=700,
+                body="/ai address",
+            )
+        ]
+        with patch.object(
+            IMPLEMENTATION,
+            "review_comments",
+            return_value=review,
+        ), patch.object(
+            IMPLEMENTATION,
+            "pull_request_reviews",
+            return_value=[],
+        ), patch.object(
+            IMPLEMENTATION,
+            "issue_comments",
+            return_value=conversation,
+        ), patch.object(
+            IMPLEMENTATION,
+            "review_feedback_base_sha",
+            return_value="b" * 40,
+        ), patch.object(
+            IMPLEMENTATION,
+            "pull_request_head_update",
+            return_value=head_update(),
+        ), patch.object(
+            IMPLEMENTATION,
+            "collaborator_has_write_permission",
+            return_value=True,
+        ):
+            markers = IMPLEMENTATION.unprocessed_markers(
+                "aws/example",
+                44,
+                "publisher[bot]",
+                "implement-issue-31",
+                "b" * 40,
+            )
+
+        self.assertEqual(len(markers), 1)
+        self.assertEqual(markers[0]["command_kind"], "issue_comment")
+        self.assertEqual(markers[0]["command_id"], 700)
+
+    def test_batch_retry_uses_pre_automation_feedback_baseline(self):
+        original_sha = "b" * 40
+        automation_sha = "c" * 40
+        feedback = {
+            "id": 850,
+            "body": "Feedback added during publication.",
+            "user": {"login": "reviewer", "type": "User"},
+            "created_at": "2026-08-22T00:02:00Z",
+            "updated_at": "2026-08-22T00:02:00Z",
+        }
+        conversation = [
+            feedback,
+            implementation_comment(
+                command_id=900,
+                body="/ai address",
+            ),
+        ]
+
+        def commit_response(arguments, **_kwargs):
+            endpoint = arguments[0]
+            if endpoint.endswith(automation_sha):
+                return {
+                    "message": (
+                        "Address feedback\n\n"
+                        f"{IMPLEMENTATION.AUTOMATION_TRAILER}\n"
+                        "Codex-Pull-Request: #44"
+                    ),
+                    "parents": [{"sha": original_sha}],
+                }
+            if endpoint.endswith(original_sha):
+                return {
+                    "message": "Human change",
+                    "parents": [{"sha": "a" * 40}],
+                }
+            raise AssertionError(endpoint)
+
+        with patch.object(
+            IMPLEMENTATION,
+            "review_comments",
+            return_value=[],
+        ), patch.object(
+            IMPLEMENTATION,
+            "pull_request_reviews",
+            return_value=[],
+        ), patch.object(
+            IMPLEMENTATION,
+            "issue_comments",
+            return_value=conversation,
+        ), patch.object(
+            IMPLEMENTATION,
+            "run_gh_json",
+            side_effect=commit_response,
+        ), patch.object(
+            IMPLEMENTATION,
+            "pull_request_head_update",
+            return_value=head_update(sha=original_sha),
+        ) as update, patch.object(
+            IMPLEMENTATION,
+            "collaborator_has_write_permission",
+            return_value=True,
+        ):
+            markers = IMPLEMENTATION.unprocessed_markers(
+                "aws/example",
+                44,
+                "publisher[bot]",
+                "implement-issue-31",
+                automation_sha,
+            )
+
+        update.assert_called_once_with(
+            "aws/example",
+            "implement-issue-31",
+            original_sha,
+        )
+        self.assertEqual(
+            [value["body"] for value in markers[0]["feedback"]],
+            ["Feedback added during publication."],
         )
 
     def test_batch_acknowledgements_are_not_processed_again(self):
@@ -1616,6 +1812,10 @@ class MarkerPolicyTest(unittest.TestCase):
                 return_value=[],
             ), patch.object(
                 IMPLEMENTATION,
+                "review_feedback_base_sha",
+                return_value="b" * 40,
+            ), patch.object(
+                IMPLEMENTATION,
                 "pull_request_head_update",
                 return_value=head_update(),
             ), patch.object(
@@ -1642,6 +1842,7 @@ class MarkerPolicyTest(unittest.TestCase):
             "id": 901,
             "body": IMPLEMENTATION.acknowledgement_body(
                 [900],
+                "issue_comment",
                 "b" * 40,
                 {
                     "outcome": "no_change",
@@ -1722,6 +1923,10 @@ class MarkerPolicyTest(unittest.TestCase):
                 return_value=reviews,
             ), patch.object(
                 IMPLEMENTATION,
+                "review_feedback_base_sha",
+                return_value="b" * 40,
+            ), patch.object(
+                IMPLEMENTATION,
                 "pull_request_head_update",
                 return_value=head_update(),
             ), patch.object(
@@ -1747,6 +1952,7 @@ class MarkerPolicyTest(unittest.TestCase):
             "id": 901,
             "body": IMPLEMENTATION.acknowledgement_body(
                 [900],
+                "issue_comment",
                 "b" * 40,
                 {
                     "outcome": "no_change",
@@ -3180,6 +3386,9 @@ class ValidationPolicyTest(unittest.TestCase):
             "require_default_branch_unchanged",
         ), patch.object(
             IMPLEMENTATION,
+            "require_implementation_branch_available",
+        ), patch.object(
+            IMPLEMENTATION,
             "ensure_label",
         ), patch.object(
             IMPLEMENTATION,
@@ -3264,6 +3473,9 @@ class ValidationPolicyTest(unittest.TestCase):
             ],
         ) as require_default, patch.object(
             IMPLEMENTATION,
+            "require_implementation_branch_available",
+        ), patch.object(
+            IMPLEMENTATION,
             "ensure_label",
         ), patch.object(
             IMPLEMENTATION,
@@ -3330,6 +3542,9 @@ class ValidationPolicyTest(unittest.TestCase):
             ],
         ) as require_default, patch.object(
             IMPLEMENTATION,
+            "require_implementation_branch_available",
+        ), patch.object(
+            IMPLEMENTATION,
             "ensure_label",
         ), patch.object(
             IMPLEMENTATION,
@@ -3357,6 +3572,74 @@ class ValidationPolicyTest(unittest.TestCase):
                 )
 
         self.assertEqual(require_default.call_count, 3)
+        post_comment.assert_called_once()
+        add_label.assert_not_called()
+
+    def test_no_pr_rechecks_implementation_branch_before_label(self):
+        state = {
+            "repository": "aws/example",
+            "no_pr_label": "codex:no-pr",
+            "publication_actor": "publisher[bot]",
+            "issue": IMPLEMENTATION.issue_snapshot(issue()),
+            "linked_pull_requests": [],
+            "branch": "implement-issue-31",
+            "target": {
+                "ref": "main",
+                "sha": "a" * 40,
+            },
+        }
+        result = {
+            "outcome": "no_change",
+            "summary": "No pull request is required.",
+            "validation": [],
+        }
+        with patch.object(
+            IMPLEMENTATION,
+            "require_current_issue",
+        ), patch.object(
+            IMPLEMENTATION,
+            "require_linked_pull_requests",
+        ), patch.object(
+            IMPLEMENTATION,
+            "require_default_branch_unchanged",
+        ), patch.object(
+            IMPLEMENTATION,
+            "require_implementation_branch_available",
+            side_effect=[
+                None,
+                IMPLEMENTATION.ImplementationError(
+                    "implementation branch appeared during the run"
+                ),
+            ],
+        ) as require_branch, patch.object(
+            IMPLEMENTATION,
+            "ensure_label",
+        ), patch.object(
+            IMPLEMENTATION,
+            "require_current_issue_semantics",
+        ), patch.object(
+            IMPLEMENTATION,
+            "linked_open_pull_requests",
+            return_value=[],
+        ), patch.object(
+            IMPLEMENTATION,
+            "post_issue_comment_once",
+        ) as post_comment, patch.object(
+            IMPLEMENTATION,
+            "add_issue_label",
+        ) as add_label:
+            with self.assertRaisesRegex(
+                IMPLEMENTATION.ImplementationError,
+                "implementation branch appeared",
+            ):
+                IMPLEMENTATION.publish_implementation(
+                    state,
+                    result,
+                    Path("/change.patch"),
+                    Path("/workspace"),
+                )
+
+        self.assertEqual(require_branch.call_count, 2)
         post_comment.assert_called_once()
         add_label.assert_not_called()
 
