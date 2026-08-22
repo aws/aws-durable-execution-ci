@@ -138,11 +138,13 @@ new cycle. This recovers authorized `/ai implement` commands and unprocessed
 issue. Across webhook and recovery resolution, address work is always emitted
 as a pull request work item, including when it was found through a linked issue,
 so duplicate issue-scoped and pull-request-scoped workers cannot target the
-same review command. Blocked or ambiguous issues consume a slot until their
-current state is reported; later discovery runs skip the same actor-authored
-notification marker and continue scanning. A manual run can pass `issue-number`
-to reconcile one issue directly, but the worker still requires an authorized
-implementation command.
+same review command. If an issue-scoped worker re-fetches state after waiting
+and the issue has since become address work, it defers that work instead of
+retargeting while holding the issue concurrency key. Blocked or ambiguous
+issues consume a slot until their current state is reported; later discovery
+runs skip the same actor-authored notification marker and continue scanning. A
+manual run can pass `issue-number` to reconcile one issue directly, but the
+worker still requires an authorized implementation command.
 
 ## Issue and pull request behavior
 
@@ -205,8 +207,9 @@ the current head. If that activity record is unavailable, the workflow includes
 all otherwise eligible feedback rather than risk silently omitting feedback.
 Explicitly marked inline threads are included once as complete threads rather
 than duplicated in the batch feedback. Multiple pending top-level commands are
-acknowledged together. Command variants, bot comments, previous
+acknowledged together. Command variants, bot comments, publisher-authored
 acknowledgements, and reactions do not start or contribute feedback.
+Acknowledgement-shaped text from any other human remains feedback.
 
 No linked issue is required. If the pull request closes, moves to an
 unwritable head, or otherwise changes before reconciliation, the address-only

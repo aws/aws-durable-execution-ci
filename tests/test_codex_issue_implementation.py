@@ -1233,6 +1233,89 @@ class EventSelectionTest(unittest.TestCase):
 
 
 class MarkerPolicyTest(unittest.TestCase):
+    def test_feedback_filters_only_publisher_acknowledgements_and_commands(
+        self,
+    ):
+        timestamp = "2026-08-22T00:02:00Z"
+        acknowledgement = (
+            "<!-- codex-addressed kind=issue_comment "
+            f"command-id=900 commit={'d' * 40} -->"
+        )
+        human_comment = {
+            "body": f"Please investigate. {acknowledgement}",
+            "user": {"login": "reviewer", "type": "User"},
+            "created_at": timestamp,
+            "updated_at": timestamp,
+        }
+        publisher_comment = {
+            **human_comment,
+            "user": {"login": "publisher", "type": "User"},
+        }
+        human_review = {
+            **human_comment,
+            "submitted_at": timestamp,
+        }
+        publisher_review = {
+            **publisher_comment,
+            "submitted_at": timestamp,
+        }
+
+        self.assertTrue(
+            IMPLEMENTATION.is_address_feedback(
+                human_comment,
+                None,
+                "publisher",
+            )
+        )
+        self.assertFalse(
+            IMPLEMENTATION.is_address_feedback(
+                publisher_comment,
+                None,
+                "publisher",
+            )
+        )
+        self.assertTrue(
+            IMPLEMENTATION.is_review_feedback(
+                human_review,
+                None,
+                "publisher",
+            )
+        )
+        self.assertFalse(
+            IMPLEMENTATION.is_review_feedback(
+                publisher_review,
+                None,
+                "publisher",
+            )
+        )
+
+        for body in (
+            "/ai address",
+            "/ai address please",
+            "/AI ADDRESS later",
+            "/ai   implement this",
+        ):
+            with self.subTest(body=body):
+                comment = {**human_comment, "body": body}
+                review = {
+                    **human_review,
+                    "body": body,
+                }
+                self.assertFalse(
+                    IMPLEMENTATION.is_address_feedback(
+                        comment,
+                        None,
+                        "publisher",
+                    )
+                )
+                self.assertFalse(
+                    IMPLEMENTATION.is_review_feedback(
+                        review,
+                        None,
+                        "publisher",
+                    )
+                )
+
     def test_pat_and_app_acknowledgements_are_not_processed_again(self):
         for actor, actor_type in (
             ("maintainer", "User"),
@@ -2184,14 +2267,10 @@ class PreparationPolicyTest(unittest.TestCase):
             implementation_command(),
         )
 
-    def test_exactly_one_linked_pr_updates_that_pr(self):
+    def test_issue_classifier_identifies_exactly_one_linked_pr(self):
         pull = pull_request()
         markers = [marker()]
-        with patch.dict(os.environ, environment(), clear=True), patch.object(
-            IMPLEMENTATION,
-            "fetch_issue",
-            return_value=issue(),
-        ), patch.object(
+        with patch.object(
             IMPLEMENTATION,
             "linked_open_pull_requests",
             return_value=[pull],
@@ -2211,7 +2290,12 @@ class PreparationPolicyTest(unittest.TestCase):
             IMPLEMENTATION,
             "validate_git_branch",
         ):
-            state = IMPLEMENTATION.prepare_state()
+            state = IMPLEMENTATION.prepare_issue_state(
+                "aws/example",
+                "codex:no-pr",
+                "publisher[bot]",
+                issue(),
+            )
 
         self.assertEqual(state["action"], "address")
         self.assertEqual(state["target"]["pull_request_number"], 44)
@@ -2232,6 +2316,30 @@ class PreparationPolicyTest(unittest.TestCase):
             pull["head_ref"],
             pull["head_sha"],
         )
+
+    def test_issue_scoped_worker_defers_pr_address_work(self):
+        address_state = {
+            "action": "address",
+            "markers": [marker()],
+            "target": {
+                "pull_request_number": 44,
+                "sha": "b" * 40,
+            },
+        }
+        with patch.dict(os.environ, environment(), clear=True), patch.object(
+            IMPLEMENTATION,
+            "fetch_issue",
+            return_value=issue(),
+        ), patch.object(
+            IMPLEMENTATION,
+            "prepare_issue_state",
+            return_value=address_state,
+        ):
+            state = IMPLEMENTATION.prepare_state()
+
+        self.assertEqual(state["action"], "skip")
+        self.assertEqual(state["markers"], [])
+        self.assertIsNone(state["target"])
 
     def test_address_only_updates_pull_request_without_linked_issue(self):
         pull = pull_request()

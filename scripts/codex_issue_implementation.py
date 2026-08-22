@@ -16,6 +16,10 @@ from typing import Any
 
 ADDRESS_COMMAND = "/ai address"
 IMPLEMENT_COMMAND = "/ai implement"
+AI_COMMAND_PATTERN = re.compile(
+    r"^/ai\s+(?:address|implement)(?:\s|$)",
+    re.IGNORECASE,
+)
 ACKNOWLEDGEMENT_PATTERN = re.compile(
     r"<!-- codex-addressed(?: kind=(issue_comment|review_comment))? "
     r"command-id=(\d+) commit=([0-9a-f]{40}) -->"
@@ -916,16 +920,36 @@ def feedback_is_current(
     )
 
 
+def is_ai_command_comment(body: str) -> bool:
+    return AI_COMMAND_PATTERN.search(body.strip()) is not None
+
+
+def is_publisher_acknowledgement(
+    value: dict[str, Any],
+    actor: str,
+) -> bool:
+    user = value.get("user")
+    body = value.get("body")
+    return (
+        isinstance(user, dict)
+        and isinstance(user.get("login"), str)
+        and user["login"].casefold() == actor.casefold()
+        and isinstance(body, str)
+        and ACKNOWLEDGEMENT_PATTERN.search(body) is not None
+    )
+
+
 def is_address_feedback(
     comment: dict[str, Any],
     head_updated_at: datetime | None,
+    actor: str,
 ) -> bool:
     body = comment.get("body")
     return (
         isinstance(body, str)
         and bool(body.strip())
-        and body.strip() not in (ADDRESS_COMMAND, IMPLEMENT_COMMAND)
-        and ACKNOWLEDGEMENT_PATTERN.search(body) is None
+        and not is_ai_command_comment(body)
+        and not is_publisher_acknowledgement(comment, actor)
         and not is_bot_user(comment.get("user"))
         and feedback_is_current(
             comment.get("created_at"),
@@ -939,13 +963,14 @@ def is_address_feedback(
 def is_review_feedback(
     review: dict[str, Any],
     head_updated_at: datetime | None,
+    actor: str,
 ) -> bool:
     body = review.get("body")
     return (
         isinstance(body, str)
         and bool(body.strip())
-        and body.strip() not in (ADDRESS_COMMAND, IMPLEMENT_COMMAND)
-        and ACKNOWLEDGEMENT_PATTERN.search(body) is None
+        and not is_ai_command_comment(body)
+        and not is_publisher_acknowledgement(review, actor)
         and not is_bot_user(review.get("user"))
         and feedback_is_current(
             review.get("submitted_at"),
@@ -1089,7 +1114,7 @@ def unprocessed_markers(
         ):
             if (
                 isinstance(review, dict)
-                and is_review_feedback(review, head_updated_at)
+                and is_review_feedback(review, head_updated_at, actor)
             ):
                 normalized = normalized_pull_request_review(review)
                 cursor = feedback_cursor(normalized)
@@ -1103,7 +1128,7 @@ def unprocessed_markers(
         for comment in conversation:
             if (
                 isinstance(comment, dict)
-                and is_address_feedback(comment, head_updated_at)
+                and is_address_feedback(comment, head_updated_at, actor)
             ):
                 normalized = normalized_conversation_comment(comment)
                 cursor = feedback_cursor(normalized)
@@ -1118,7 +1143,7 @@ def unprocessed_markers(
             if not isinstance(comment, dict):
                 continue
             root_id = comment.get("in_reply_to_id") or comment.get("id")
-            if not is_address_feedback(comment, head_updated_at):
+            if not is_address_feedback(comment, head_updated_at, actor):
                 continue
             normalized = {
                 "kind": "review_comment",
@@ -1976,12 +2001,17 @@ def prepare_state() -> dict[str, Any]:
             fetch_pull_request(repository, pull_request_number),
         )
     issue_number = issue_number_from_environment()
-    return prepare_issue_state(
+    state = prepare_issue_state(
         repository,
         no_pr_label(),
         actor,
         fetch_issue(repository, issue_number),
     )
+    if state["action"] == "address":
+        state["action"] = "skip"
+        state["markers"] = []
+        state["target"] = None
+    return state
 
 
 def model_context(state: dict[str, Any]) -> dict[str, Any]:
