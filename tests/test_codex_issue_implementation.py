@@ -1027,6 +1027,86 @@ class ValidationPolicyTest(unittest.TestCase):
 
             self.assertFalse(artifact_path.exists())
 
+    def test_binary_staged_content_cannot_hide_a_runtime_credential(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "repository"
+            workspace.mkdir()
+            os.environ.setdefault("GIT_AUTHOR_NAME", "Test")
+            os.environ.setdefault("GIT_AUTHOR_EMAIL", "test@example.com")
+            os.environ.setdefault("GIT_COMMITTER_NAME", "Test")
+            os.environ.setdefault("GIT_COMMITTER_EMAIL", "test@example.com")
+            self.assertEqual(
+                IMPLEMENTATION.run_command(
+                    ["git", "init", "-b", "main"],
+                    cwd=workspace,
+                ).returncode,
+                0,
+            )
+            (workspace / "README.md").write_text("test\n", encoding="utf-8")
+            IMPLEMENTATION.run_command(
+                ["git", "add", "README.md"],
+                cwd=workspace,
+            )
+            IMPLEMENTATION.run_command(
+                ["git", "commit", "-m", "initial"],
+                cwd=workspace,
+            )
+            sha = IMPLEMENTATION.git_output(
+                ["rev-parse", "HEAD"],
+                workspace,
+            ).strip()
+            credential = b"binary-session-token"
+            (workspace / "payload.bin").write_bytes(
+                b"\0" + (b"x" * 65_530) + credential
+            )
+            state_path = root / "state.json"
+            result_path = root / "result.json"
+            artifact_path = root / "artifact.json"
+            patch_path = root / "change.patch"
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "action": "implement",
+                        "target": {"sha": sha},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            result_path.write_text(
+                json.dumps(
+                    {
+                        "outcome": "changed",
+                        "summary": "Add the binary payload.",
+                        "validation": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.dict(
+                os.environ,
+                {
+                    "ALLOW_WORKFLOW_CHANGES": "false",
+                    "AWS_SESSION_TOKEN": credential.decode("ascii"),
+                },
+                clear=True,
+            ):
+                with self.assertRaisesRegex(
+                    IMPLEMENTATION.ImplementationError,
+                    "staged content contains a runtime credential",
+                ):
+                    IMPLEMENTATION.validate_model_command(
+                        result_path,
+                        state_path,
+                        artifact_path,
+                        patch_path,
+                        workspace,
+                    )
+
+            self.assertFalse(artifact_path.exists())
+            self.assertFalse(patch_path.exists())
+
     def test_output_schema_matches_publication_text_validation(self):
         summary_pattern = SCHEMA["properties"]["summary"]["pattern"]
         validation_pattern = SCHEMA["properties"]["validation"]["items"][
@@ -1424,6 +1504,46 @@ class ValidationPolicyTest(unittest.TestCase):
                 IMPLEMENTATION.require_linked_pull_request_issue_numbers(
                     state
                 )
+
+    def test_blocked_publication_recomputes_the_blocking_condition(self):
+        current_issue = issue()
+        state = {
+            "repository": "aws/example",
+            "implementation_label": "codex:implement",
+            "no_pr_label": "codex:no-pr",
+            "publication_actor": "publisher[bot]",
+            "issue": IMPLEMENTATION.issue_snapshot(current_issue),
+            "reason": (
+                "The linked pull request must close exactly this open, "
+                "eligible issue before the workflow can update it."
+            ),
+        }
+        with patch.object(
+            IMPLEMENTATION,
+            "require_current_issue",
+            return_value=current_issue,
+        ), patch.object(
+            IMPLEMENTATION,
+            "prepare_issue_state",
+            return_value={"action": "skip"},
+        ) as prepare, patch.object(
+            IMPLEMENTATION,
+            "post_issue_comment_once",
+        ) as post:
+            with self.assertRaisesRegex(
+                IMPLEMENTATION.ImplementationError,
+                "blocking condition changed",
+            ):
+                IMPLEMENTATION.publish_blocked(state)
+
+        prepare.assert_called_once_with(
+            "aws/example",
+            "codex:implement",
+            "codex:no-pr",
+            "publisher[bot]",
+            current_issue,
+        )
+        post.assert_not_called()
 
     def test_workflow_changes_require_explicit_opt_in(self):
         with tempfile.TemporaryDirectory() as directory:

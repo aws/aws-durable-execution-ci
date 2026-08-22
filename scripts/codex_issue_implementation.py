@@ -1179,22 +1179,42 @@ def changed_paths(workspace: Path) -> list[str]:
     return paths
 
 
-def reject_gitlinks(workspace: Path, paths: list[str]) -> None:
+def staged_blob_oids(workspace: Path, paths: list[str]) -> list[str]:
+    blob_oids: list[str] = []
+    seen_oids: set[str] = set()
     for path in paths:
         result = run_command(
-            ["git", "ls-files", "--stage", "--", path],
+            ["git", "ls-files", "--stage", "-z", "--", path],
             cwd=workspace,
         )
         if result.returncode != 0:
             raise ImplementationError("failed to inspect staged file modes")
-        for line in result.stdout.splitlines():
-            if line.startswith("160000 "):
+        for record in result.stdout.split("\0"):
+            if not record:
+                continue
+            try:
+                metadata, record_path = record.split("\t", 1)
+                mode, object_id, stage = metadata.split()
+            except ValueError as error:
+                raise ImplementationError(
+                    "git returned invalid staged file metadata"
+                ) from error
+            if record_path != path or stage != "0":
+                raise ImplementationError(
+                    "git returned invalid staged file metadata"
+                )
+            if mode == "160000":
                 raise ImplementationError(
                     "model changes must not add or modify gitlinks"
                 )
+            if object_id not in seen_oids:
+                seen_oids.add(object_id)
+                blob_oids.append(object_id)
+    return blob_oids
 
 
-def contains_runtime_credential(content: bytes) -> bool:
+def runtime_credential_values() -> list[bytes]:
+    values: list[bytes] = []
     for name in (
         "AWS_ACCESS_KEY_ID",
         "AWS_SECRET_ACCESS_KEY",
@@ -1205,8 +1225,53 @@ def contains_runtime_credential(content: bytes) -> bool:
         "GITHUB_TOKEN",
     ):
         value = os.environ.get(name, "")
-        if value and value.encode("utf-8") in content:
+        if value:
+            values.append(value.encode("utf-8"))
+    return values
+
+
+def contains_runtime_credential(content: bytes) -> bool:
+    return any(value in content for value in runtime_credential_values())
+
+
+def staged_blobs_contain_runtime_credential(
+    workspace: Path,
+    object_ids: list[str],
+) -> bool:
+    credentials = runtime_credential_values()
+    if not credentials:
+        return False
+    overlap = max(len(value) for value in credentials) - 1
+    for object_id in object_ids:
+        try:
+            process = subprocess.Popen(
+                ["git", "cat-file", "blob", object_id],
+                cwd=workspace,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+        except OSError as error:
+            raise ImplementationError(
+                "failed to inspect staged content"
+            ) from error
+        assert process.stdout is not None
+        tail = b""
+        matched = False
+        while chunk := process.stdout.read(65_536):
+            content = tail + chunk
+            if any(value in content for value in credentials):
+                matched = True
+                process.kill()
+                break
+            tail = content[-overlap:] if overlap else b""
+        _, stderr = process.communicate()
+        if matched:
             return True
+        if process.returncode != 0:
+            raise ImplementationError(
+                stderr.decode("utf-8", errors="replace").strip()
+                or "failed to inspect staged content"
+            )
     return False
 
 
@@ -1244,7 +1309,11 @@ def validate_model_command(
 
     git_output(["add", "--all"], workspace)
     paths = changed_paths(workspace)
-    reject_gitlinks(workspace, paths)
+    object_ids = staged_blob_oids(workspace, paths)
+    if staged_blobs_contain_runtime_credential(workspace, object_ids):
+        raise ImplementationError(
+            "model staged content contains a runtime credential"
+        )
     if (
         os.environ.get("ALLOW_WORKFLOW_CHANGES", "").lower() != "true"
         and any(path.startswith(".github/workflows/") for path in paths)
@@ -1795,21 +1864,21 @@ def publish_ambiguous(state: dict[str, Any]) -> None:
 
 
 def publish_blocked(state: dict[str, Any]) -> None:
-    require_current_issue(state)
-    if state["linked_pull_requests"]:
-        require_linked_pull_requests(state)
-    elif state.get("target") is not None:
-        current_branch = branch_ref(
-            state["repository"],
-            state["target"]["ref"],
+    issue = require_current_issue(state)
+    current = prepare_issue_state(
+        state["repository"],
+        state["implementation_label"],
+        state["no_pr_label"],
+        state["publication_actor"],
+        issue,
+    )
+    if (
+        current["action"] != "blocked"
+        or current.get("reason") != state["reason"]
+    ):
+        raise ImplementationError(
+            "blocking condition changed during the run; retry reconciliation"
         )
-        if current_branch != {
-            "ref": state["target"]["ref"],
-            "sha": state["target"]["sha"],
-        }:
-            raise ImplementationError(
-                "blocking branch changed during the run"
-            )
     marker = blocked_issue_marker(
         state["issue"]["number"],
         state["reason"],

@@ -223,9 +223,9 @@ The workflow:
 - never places the publication token or automatic `GITHUB_TOKEN` in the Codex
   step;
 - accepts only a closed JSON result contract and a size-limited Git patch;
-- rejects gitlinks, runtime credentials in both model-authored result text and
-  patches, protected workflow renames or edits, stale state, and changes
-  outside the checked-out repository;
+- rejects gitlinks, runtime credentials in model-authored result text, raw
+  staged blobs, and patch metadata, protected workflow renames or edits, stale
+  state, and changes outside the checked-out repository;
 - re-checks all mutation preconditions in the publication step before the
   publication token is used.
 
