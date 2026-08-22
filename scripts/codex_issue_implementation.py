@@ -9,7 +9,7 @@ import re
 import subprocess
 import sys
 import urllib.parse
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +18,11 @@ ADDRESS_COMMAND = "/ai address"
 IMPLEMENT_COMMAND = "/ai implement"
 ACKNOWLEDGEMENT_PATTERN = re.compile(
     r"<!-- codex-addressed command-id=(\d+) commit=([0-9a-f]{40}) -->"
+)
+FEEDBACK_CURSOR_PATTERN = re.compile(
+    r"<!-- codex-addressed-feedback at=(\d+) "
+    r"kind=(conversation_comment|pull_request_review|review_comment) "
+    r"id=(\d+) -->"
 )
 AUTOMATION_TRAILER = "Codex-Automation: issue-implementation"
 ISSUE_SNAPSHOT_TRAILER = "Codex-Issue-Snapshot"
@@ -40,6 +45,9 @@ ISSUE_SEMANTIC_FIELDS = (
     "labels",
 )
 WRITE_PERMISSIONS = frozenset(("admin", "maintain", "write"))
+FEEDBACK_KINDS = frozenset(
+    ("conversation_comment", "pull_request_review", "review_comment")
+)
 
 
 class ImplementationError(ValueError):
@@ -602,6 +610,73 @@ def acknowledged_command_ids(
     return acknowledged
 
 
+def feedback_timestamp_micros(value: Any) -> int:
+    parsed = parse_github_timestamp(value, "feedback timestamp")
+    utc = parsed.astimezone(timezone.utc)
+    epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+    delta = utc - epoch
+    return (
+        (delta.days * 86_400 + delta.seconds) * 1_000_000
+        + delta.microseconds
+    )
+
+
+def feedback_cursor(value: dict[str, Any]) -> dict[str, Any]:
+    kind = value.get("kind")
+    identifier = value.get("id")
+    if kind not in FEEDBACK_KINDS or type(identifier) is not int:
+        raise ImplementationError("pull request feedback is invalid")
+    return {
+        "at": feedback_timestamp_micros(value.get("created_at")),
+        "kind": kind,
+        "id": identifier,
+    }
+
+
+def feedback_cursor_key(cursor: dict[str, Any]) -> tuple[int, str, int]:
+    at = cursor.get("at")
+    kind = cursor.get("kind")
+    identifier = cursor.get("id")
+    if (
+        type(at) is not int
+        or at < 0
+        or kind not in FEEDBACK_KINDS
+        or type(identifier) is not int
+    ):
+        raise ImplementationError("feedback cursor is invalid")
+    return at, kind, identifier
+
+
+def acknowledged_feedback_cursor(
+    comments: list[dict[str, Any]],
+    actor: str,
+) -> dict[str, Any] | None:
+    cursors: list[dict[str, Any]] = []
+    for comment in comments:
+        if not isinstance(comment, dict):
+            continue
+        user = comment.get("user")
+        body = comment.get("body")
+        if (
+            not isinstance(user, dict)
+            or not isinstance(user.get("login"), str)
+            or user["login"].casefold() != actor.casefold()
+            or not isinstance(body, str)
+        ):
+            continue
+        for match in FEEDBACK_CURSOR_PATTERN.finditer(body):
+            cursor = {
+                "at": int(match.group(1)),
+                "kind": match.group(2),
+                "id": int(match.group(3)),
+            }
+            feedback_cursor_key(cursor)
+            cursors.append(cursor)
+    if not cursors:
+        return None
+    return max(cursors, key=feedback_cursor_key)
+
+
 def normalized_thread_comment(comment: dict[str, Any]) -> dict[str, Any]:
     user = comment.get("user")
     body = comment.get("body")
@@ -719,8 +794,13 @@ def unprocessed_markers(
 ) -> list[dict[str, Any]]:
     comments = review_comments(repository, pull_request_number)
     conversation = issue_comments(repository, pull_request_number)
+    acknowledgement_comments = comments + conversation
     acknowledged = acknowledged_command_ids(
-        comments + conversation,
+        acknowledgement_comments,
+        actor,
+    )
+    previous_feedback_cursor = acknowledged_feedback_cursor(
+        acknowledgement_comments,
         actor,
     )
     permissions: dict[str, bool] = {}
@@ -816,6 +896,7 @@ def unprocessed_markers(
             if marker.get("command_kind") == "review_comment"
         }
         feedback: list[dict[str, Any]] = []
+        feedback_cursors: list[dict[str, Any]] = []
         for review in pull_request_reviews(
             repository,
             pull_request_number,
@@ -824,27 +905,49 @@ def unprocessed_markers(
                 isinstance(review, dict)
                 and is_review_feedback(review, committed_at)
             ):
-                feedback.append(normalized_pull_request_review(review))
+                normalized = normalized_pull_request_review(review)
+                cursor = feedback_cursor(normalized)
+                if (
+                    previous_feedback_cursor is None
+                    or feedback_cursor_key(cursor)
+                    > feedback_cursor_key(previous_feedback_cursor)
+                ):
+                    feedback.append(normalized)
+                    feedback_cursors.append(cursor)
         for comment in conversation:
             if (
                 isinstance(comment, dict)
                 and is_address_feedback(comment, committed_at)
             ):
-                feedback.append(normalized_conversation_comment(comment))
+                normalized = normalized_conversation_comment(comment)
+                cursor = feedback_cursor(normalized)
+                if (
+                    previous_feedback_cursor is None
+                    or feedback_cursor_key(cursor)
+                    > feedback_cursor_key(previous_feedback_cursor)
+                ):
+                    feedback.append(normalized)
+                    feedback_cursors.append(cursor)
         for comment in comments:
             if not isinstance(comment, dict):
                 continue
             root_id = comment.get("in_reply_to_id") or comment.get("id")
+            if not is_address_feedback(comment, committed_at):
+                continue
+            normalized = {
+                "kind": "review_comment",
+                **normalized_thread_comment(comment),
+            }
+            cursor = feedback_cursor(normalized)
             if (
-                root_id not in covered_roots
-                and is_address_feedback(comment, committed_at)
+                previous_feedback_cursor is not None
+                and feedback_cursor_key(cursor)
+                <= feedback_cursor_key(previous_feedback_cursor)
             ):
-                feedback.append(
-                    {
-                        "kind": "review_comment",
-                        **normalized_thread_comment(comment),
-                    }
-                )
+                continue
+            feedback_cursors.append(cursor)
+            if root_id not in covered_roots:
+                feedback.append(normalized)
         feedback.sort(
             key=lambda value: (
                 value.get("created_at") or "",
@@ -864,6 +967,12 @@ def unprocessed_markers(
                 "author": user["login"],
                 "command": normalized_conversation_comment(command),
                 "since_commit": commit,
+                "previous_feedback_cursor": previous_feedback_cursor,
+                "feedback_cursor": (
+                    max(feedback_cursors, key=feedback_cursor_key)
+                    if feedback_cursors
+                    else previous_feedback_cursor
+                ),
                 "feedback": feedback,
             }
         )
@@ -1303,6 +1412,7 @@ def prepare_issue_state(
         "linked_pull_requests": [],
         "linked_pull_request_issue_numbers": [],
         "pull_request": None,
+        "default_branch": None,
         "markers": [],
         "action": "skip",
         "target": None,
@@ -1332,6 +1442,7 @@ def prepare_issue_state(
             )
             return state
         metadata = repository_metadata(repository)
+        state["default_branch"] = metadata["default_branch"]
         if (
             not isinstance(pull_request["head_ref"], str)
             or not isinstance(pull_request["head_sha"], str)
@@ -1427,6 +1538,7 @@ def prepare_issue_state(
 
     metadata = repository_metadata(repository)
     default_branch = metadata["default_branch"]
+    state["default_branch"] = default_branch
     validate_git_branch(default_branch)
     default_ref = branch_ref(repository, default_branch)
     assert default_ref is not None
@@ -1457,6 +1569,7 @@ def prepare_pull_request_state(
         "linked_pull_requests": [],
         "linked_pull_request_issue_numbers": [],
         "pull_request": pull_request,
+        "default_branch": None,
         "markers": [],
         "action": "skip",
         "target": None,
@@ -1466,6 +1579,7 @@ def prepare_pull_request_state(
     if pull_request.get("head_repository") != repository:
         return state
     metadata = repository_metadata(repository)
+    state["default_branch"] = metadata["default_branch"]
     if (
         not isinstance(pull_request.get("head_ref"), str)
         or not isinstance(pull_request.get("head_sha"), str)
@@ -2176,6 +2290,28 @@ def require_current_pull_request(
     return current
 
 
+def require_pull_request_head_not_default(state: dict[str, Any]) -> None:
+    prepared_default = state.get("default_branch")
+    pull_request = state.get("pull_request")
+    if (
+        not isinstance(prepared_default, str)
+        or not isinstance(pull_request, dict)
+        or not isinstance(pull_request.get("head_ref"), str)
+    ):
+        raise ImplementationError("prepared pull request is invalid")
+    current_default = repository_metadata(
+        state["repository"]
+    )["default_branch"]
+    if current_default != prepared_default:
+        raise ImplementationError(
+            "default branch designation changed during the run"
+        )
+    if pull_request["head_ref"] == current_default:
+        raise ImplementationError(
+            "pull request head is now the default branch"
+        )
+
+
 def current_marker_snapshot(state: dict[str, Any]) -> list[dict[str, Any]]:
     pull_request_number = state["target"]["pull_request_number"]
     return unprocessed_markers(
@@ -2221,6 +2357,10 @@ def marker_acknowledgement_snapshot(
                 else None
             )
             snapshot["since_commit"] = marker.get("since_commit")
+            snapshot["previous_feedback_cursor"] = marker.get(
+                "previous_feedback_cursor"
+            )
+            snapshot["feedback_cursor"] = marker.get("feedback_cursor")
             snapshot["feedback"] = [
                 {
                     field: comment.get(field)
@@ -2612,6 +2752,7 @@ def acknowledgement_body(
     command_ids: list[int],
     commit_sha: str,
     result: dict[str, Any],
+    cursor: dict[str, Any] | None = None,
 ) -> str:
     prefix = (
         "Addressed by Codex"
@@ -2623,6 +2764,13 @@ def acknowledgement_body(
         f"commit={commit_sha} -->"
         for command_id in command_ids
     )
+    if cursor is not None:
+        at, kind, identifier = feedback_cursor_key(cursor)
+        markers = (
+            f"{markers}\n"
+            f"<!-- codex-addressed-feedback at={at} "
+            f"kind={kind} id={identifier} -->"
+        )
     return (
         f"{prefix} at `{commit_sha}`. "
         f"{safe_github_text(result['summary'])}\n\n"
@@ -2640,6 +2788,7 @@ def acknowledge_markers(
             marker.get("command_ids") or [marker["command_id"]],
             commit_sha,
             result,
+            marker.get("feedback_cursor"),
         )
         if marker.get("command_kind") == "issue_comment":
             run_gh_json(
@@ -2852,6 +3001,7 @@ def publish_review_update(
         require_linked_pull_request_issue_numbers(state)
     require_current_pull_request(state)
     require_markers_unchanged(state)
+    require_pull_request_head_not_default(state)
     push_commit(
         workspace,
         state["target"]["ref"],

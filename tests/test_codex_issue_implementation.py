@@ -1215,6 +1215,11 @@ class MarkerPolicyTest(unittest.TestCase):
                 "sha": "b" * 40,
                 "committed_at": "2026-08-22T00:01:00Z",
             },
+            "feedback_cursor": {
+                "at": 1_777_000_000_000_000,
+                "kind": "conversation_comment",
+                "id": 850,
+            },
             "feedback": [],
         }
         state = {
@@ -1248,6 +1253,10 @@ class MarkerPolicyTest(unittest.TestCase):
         batch_body = run.call_args_list[1].kwargs["input_value"]["body"]
         self.assertIn("command-id=900", batch_body)
         self.assertIn("command-id=901", batch_body)
+        self.assertIn(
+            "kind=conversation_comment id=850",
+            batch_body,
+        )
 
     def test_batch_acknowledgements_are_not_processed_again(self):
         conversation = [
@@ -1303,6 +1312,103 @@ class MarkerPolicyTest(unittest.TestCase):
 
         permission.assert_not_called()
         head_commit.assert_not_called()
+
+    def test_no_change_batch_cursor_excludes_previously_handled_feedback(self):
+        first_feedback = {
+            "id": 850,
+            "body": "First feedback.",
+            "user": {"login": "reviewer", "type": "User"},
+            "created_at": "2026-08-22T00:02:00Z",
+            "updated_at": "2026-08-22T00:02:00Z",
+        }
+        first_command = implementation_comment(
+            command_id=900,
+            body="/ai address",
+        )
+        first_conversation = [first_feedback, first_command]
+
+        def markers_for(conversation):
+            with patch.object(
+                IMPLEMENTATION,
+                "review_comments",
+                return_value=[],
+            ), patch.object(
+                IMPLEMENTATION,
+                "pull_request_reviews",
+                return_value=[],
+            ), patch.object(
+                IMPLEMENTATION,
+                "pull_request_head_commit",
+                return_value={
+                    "sha": "b" * 40,
+                    "committed_at": "2026-08-22T00:01:00Z",
+                },
+            ), patch.object(
+                IMPLEMENTATION,
+                "collaborator_has_write_permission",
+                return_value=True,
+            ), patch.object(
+                IMPLEMENTATION,
+                "issue_comments",
+                return_value=conversation,
+            ):
+                return IMPLEMENTATION.unprocessed_markers(
+                    "aws/example",
+                    44,
+                    "publisher[bot]",
+                    "b" * 40,
+                )
+
+        first_markers = markers_for(first_conversation)
+
+        cursor = first_markers[0]["feedback_cursor"]
+        acknowledgement = {
+            "id": 901,
+            "body": IMPLEMENTATION.acknowledgement_body(
+                [900],
+                "b" * 40,
+                {
+                    "outcome": "no_change",
+                    "summary": "No change required.",
+                    "validation": [],
+                },
+                cursor,
+            ),
+            "user": {
+                "login": "publisher[bot]",
+                "type": "Bot",
+            },
+            "created_at": "2026-08-22T00:02:30Z",
+            "updated_at": "2026-08-22T00:02:30Z",
+        }
+        second_feedback = {
+            "id": 950,
+            "body": "Second feedback.",
+            "user": {"login": "reviewer", "type": "User"},
+            "created_at": "2026-08-22T00:03:00Z",
+            "updated_at": "2026-08-22T00:03:00Z",
+        }
+        second_command = implementation_comment(
+            command_id=1000,
+            body="/ai address",
+        )
+        second_conversation = [
+            *first_conversation,
+            acknowledgement,
+            second_feedback,
+            second_command,
+        ]
+        second_markers = markers_for(second_conversation)
+
+        self.assertEqual(second_markers[0]["command_ids"], [1000])
+        self.assertEqual(
+            [value["body"] for value in second_markers[0]["feedback"]],
+            ["Second feedback."],
+        )
+        self.assertEqual(
+            second_markers[0]["previous_feedback_cursor"],
+            cursor,
+        )
 
     def test_marker_context_does_not_truncate_comment_or_diff(self):
         body = "body-" + ("x" * 25_000) + "-tail"
@@ -1524,6 +1630,7 @@ class PreparationPolicyTest(unittest.TestCase):
         )
         self.assertEqual(state["linked_pull_request_issue_numbers"], [31])
         self.assertEqual(state["markers"], markers)
+        self.assertEqual(state["default_branch"], "main")
         unprocessed.assert_called_once_with(
             "aws/example",
             44,
@@ -1567,6 +1674,7 @@ class PreparationPolicyTest(unittest.TestCase):
         self.assertIsNone(state["issue"])
         self.assertEqual(state["pull_request"], pull)
         self.assertEqual(state["target"]["pull_request_number"], 44)
+        self.assertEqual(state["default_branch"], "main")
         fetch_issue.assert_not_called()
 
     def test_address_only_never_starts_new_issue_implementation(self):
@@ -3032,6 +3140,9 @@ class ValidationPolicyTest(unittest.TestCase):
             return_value=commit_sha,
         ), patch.object(
             IMPLEMENTATION,
+            "require_pull_request_head_not_default",
+        ) as require_not_default, patch.object(
+            IMPLEMENTATION,
             "push_commit",
         ), patch.object(
             IMPLEMENTATION,
@@ -3053,7 +3164,96 @@ class ValidationPolicyTest(unittest.TestCase):
 
         self.assertEqual(require_full.call_count, 2)
         self.assertEqual(require_issue_numbers.call_count, 3)
+        require_not_default.assert_called_once_with(state)
         require_immutable.assert_called_once_with(state)
+
+    def test_review_push_rejects_default_branch_race_for_both_scopes(self):
+        result = {
+            "outcome": "changed",
+            "summary": "Addressed the review.",
+            "validation": ["python3 -m unittest"],
+        }
+        for issue_scoped in (False, True):
+            with self.subTest(issue_scoped=issue_scoped):
+                prepared = pull_request()
+                state = {
+                    "repository": "aws/example",
+                    "issue": (
+                        {"number": 31}
+                        if issue_scoped
+                        else None
+                    ),
+                    "linked_pull_requests": (
+                        [prepared]
+                        if issue_scoped
+                        else []
+                    ),
+                    "pull_request": prepared,
+                    "markers": [marker()],
+                    "target": {
+                        "ref": prepared["head_ref"],
+                        "sha": prepared["head_sha"],
+                        "pull_request_number": prepared["number"],
+                    },
+                }
+                with patch.object(
+                    IMPLEMENTATION,
+                    "require_current_issue",
+                ), patch.object(
+                    IMPLEMENTATION,
+                    "require_linked_pull_requests",
+                ), patch.object(
+                    IMPLEMENTATION,
+                    "require_linked_pull_request_issue_numbers",
+                ), patch.object(
+                    IMPLEMENTATION,
+                    "require_current_pull_request",
+                ), patch.object(
+                    IMPLEMENTATION,
+                    "require_markers_unchanged",
+                ), patch.object(
+                    IMPLEMENTATION,
+                    "apply_patch_and_commit",
+                    return_value="d" * 40,
+                ), patch.object(
+                    IMPLEMENTATION,
+                    "require_pull_request_head_not_default",
+                    side_effect=IMPLEMENTATION.ImplementationError(
+                        "default branch designation changed during the run"
+                    ),
+                ), patch.object(
+                    IMPLEMENTATION,
+                    "push_commit",
+                ) as push:
+                    with self.assertRaisesRegex(
+                        IMPLEMENTATION.ImplementationError,
+                        "designation changed",
+                    ):
+                        IMPLEMENTATION.publish_review_update(
+                            state,
+                            result,
+                            Path("/change.patch"),
+                            Path("/workspace"),
+                        )
+
+                push.assert_not_called()
+
+    def test_pull_request_default_branch_designation_is_revalidated(self):
+        state = {
+            "repository": "aws/example",
+            "default_branch": "main",
+            "pull_request": pull_request(),
+        }
+        with patch.object(
+            IMPLEMENTATION,
+            "repository_metadata",
+            return_value={"default_branch": "trunk"},
+        ):
+            with self.assertRaisesRegex(
+                IMPLEMENTATION.ImplementationError,
+                "designation changed",
+            ):
+                IMPLEMENTATION.require_pull_request_head_not_default(state)
 
     def test_review_acknowledgement_revalidates_pr_issue_ownership(self):
         prepared_pull = pull_request()

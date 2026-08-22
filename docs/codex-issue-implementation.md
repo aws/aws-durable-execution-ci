@@ -213,10 +213,12 @@ After a successful update, the workflow replies in each marked review thread
 and posts a pull request conversation acknowledgement for top-level commands.
 Machine-readable markers contain the command comment IDs and commit SHA, so
 later runs treat those commands as processed. A no-change result is also
-acknowledged, using the unchanged pull request head SHA. Review threads are not
-resolved automatically. Conversation bodies, review comment bodies, and diff
-hunks are preserved in full; the run fails instead of acknowledging feedback
-when the complete prepared state exceeds the overall context size limit.
+acknowledged, using the unchanged pull request head SHA. Batch acknowledgements
+also record a feedback high-water mark, so a later top-level command on the
+same head includes only newer feedback. Review threads are not resolved
+automatically. Conversation bodies, review comment bodies, and diff hunks are
+preserved in full; the run fails instead of acknowledging feedback when the
+complete prepared state exceeds the overall context size limit.
 
 ## Revalidation and failure behavior
 
@@ -228,7 +230,8 @@ of these change after model execution:
 - linked pull request count, identity, and issue ownership for issue-scoped
   work;
 - the exact pull request identity, refs, and head SHA for review commands;
-- default branch designation or SHA, or pull request head SHA;
+- default branch designation or SHA, including immediately before a pull
+  request head update;
 - unprocessed authorized review markers, batch commands, and feedback since
   the prepared head commit;
 - deterministic implementation branch state.
