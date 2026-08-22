@@ -196,7 +196,9 @@ unprocessed marked threads are reconciled together.
 
 Post `/ai address` as a top-level pull request conversation comment to address
 all human conversation comments, submitted review summaries, and inline review
-comments created at or after the current head commit's committer timestamp.
+comments created or edited at or after GitHub's server-recorded push time for
+the current head. If that activity record is unavailable, the workflow includes
+all otherwise eligible feedback rather than risk silently omitting feedback.
 Explicitly marked inline threads are included once as complete threads rather
 than duplicated in the batch feedback. Multiple pending top-level commands are
 acknowledged together. Command variants, bot comments, previous

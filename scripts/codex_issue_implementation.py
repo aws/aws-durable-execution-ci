@@ -335,6 +335,42 @@ query($owner: String!, $name: String!, $number: Int!) {
 """
 
 
+PULL_REQUEST_REVIEWS_QUERY = """
+query(
+  $owner: String!,
+  $name: String!,
+  $number: Int!,
+  $cursor: String
+) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      reviews(first: 100, after: $cursor) {
+        nodes {
+          databaseId
+          body
+          state
+          submittedAt
+          lastEditedAt
+          updatedAt
+          commit {
+            oid
+          }
+          author {
+            login
+            __typename
+          }
+        }
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+      }
+    }
+  }
+}
+"""
+
+
 def linked_open_pull_requests(
     repository: str, issue_number: int
 ) -> list[dict[str, Any]]:
@@ -518,27 +554,80 @@ def pull_request_reviews(
     repository: str,
     pull_request_number: int,
 ) -> list[dict[str, Any]]:
+    owner, name = repository.split("/")
     reviews: list[dict[str, Any]] = []
-    page = 1
+    cursor: str | None = None
     while True:
-        response = run_gh_json(
-            [
-                f"repos/{repository}/pulls/{pull_request_number}/reviews"
-                f"?per_page=100&page={page}"
-            ]
+        data = run_graphql(
+            PULL_REQUEST_REVIEWS_QUERY,
+            {
+                "owner": owner,
+                "name": name,
+                "number": pull_request_number,
+                "cursor": cursor,
+            },
         )
-        if not isinstance(response, list):
+        try:
+            connection = data["repository"]["pullRequest"]["reviews"]
+            nodes = connection["nodes"]
+            page_info = connection["pageInfo"]
+            has_next_page = page_info["hasNextPage"]
+            end_cursor = page_info["endCursor"]
+        except (KeyError, TypeError) as error:
+            raise ImplementationError(
+                "GitHub returned invalid pull request reviews"
+            ) from error
+        if (
+            not isinstance(nodes, list)
+            or type(has_next_page) is not bool
+        ):
             raise ImplementationError(
                 "GitHub returned invalid pull request reviews"
             )
-        reviews.extend(response)
-        if len(response) < 100:
+        for review in nodes:
+            if not isinstance(review, dict):
+                raise ImplementationError(
+                    "GitHub returned invalid pull request reviews"
+                )
+            author = review.get("author")
+            commit = review.get("commit")
+            reviews.append(
+                {
+                    "id": review.get("databaseId"),
+                    "body": review.get("body"),
+                    "state": review.get("state"),
+                    "commit_id": (
+                        commit.get("oid")
+                        if isinstance(commit, dict)
+                        else None
+                    ),
+                    "user": (
+                        {
+                            "login": author.get("login"),
+                            "type": author.get("__typename"),
+                        }
+                        if isinstance(author, dict)
+                        else None
+                    ),
+                    "submitted_at": review.get("submittedAt"),
+                    "updated_at": (
+                        review.get("lastEditedAt")
+                        or review.get("updatedAt")
+                        or review.get("submittedAt")
+                    ),
+                }
+            )
+        if not has_next_page:
             return reviews
         if len(reviews) >= MAX_REVIEW_COMMENTS:
             raise ImplementationError(
                 "pull request has too many reviews"
             )
-        page += 1
+        if not isinstance(end_cursor, str) or not end_cursor:
+            raise ImplementationError(
+                "GitHub returned invalid pull request reviews"
+            )
+        cursor = end_cursor
 
 
 def parse_github_timestamp(value: Any, description: str) -> datetime:
@@ -555,23 +644,39 @@ def parse_github_timestamp(value: Any, description: str) -> datetime:
     return parsed
 
 
-def pull_request_head_commit(
+def pull_request_head_update(
     repository: str,
+    head_ref: str,
     head_sha: str,
-) -> dict[str, str]:
+) -> dict[str, str | None]:
     if re.fullmatch(r"[0-9a-f]{40}", head_sha) is None:
         raise ImplementationError("pull request head SHA is invalid")
-    commit = run_gh_json([f"repos/{repository}/commits/{head_sha}"])
-    try:
-        committed_at = commit["commit"]["committer"]["date"]
-    except (KeyError, TypeError) as error:
+    validate_git_branch(head_ref)
+    encoded_ref = urllib.parse.quote(f"refs/heads/{head_ref}", safe="")
+    activities = run_gh_json(
+        [
+            f"repos/{repository}/activity?activity_type=push"
+            f"&ref={encoded_ref}&per_page=100"
+        ]
+    )
+    if not isinstance(activities, list):
         raise ImplementationError(
-            "GitHub returned an invalid pull request head commit"
-        ) from error
-    parse_github_timestamp(committed_at, "commit timestamp")
+            "GitHub returned invalid repository activity"
+        )
+    updated_at = None
+    for activity in activities:
+        if (
+            isinstance(activity, dict)
+            and activity.get("activity_type") == "push"
+            and activity.get("ref") == f"refs/heads/{head_ref}"
+            and activity.get("after") == head_sha
+        ):
+            updated_at = activity.get("timestamp")
+            parse_github_timestamp(updated_at, "head update timestamp")
+            break
     return {
         "sha": head_sha,
-        "committed_at": committed_at,
+        "updated_at": updated_at,
     }
 
 
@@ -748,48 +853,68 @@ def normalized_pull_request_review(
         "state": review.get("state"),
         "commit_id": review.get("commit_id"),
         "created_at": review.get("submitted_at"),
-        "updated_at": review.get("submitted_at"),
+        "updated_at": (
+            review.get("updated_at")
+            or review.get("submitted_at")
+        ),
     }
+
+
+def feedback_is_current(
+    created_at: Any,
+    updated_at: Any,
+    head_updated_at: datetime | None,
+    description: str,
+) -> bool:
+    created = parse_github_timestamp(created_at, description)
+    updated = (
+        parse_github_timestamp(updated_at, description)
+        if updated_at is not None
+        else created
+    )
+    return (
+        head_updated_at is None
+        or max(created, updated) >= head_updated_at
+    )
 
 
 def is_address_feedback(
     comment: dict[str, Any],
-    committed_at: datetime,
+    head_updated_at: datetime | None,
 ) -> bool:
     body = comment.get("body")
-    created_at = comment.get("created_at")
     return (
         isinstance(body, str)
         and bool(body.strip())
         and body.strip() not in (ADDRESS_COMMAND, IMPLEMENT_COMMAND)
         and ACKNOWLEDGEMENT_PATTERN.search(body) is None
         and not is_bot_user(comment.get("user"))
-        and parse_github_timestamp(
-            created_at,
+        and feedback_is_current(
+            comment.get("created_at"),
+            comment.get("updated_at"),
+            head_updated_at,
             "pull request comment timestamp",
         )
-        >= committed_at
     )
 
 
 def is_review_feedback(
     review: dict[str, Any],
-    committed_at: datetime,
+    head_updated_at: datetime | None,
 ) -> bool:
     body = review.get("body")
-    submitted_at = review.get("submitted_at")
     return (
         isinstance(body, str)
         and bool(body.strip())
         and body.strip() not in (ADDRESS_COMMAND, IMPLEMENT_COMMAND)
         and ACKNOWLEDGEMENT_PATTERN.search(body) is None
         and not is_bot_user(review.get("user"))
-        and isinstance(submitted_at, str)
-        and parse_github_timestamp(
-            submitted_at,
+        and feedback_is_current(
+            review.get("submitted_at"),
+            review.get("updated_at"),
+            head_updated_at,
             "pull request review timestamp",
         )
-        >= committed_at
     )
 
 
@@ -797,6 +922,7 @@ def unprocessed_markers(
     repository: str,
     pull_request_number: int,
     actor: str,
+    head_ref: str,
     head_sha: str,
 ) -> list[dict[str, Any]]:
     comments = review_comments(repository, pull_request_number)
@@ -892,10 +1018,19 @@ def unprocessed_markers(
     if batch_commands:
         batch_commands.sort(key=lambda value: value["id"])
         command = batch_commands[-1]
-        commit = pull_request_head_commit(repository, head_sha)
-        committed_at = parse_github_timestamp(
-            commit["committed_at"],
-            "commit timestamp",
+        head_update = pull_request_head_update(
+            repository,
+            head_ref,
+            head_sha,
+        )
+        updated_at = head_update["updated_at"]
+        head_updated_at = (
+            parse_github_timestamp(
+                updated_at,
+                "head update timestamp",
+            )
+            if updated_at is not None
+            else None
         )
         covered_roots = {
             marker["thread_root_id"]
@@ -910,7 +1045,7 @@ def unprocessed_markers(
         ):
             if (
                 isinstance(review, dict)
-                and is_review_feedback(review, committed_at)
+                and is_review_feedback(review, head_updated_at)
             ):
                 normalized = normalized_pull_request_review(review)
                 cursor = feedback_cursor(normalized)
@@ -924,7 +1059,7 @@ def unprocessed_markers(
         for comment in conversation:
             if (
                 isinstance(comment, dict)
-                and is_address_feedback(comment, committed_at)
+                and is_address_feedback(comment, head_updated_at)
             ):
                 normalized = normalized_conversation_comment(comment)
                 cursor = feedback_cursor(normalized)
@@ -939,7 +1074,7 @@ def unprocessed_markers(
             if not isinstance(comment, dict):
                 continue
             root_id = comment.get("in_reply_to_id") or comment.get("id")
-            if not is_address_feedback(comment, committed_at):
+            if not is_address_feedback(comment, head_updated_at):
                 continue
             normalized = {
                 "kind": "review_comment",
@@ -973,7 +1108,7 @@ def unprocessed_markers(
                 "command_kind": "issue_comment",
                 "author": user["login"],
                 "command": normalized_conversation_comment(command),
-                "since_commit": commit,
+                "since_commit": head_update,
                 "previous_feedback_cursor": previous_feedback_cursor,
                 "feedback_cursor": (
                     max(feedback_cursors, key=feedback_cursor_key)
@@ -1496,6 +1631,7 @@ def prepare_issue_state(
             repository,
             pull_request["number"],
             actor,
+            pull_request["head_ref"],
             pull_request["head_sha"],
         )
         if not markers:
@@ -1612,6 +1748,7 @@ def prepare_pull_request_state(
         repository,
         pull_request["number"],
         actor,
+        pull_request["head_ref"],
         pull_request["head_sha"],
     )
     if not markers:
@@ -2336,6 +2473,7 @@ def current_marker_snapshot(state: dict[str, Any]) -> list[dict[str, Any]]:
         state["repository"],
         pull_request_number,
         state["publication_actor"],
+        state["pull_request"]["head_ref"],
         state["pull_request"]["head_sha"],
     )
 

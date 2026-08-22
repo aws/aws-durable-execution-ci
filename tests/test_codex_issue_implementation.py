@@ -92,6 +92,15 @@ def pull_request_api(**overrides):
     }
 
 
+def head_update(**overrides):
+    value = {
+        "sha": "b" * 40,
+        "updated_at": "2026-08-22T00:01:00Z",
+    }
+    value.update(overrides)
+    return value
+
+
 def marker(command_id=700):
     return {
         "command_id": command_id,
@@ -604,6 +613,91 @@ class EventSelectionTest(unittest.TestCase):
                 pull_request(),
             )
 
+    def test_pull_request_reviews_preserve_last_edited_at(self):
+        response = {
+            "repository": {
+                "pullRequest": {
+                    "reviews": {
+                        "nodes": [
+                            {
+                                "databaseId": 750,
+                                "body": "Edited review summary.",
+                                "state": "CHANGES_REQUESTED",
+                                "submittedAt": "2026-08-22T00:02:00Z",
+                                "lastEditedAt": "2026-08-22T00:04:00Z",
+                                "updatedAt": "2026-08-22T00:04:00Z",
+                                "commit": {"oid": "b" * 40},
+                                "author": {
+                                    "login": "reviewer",
+                                    "__typename": "User",
+                                },
+                            }
+                        ],
+                        "pageInfo": {
+                            "hasNextPage": False,
+                            "endCursor": None,
+                        },
+                    }
+                }
+            }
+        }
+        with patch.object(
+            IMPLEMENTATION,
+            "run_graphql",
+            return_value=response,
+        ):
+            reviews = IMPLEMENTATION.pull_request_reviews(
+                "aws/example",
+                44,
+            )
+
+        self.assertEqual(
+            reviews,
+            [
+                {
+                    "id": 750,
+                    "body": "Edited review summary.",
+                    "state": "CHANGES_REQUESTED",
+                    "commit_id": "b" * 40,
+                    "user": {
+                        "login": "reviewer",
+                        "type": "User",
+                    },
+                    "submitted_at": "2026-08-22T00:02:00Z",
+                    "updated_at": "2026-08-22T00:04:00Z",
+                }
+            ],
+        )
+
+    def test_pull_request_head_update_uses_repository_activity(self):
+        activity = {
+            "activity_type": "push",
+            "ref": "refs/heads/implement-issue-31",
+            "after": "b" * 40,
+            "timestamp": "2026-08-22T00:01:00Z",
+        }
+        with patch.object(
+            IMPLEMENTATION,
+            "run_gh_json",
+            return_value=[activity],
+        ) as run:
+            self.assertEqual(
+                IMPLEMENTATION.pull_request_head_update(
+                    "aws/example",
+                    "implement-issue-31",
+                    "b" * 40,
+                ),
+                head_update(),
+            )
+
+        self.assertEqual(
+            run.call_args.args[0][0],
+            (
+                "repos/aws/example/activity?activity_type=push"
+                "&ref=refs%2Fheads%2Fimplement-issue-31&per_page=100"
+            ),
+        )
+
     def test_no_pr_label_may_contain_a_comma(self):
         with patch.dict(
             os.environ,
@@ -1030,6 +1124,7 @@ class MarkerPolicyTest(unittest.TestCase):
                             "aws/example",
                             44,
                             actor,
+                            "implement-issue-31",
                             "b" * 40,
                         ),
                         [],
@@ -1071,6 +1166,7 @@ class MarkerPolicyTest(unittest.TestCase):
                 "aws/example",
                 44,
                 "publisher[bot]",
+                "implement-issue-31",
                 "b" * 40,
             )
 
@@ -1080,7 +1176,7 @@ class MarkerPolicyTest(unittest.TestCase):
         )
         self.assertEqual(markers[0]["thread_root_id"], 600)
 
-    def test_pr_conversation_command_collects_feedback_since_head_commit(self):
+    def test_future_dated_commit_cannot_hide_current_head_feedback(self):
         review = [
             {
                 "id": 500,
@@ -1137,6 +1233,7 @@ class MarkerPolicyTest(unittest.TestCase):
                     "commit_id": "b" * 40,
                     "user": {"login": "reviewer", "type": "User"},
                     "submitted_at": "2026-08-22T00:02:30Z",
+                    "updated_at": "2026-08-22T00:02:30Z",
                 }
             ],
         ), patch.object(
@@ -1145,11 +1242,16 @@ class MarkerPolicyTest(unittest.TestCase):
             return_value=conversation,
         ), patch.object(
             IMPLEMENTATION,
-            "pull_request_head_commit",
-            return_value={
-                "sha": "b" * 40,
-                "committed_at": "2026-08-22T00:01:00Z",
-            },
+            "run_gh_json",
+            return_value=[
+                {
+                    "activity_type": "push",
+                    "ref": "refs/heads/implement-issue-31",
+                    "after": "b" * 40,
+                    "timestamp": "2026-08-22T00:01:00Z",
+                    "commit_date": "2099-01-01T00:00:00Z",
+                }
+            ],
         ), patch.object(
             IMPLEMENTATION,
             "collaborator_has_write_permission",
@@ -1159,6 +1261,7 @@ class MarkerPolicyTest(unittest.TestCase):
                 "aws/example",
                 44,
                 "publisher[bot]",
+                "implement-issue-31",
                 "b" * 40,
             )
 
@@ -1220,11 +1323,8 @@ class MarkerPolicyTest(unittest.TestCase):
             return_value=conversation,
         ), patch.object(
             IMPLEMENTATION,
-            "pull_request_head_commit",
-            return_value={
-                "sha": "b" * 40,
-                "committed_at": "2026-08-22T00:01:00Z",
-            },
+            "pull_request_head_update",
+            return_value=head_update(),
         ), patch.object(
             IMPLEMENTATION,
             "collaborator_has_write_permission",
@@ -1234,6 +1334,7 @@ class MarkerPolicyTest(unittest.TestCase):
                 "aws/example",
                 44,
                 "publisher[bot]",
+                "implement-issue-31",
                 "b" * 40,
             )
 
@@ -1255,7 +1356,7 @@ class MarkerPolicyTest(unittest.TestCase):
             "command": {},
             "since_commit": {
                 "sha": "b" * 40,
-                "committed_at": "2026-08-22T00:01:00Z",
+                "updated_at": "2026-08-22T00:01:00Z",
             },
             "feedback_cursor": {
                 "at": 1_777_000_000_000_000,
@@ -1340,20 +1441,21 @@ class MarkerPolicyTest(unittest.TestCase):
             "collaborator_has_write_permission",
         ) as permission, patch.object(
             IMPLEMENTATION,
-            "pull_request_head_commit",
-        ) as head_commit:
+            "pull_request_head_update",
+        ) as update:
             self.assertEqual(
                 IMPLEMENTATION.unprocessed_markers(
                     "aws/example",
                     44,
                     "publisher[bot]",
+                    "implement-issue-31",
                     "b" * 40,
                 ),
                 [],
             )
 
         permission.assert_not_called()
-        head_commit.assert_not_called()
+        update.assert_not_called()
 
     def test_no_change_batch_cursor_excludes_previously_handled_feedback(self):
         first_feedback = {
@@ -1380,11 +1482,8 @@ class MarkerPolicyTest(unittest.TestCase):
                 return_value=[],
             ), patch.object(
                 IMPLEMENTATION,
-                "pull_request_head_commit",
-                return_value={
-                    "sha": "b" * 40,
-                    "committed_at": "2026-08-22T00:01:00Z",
-                },
+                "pull_request_head_update",
+                return_value=head_update(),
             ), patch.object(
                 IMPLEMENTATION,
                 "collaborator_has_write_permission",
@@ -1398,6 +1497,7 @@ class MarkerPolicyTest(unittest.TestCase):
                     "aws/example",
                     44,
                     "publisher[bot]",
+                    "implement-issue-31",
                     "b" * 40,
                 )
 
@@ -1452,6 +1552,105 @@ class MarkerPolicyTest(unittest.TestCase):
         self.assertEqual(
             [value["body"] for value in second_markers[0]["feedback"]],
             ["Edited first feedback.", "Second feedback."],
+        )
+        self.assertEqual(
+            second_markers[0]["previous_feedback_cursor"],
+            cursor,
+        )
+        self.assertGreater(
+            second_markers[0]["feedback_cursor"]["at"],
+            cursor["at"],
+        )
+
+    def test_edited_review_summary_is_new_feedback(self):
+        first_review = {
+            "id": 750,
+            "body": "First review summary.",
+            "state": "CHANGES_REQUESTED",
+            "commit_id": "b" * 40,
+            "user": {"login": "reviewer", "type": "User"},
+            "submitted_at": "2026-08-22T00:02:00Z",
+            "updated_at": "2026-08-22T00:02:00Z",
+        }
+        first_command = implementation_comment(
+            command_id=900,
+            body="/ai address",
+        )
+
+        def markers_for(reviews, conversation):
+            with patch.object(
+                IMPLEMENTATION,
+                "review_comments",
+                return_value=[],
+            ), patch.object(
+                IMPLEMENTATION,
+                "pull_request_reviews",
+                return_value=reviews,
+            ), patch.object(
+                IMPLEMENTATION,
+                "pull_request_head_update",
+                return_value=head_update(),
+            ), patch.object(
+                IMPLEMENTATION,
+                "collaborator_has_write_permission",
+                return_value=True,
+            ), patch.object(
+                IMPLEMENTATION,
+                "issue_comments",
+                return_value=conversation,
+            ):
+                return IMPLEMENTATION.unprocessed_markers(
+                    "aws/example",
+                    44,
+                    "publisher[bot]",
+                    "implement-issue-31",
+                    "b" * 40,
+                )
+
+        first_markers = markers_for([first_review], [first_command])
+        cursor = first_markers[0]["feedback_cursor"]
+        acknowledgement = {
+            "id": 901,
+            "body": IMPLEMENTATION.acknowledgement_body(
+                [900],
+                "b" * 40,
+                {
+                    "outcome": "no_change",
+                    "summary": "No change required.",
+                    "validation": [],
+                },
+                cursor,
+            ),
+            "user": {
+                "login": "publisher[bot]",
+                "type": "Bot",
+            },
+            "created_at": "2026-08-22T00:02:30Z",
+            "updated_at": "2026-08-22T00:02:30Z",
+        }
+        edited_review = {
+            **first_review,
+            "body": "Edited review summary.",
+            "updated_at": "2026-08-22T00:04:00Z",
+        }
+        second_command = implementation_comment(
+            command_id=1000,
+            body="/ai address",
+        )
+
+        second_markers = markers_for(
+            [edited_review],
+            [
+                first_command,
+                acknowledgement,
+                second_command,
+            ],
+        )
+
+        self.assertEqual(second_markers[0]["command_ids"], [1000])
+        self.assertEqual(
+            [value["body"] for value in second_markers[0]["feedback"]],
+            ["Edited review summary."],
         )
         self.assertEqual(
             second_markers[0]["previous_feedback_cursor"],
@@ -1530,7 +1729,7 @@ class MarkerPolicyTest(unittest.TestCase):
                 },
                 "since_commit": {
                     "sha": "b" * 40,
-                    "committed_at": "2026-08-22T00:01:00Z",
+                    "updated_at": "2026-08-22T00:01:00Z",
                 },
                 "feedback": [
                     {
@@ -1687,6 +1886,7 @@ class PreparationPolicyTest(unittest.TestCase):
             "aws/example",
             44,
             "publisher[bot]",
+            pull["head_ref"],
             pull["head_sha"],
         )
 
