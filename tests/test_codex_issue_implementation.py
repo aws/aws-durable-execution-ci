@@ -163,6 +163,7 @@ class EventSelectionTest(unittest.TestCase):
             "codex:implement",
             "codex:no-pr",
             2,
+            "publisher[bot]",
         )
 
     def test_discovery_skips_non_actionable_issues(self):
@@ -180,6 +181,10 @@ class EventSelectionTest(unittest.TestCase):
             IMPLEMENTATION,
             "run_gh_json",
             return_value=response,
+        ), patch.object(
+            IMPLEMENTATION,
+            "prepare_issue_state",
+            return_value={"action": "implement"},
         ):
             self.assertEqual(
                 IMPLEMENTATION.discover_issues(
@@ -187,6 +192,7 @@ class EventSelectionTest(unittest.TestCase):
                     "codex:implement",
                     "codex:no-pr",
                     3,
+                    "publisher[bot]",
                 ),
                 [31],
             )
@@ -209,18 +215,57 @@ class EventSelectionTest(unittest.TestCase):
                 excluded,
                 [issue(number=101), issue(number=102)],
             ],
-        ) as run:
+        ) as run, patch.object(
+            IMPLEMENTATION,
+            "prepare_issue_state",
+            return_value={"action": "implement"},
+        ):
             self.assertEqual(
                 IMPLEMENTATION.discover_issues(
                     "aws/example",
                     "codex:implement",
                     "codex:no-pr",
                     2,
+                    "publisher[bot]",
                 ),
                 [101, 102],
             )
 
         self.assertIn("per_page=100&page=1", run.call_args_list[0].args[0][0])
+        self.assertIn("per_page=100&page=2", run.call_args_list[1].args[0][0])
+
+    def test_discovery_continues_past_issues_without_pending_work(self):
+        inactive = [
+            issue(number=number)
+            for number in range(1, 101)
+        ]
+        with patch.object(
+            IMPLEMENTATION,
+            "run_gh_json",
+            side_effect=[
+                inactive,
+                [issue(number=101)],
+            ],
+        ) as run, patch.object(
+            IMPLEMENTATION,
+            "prepare_issue_state",
+            side_effect=[
+                *({"action": "skip"} for _ in inactive),
+                {"action": "recover"},
+            ],
+        ) as prepare:
+            self.assertEqual(
+                IMPLEMENTATION.discover_issues(
+                    "aws/example",
+                    "codex:implement",
+                    "codex:no-pr",
+                    1,
+                    "publisher[bot]",
+                ),
+                [101],
+            )
+
+        self.assertEqual(prepare.call_count, 101)
         self.assertIn("per_page=100&page=2", run.call_args_list[1].args[0][0])
 
     def test_exact_review_command_requires_current_write_permission(self):
@@ -408,6 +453,33 @@ class MarkerPolicyTest(unittest.TestCase):
         )
         self.assertEqual(markers[0]["thread_root_id"], 600)
 
+    def test_marker_context_does_not_truncate_comment_or_diff(self):
+        body = "body-" + ("x" * 25_000) + "-tail"
+        diff_hunk = "@@ -1 +1 @@" + ("y" * 25_000) + "-tail"
+
+        normalized = IMPLEMENTATION.normalized_thread_comment(
+            {
+                "id": 600,
+                "body": body,
+                "diff_hunk": diff_hunk,
+                "user": {"login": "reviewer", "type": "User"},
+            }
+        )
+
+        self.assertEqual(normalized["body"], body)
+        self.assertEqual(normalized["diff_hunk"], diff_hunk)
+
+    def test_complete_oversized_marker_state_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(
+                IMPLEMENTATION.ImplementationError,
+                "size limit",
+            ):
+                IMPLEMENTATION.write_json(
+                    Path(directory) / "state.json",
+                    {"body": "x" * IMPLEMENTATION.MAX_CONTEXT_BYTES},
+                )
+
     def test_post_push_marker_check_ignores_mutable_code_context(self):
         prepared = [marker()]
         current = json.loads(json.dumps(prepared))
@@ -500,6 +572,32 @@ class PreparationPolicyTest(unittest.TestCase):
             "publisher[bot]",
         )
 
+    def test_linked_pr_without_review_markers_is_not_actionable(self):
+        pull = pull_request()
+        with patch.dict(os.environ, environment(), clear=True), patch.object(
+            IMPLEMENTATION,
+            "fetch_issue",
+            return_value=issue(),
+        ), patch.object(
+            IMPLEMENTATION,
+            "linked_open_pull_requests",
+            return_value=[pull],
+        ), patch.object(
+            IMPLEMENTATION,
+            "unprocessed_markers",
+            return_value=[],
+        ), patch.object(
+            IMPLEMENTATION,
+            "repository_metadata",
+            return_value={"default_branch": "main"},
+        ), patch.object(
+            IMPLEMENTATION,
+            "validate_git_branch",
+        ):
+            state = IMPLEMENTATION.prepare_state()
+
+        self.assertEqual(state["action"], "skip")
+
     def test_multiple_linked_prs_are_reported_as_ambiguous(self):
         with patch.dict(os.environ, environment(), clear=True), patch.object(
             IMPLEMENTATION,
@@ -569,7 +667,7 @@ class PreparationPolicyTest(unittest.TestCase):
             IMPLEMENTATION,
             "commit_has_automation_trailers",
             return_value=True,
-        ), patch.object(
+        ) as trailers, patch.object(
             IMPLEMENTATION,
             "branch_has_pull_request_history",
             return_value=False,
@@ -578,6 +676,43 @@ class PreparationPolicyTest(unittest.TestCase):
 
         self.assertEqual(state["action"], "recover")
         self.assertEqual(state["target"]["sha"], "c" * 40)
+        trailers.assert_called_once_with(
+            "aws/example",
+            "c" * 40,
+            31,
+            IMPLEMENTATION.issue_semantic_digest(state["issue"]),
+        )
+
+    def test_recovery_requires_matching_issue_snapshot_trailer(self):
+        snapshot = IMPLEMENTATION.issue_snapshot(issue())
+        digest = IMPLEMENTATION.issue_semantic_digest(snapshot)
+        matching_message = (
+            "Implement #31\n\n"
+            "Codex-Automation: issue-implementation\n"
+            "Codex-Issue: #31\n"
+            f"Codex-Issue-Snapshot: {digest}"
+        )
+        with patch.object(
+            IMPLEMENTATION,
+            "run_gh_json",
+            return_value={"message": matching_message},
+        ):
+            self.assertTrue(
+                IMPLEMENTATION.commit_has_automation_trailers(
+                    "aws/example",
+                    "c" * 40,
+                    31,
+                    digest,
+                )
+            )
+            self.assertFalse(
+                IMPLEMENTATION.commit_has_automation_trailers(
+                    "aws/example",
+                    "c" * 40,
+                    31,
+                    "d" * 64,
+                )
+            )
 
     def test_workflow_owned_branch_with_prior_pr_is_not_recovered(self):
         branch = {"ref": "implement-issue-31", "sha": "c" * 40}
@@ -642,6 +777,67 @@ class ValidationPolicyTest(unittest.TestCase):
             json.loads(run.call_args.kwargs["input_text"]),
             {"body": "Implemented."},
         )
+
+    def test_implementation_commit_records_issue_snapshot_digest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            patch_path = Path(directory) / "change.patch"
+            patch_path.write_bytes(b"validated patch")
+            prepared_issue = IMPLEMENTATION.issue_snapshot(issue())
+            state = {
+                "action": "implement",
+                "issue": prepared_issue,
+                "target": {"sha": "a" * 40},
+            }
+            result = {
+                "outcome": "changed",
+                "summary": "Implemented the issue.",
+                "validation": [],
+            }
+            completed = IMPLEMENTATION.subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout="",
+                stderr="",
+            )
+            binary_completed = IMPLEMENTATION.subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout=b"",
+                stderr=b"",
+            )
+            with patch.object(
+                IMPLEMENTATION,
+                "git_output",
+                side_effect=["a" * 40, "b" * 40],
+            ), patch.object(
+                IMPLEMENTATION.subprocess,
+                "run",
+                return_value=binary_completed,
+            ), patch.object(
+                IMPLEMENTATION,
+                "changed_paths",
+                return_value=["src/example.py"],
+            ), patch.object(
+                IMPLEMENTATION,
+                "configure_git",
+            ), patch.object(
+                IMPLEMENTATION,
+                "run_command",
+                return_value=completed,
+            ) as run:
+                self.assertEqual(
+                    IMPLEMENTATION.apply_patch_and_commit(
+                        Path(directory),
+                        patch_path,
+                        state,
+                        result,
+                    ),
+                    "b" * 40,
+                )
+
+        message = run.call_args.args[0][3]
+        digest = IMPLEMENTATION.issue_semantic_digest(prepared_issue)
+        self.assertIn(f"Codex-Issue-Snapshot: {digest}", message)
 
     def test_model_result_has_a_closed_output_contract(self):
         self.assertEqual(
@@ -1214,6 +1410,12 @@ class WorkflowPolicyTest(unittest.TestCase):
             "matrix: ${{ fromJSON(needs.resolve.outputs.matrix) }}",
             reconcile.group(1),
         )
+        resolve = re.search(
+            r"(?ms)^  resolve:\n(.*?)(?=^  reconcile:)",
+            WORKFLOW,
+        )
+        assert resolve is not None
+        self.assertIn("environment: ai-pr-review-runtime", resolve.group(1))
 
     def test_file_sparse_checkout_disables_cone_mode(self):
         checkout = re.search(
@@ -1230,6 +1432,20 @@ class WorkflowPolicyTest(unittest.TestCase):
             "                env.DEFAULT_MAX_ISSUES }}"
         )
         self.assertEqual(WORKFLOW.count(expression), 2)
+
+    def test_resolver_receives_configured_no_pr_label(self):
+        resolve = re.search(
+            r"(?ms)^      - name: Resolve work to issue numbers\n"
+            r"(.*?)(?=^      - name:|\Z)",
+            WORKFLOW,
+        )
+        assert resolve is not None
+        self.assertIn(
+            "NO_PR_LABEL: >-\n"
+            "            ${{ inputs['no-pr-label'] || "
+            "env.DEFAULT_NO_PR_LABEL }}",
+            resolve.group(1),
+        )
 
     def test_model_step_has_no_github_token_and_uses_workspace_sandbox(self):
         model = re.search(
@@ -1291,11 +1507,17 @@ class WorkflowPolicyTest(unittest.TestCase):
             r"(.*?)(?=^      - name:|\Z)",
             WORKFLOW,
         )
+        publisher = re.search(
+            r"(?ms)^      - name: Resolve publication actor\n"
+            r"(.*?)(?=^      - name:|\Z)",
+            WORKFLOW,
+        )
         assert (
             checkout is not None
             and publish is not None
             and config is not None
             and prepare is not None
+            and publisher is not None
         )
         self.assertIn(
             "token: ${{ secrets.CODEX_PUBLISH_TOKEN }}",
@@ -1308,10 +1530,15 @@ class WorkflowPolicyTest(unittest.TestCase):
         self.assertNotIn("secrets.GITHUB_TOKEN", publish.group(1))
         self.assertIn(
             "query { viewer { login } }",
-            config.group(1),
+            publisher.group(1),
         )
         self.assertIn(
             "echo \"publish_actor=$publish_actor\"",
+            publisher.group(1),
+        )
+        self.assertIn(
+            "CODEX_PUBLISH_ACTOR: "
+            "${{ needs.resolve.outputs.publish_actor }}",
             config.group(1),
         )
         self.assertIn(

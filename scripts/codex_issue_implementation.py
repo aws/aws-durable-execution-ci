@@ -18,6 +18,7 @@ ACKNOWLEDGEMENT_PATTERN = re.compile(
     r"<!-- codex-addressed command-id=(\d+) commit=([0-9a-f]{40}) -->"
 )
 AUTOMATION_TRAILER = "Codex-Automation: issue-implementation"
+ISSUE_SNAPSHOT_TRAILER = "Codex-Issue-Snapshot"
 MAX_CONTEXT_BYTES = 1_000_000
 MAX_ISSUES_PER_RUN = 10
 MAX_PATCH_BYTES = 5_000_000
@@ -515,12 +516,12 @@ def normalized_thread_comment(comment: dict[str, Any]) -> dict[str, Any]:
             and isinstance(user.get("login"), str)
             else "unknown"
         ),
-        "body": body[:20_000] if isinstance(body, str) else "",
+        "body": body if isinstance(body, str) else "",
         "path": comment.get("path"),
         "line": comment.get("line"),
         "original_line": comment.get("original_line"),
         "diff_hunk": (
-            comment.get("diff_hunk", "")[:20_000]
+            comment.get("diff_hunk", "")
             if isinstance(comment.get("diff_hunk"), str)
             else ""
         ),
@@ -630,6 +631,10 @@ def prepared_issue_semantic_snapshot(
         raise ImplementationError("prepared issue snapshot is invalid") from error
 
 
+def issue_semantic_digest(snapshot: dict[str, Any]) -> str:
+    return stable_digest(prepared_issue_semantic_snapshot(snapshot))
+
+
 def issue_snapshot(issue: dict[str, Any]) -> dict[str, Any]:
     snapshot = issue_semantic_snapshot(issue)
     snapshot["updated_at"] = issue.get("updated_at")
@@ -703,7 +708,10 @@ def require_default_branch_unchanged(state: dict[str, Any]) -> None:
 
 
 def commit_has_automation_trailers(
-    repository: str, sha: str, issue_number: int
+    repository: str,
+    sha: str,
+    issue_number: int,
+    snapshot_digest: str,
 ) -> bool:
     commit = run_gh_json([f"repos/{repository}/git/commits/{sha}"])
     message = commit.get("message") if isinstance(commit, dict) else None
@@ -711,6 +719,10 @@ def commit_has_automation_trailers(
         isinstance(message, str)
         and AUTOMATION_TRAILER in message.splitlines()
         and f"Codex-Issue: #{issue_number}" in message.splitlines()
+        and (
+            f"{ISSUE_SNAPSHOT_TRAILER}: {snapshot_digest}"
+            in message.splitlines()
+        )
     )
 
 
@@ -719,6 +731,7 @@ def discover_issues(
     label: str,
     excluded_label: str,
     maximum: int,
+    actor: str,
 ) -> list[int]:
     encoded_label = urllib.parse.quote(label, safe="")
     issue_numbers: list[int] = []
@@ -746,7 +759,17 @@ def discover_issues(
                 if isinstance(value, dict)
                 and isinstance(value.get("name"), str)
             }
-            if excluded_label not in label_names:
+            if (
+                excluded_label not in label_names
+                and prepare_issue_state(
+                    repository,
+                    label,
+                    excluded_label,
+                    actor,
+                    issue,
+                )["action"]
+                != "skip"
+            ):
                 issue_numbers.append(issue["number"])
                 if len(issue_numbers) == maximum:
                     return issue_numbers
@@ -847,6 +870,7 @@ def resolve_work_items(event_name: str, event: dict[str, Any]) -> list[int]:
             label,
             excluded_label,
             maximum,
+            publication_actor(),
         )
 
     return []
@@ -879,13 +903,18 @@ def validate_git_branch(branch: str) -> None:
         raise ImplementationError("GitHub returned an invalid branch name")
 
 
-def prepare_state() -> dict[str, Any]:
-    repository = repository_name()
-    issue_number = issue_number_from_environment()
-    label, excluded_label = automation_labels()
-    actor = publication_actor()
-    issue = fetch_issue(repository, issue_number)
+def prepare_issue_state(
+    repository: str,
+    label: str,
+    excluded_label: str,
+    actor: str,
+    issue: dict[str, Any],
+) -> dict[str, Any]:
+    issue_number = issue.get("number")
+    if type(issue_number) is not int or "pull_request" in issue:
+        raise ImplementationError("GitHub returned an invalid issue")
     snapshot = issue_snapshot(issue)
+    snapshot_digest = issue_semantic_digest(snapshot)
     linked_pull_requests = linked_open_pull_requests(
         repository, issue_number
     )
@@ -970,11 +999,13 @@ def prepare_state() -> dict[str, Any]:
             repository,
             existing_branch["sha"],
             issue_number,
+            snapshot_digest,
         ):
             state["action"] = "blocked"
             state["reason"] = (
                 f"The deterministic branch `{state['branch']}` already "
-                "exists without this workflow's commit trailers."
+                "exists without matching workflow and issue snapshot "
+                "trailers."
             )
         elif branch_has_pull_request_history(repository, state["branch"]):
             state["action"] = "blocked"
@@ -999,6 +1030,19 @@ def prepare_state() -> dict[str, Any]:
         "sha": default_ref["sha"],
     }
     return state
+
+
+def prepare_state() -> dict[str, Any]:
+    repository = repository_name()
+    issue_number = issue_number_from_environment()
+    label, excluded_label = automation_labels()
+    return prepare_issue_state(
+        repository,
+        label,
+        excluded_label,
+        publication_actor(),
+        fetch_issue(repository, issue_number),
+    )
 
 
 def model_context(state: dict[str, Any]) -> dict[str, Any]:
@@ -1540,7 +1584,9 @@ def apply_patch_and_commit(
         f"{subject}\n\n"
         f"{safe_github_text(result['summary'])}\n\n"
         f"{AUTOMATION_TRAILER}\n"
-        f"Codex-Issue: #{issue_number}"
+        f"Codex-Issue: #{issue_number}\n"
+        f"{ISSUE_SNAPSHOT_TRAILER}: "
+        f"{issue_semantic_digest(state['issue'])}"
     )
     commit = run_command(
         ["git", "commit", "-m", message],
@@ -1687,8 +1733,11 @@ def publish_recovery(state: dict[str, Any]) -> None:
         state["repository"],
         current_branch["sha"],
         state["issue"]["number"],
+        issue_semantic_digest(state["issue"]),
     ):
-        raise ImplementationError("recovery branch is not workflow-owned")
+        raise ImplementationError(
+            "recovery branch does not match the prepared issue snapshot"
+        )
     if branch_has_pull_request_history(state["repository"], state["branch"]):
         raise ImplementationError(
             "recovery branch acquired pull request history during the run"
@@ -1720,9 +1769,7 @@ def publish_implementation(
             raise ImplementationError(
                 "issue state changed before no-PR label publication"
             )
-        snapshot_digest = stable_digest(
-            prepared_issue_semantic_snapshot(state["issue"])
-        )
+        snapshot_digest = issue_semantic_digest(state["issue"])
         marker = (
             f"<!-- codex-no-pr issue={issue_number} "
             f"snapshot={snapshot_digest} -->"

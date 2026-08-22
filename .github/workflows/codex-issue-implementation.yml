@@ -110,6 +110,7 @@ jobs:
   resolve:
     name: Resolve eligible issues
     runs-on: ubuntu-latest
+    environment: ai-pr-review-runtime
     timeout-minutes: 10
     permissions:
       contents: read
@@ -118,6 +119,7 @@ jobs:
     outputs:
       matrix: ${{ steps.resolve.outputs.matrix }}
       count: ${{ steps.resolve.outputs.count }}
+      publish_actor: ${{ steps.publisher.outputs.publish_actor }}
 
     steps:
       - name: Check out Codex implementation toolkit
@@ -128,9 +130,33 @@ jobs:
           sparse-checkout: scripts
           persist-credentials: false
 
+      - name: Resolve publication actor
+        id: publisher
+        env:
+          CODEX_PUBLISH_TOKEN: ${{ secrets.CODEX_PUBLISH_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "$CODEX_PUBLISH_TOKEN" ]]; then
+            echo "::error::CODEX_PUBLISH_TOKEN must be configured."
+            exit 1
+          fi
+
+          publish_actor="$(
+            GH_TOKEN="$CODEX_PUBLISH_TOKEN" gh api graphql \
+              --field query='query { viewer { login } }' \
+              --jq '.data.viewer.login'
+          )"
+          if [[ ! "$publish_actor" =~ ^[A-Za-z0-9-]+(\[bot\])?$ ]]; then
+            echo "::error::Could not resolve the publication token actor."
+            exit 1
+          fi
+          echo "publish_actor=$publish_actor" >> "$GITHUB_OUTPUT"
+
       - name: Resolve work to issue numbers
         id: resolve
         env:
+          CODEX_PUBLISH_ACTOR: ${{ steps.publisher.outputs.publish_actor }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           IMPLEMENTATION_LABEL: >-
             ${{ inputs['implementation-label'] ||
@@ -138,6 +164,8 @@ jobs:
           MAX_ISSUES: >-
             ${{ format('{0}', inputs['max-issues']) ||
                 env.DEFAULT_MAX_ISSUES }}
+          NO_PR_LABEL: >-
+            ${{ inputs['no-pr-label'] || env.DEFAULT_NO_PR_LABEL }}
           REQUESTED_ISSUE_NUMBER: ${{ inputs['issue-number'] }}
         run: >-
           python3 scripts/codex_issue_implementation.py
@@ -198,6 +226,7 @@ jobs:
         env:
           ALLOW_WORKFLOW_CHANGES: >-
             ${{ inputs['allow-workflow-changes'] || false }}
+          CODEX_PUBLISH_ACTOR: ${{ needs.resolve.outputs.publish_actor }}
           CODEX_PUBLISH_TOKEN: ${{ secrets.CODEX_PUBLISH_TOKEN }}
           CODEX_MODEL: ${{ inputs['model'] || env.DEFAULT_CODEX_MODEL }}
           CODEX_REASONING_EFFORT: >-
@@ -238,13 +267,8 @@ jobs:
             exit 1
           fi
 
-          publish_actor="$(
-            GH_TOKEN="$CODEX_PUBLISH_TOKEN" gh api graphql \
-              --field query='query { viewer { login } }' \
-              --jq '.data.viewer.login'
-          )"
-          if [[ ! "$publish_actor" =~ ^[A-Za-z0-9-]+(\[bot\])?$ ]]; then
-            echo "::error::Could not resolve the publication token actor."
+          if [[ ! "$CODEX_PUBLISH_ACTOR" =~ ^[A-Za-z0-9-]+(\[bot\])?$ ]]; then
+            echo "::error::Publication token actor is invalid."
             exit 1
           fi
 
@@ -252,7 +276,7 @@ jobs:
             echo "model=$CODEX_MODEL"
             echo "reasoning_effort=$CODEX_REASONING_EFFORT"
             echo "allow_workflow_changes=$ALLOW_WORKFLOW_CHANGES"
-            echo "publish_actor=$publish_actor"
+            echo "publish_actor=$CODEX_PUBLISH_ACTOR"
           } >> "$GITHUB_OUTPUT"
 
       - name: Re-fetch issue and pull request state

@@ -75,8 +75,8 @@ Create an `ai-pr-review-runtime` environment with these secrets:
 The publication token is required because pushes and pull requests created by
 the automatic `GITHUB_TOKEN` do not trigger most subsequent workflow runs.
 Keep the token in the protected environment so it is released only to the
-trusted publication steps. Do not add required reviewers or a wait timer unless
-every implementation run should require manual approval.
+trusted actor-resolution and publication steps. Do not add required reviewers
+or a wait timer unless every implementation run should require manual approval.
 
 The workflow creates the default `codex:no-pr` label if it needs to mark an
 issue that requires no repository change. Creating it in advance is
@@ -110,8 +110,10 @@ Pass optional inputs from the caller job:
   changes `.github/workflows/**` is rejected before publication.
 
 The schedule in the caller controls run frequency. Scheduled and manual
-discovery selects the oldest open eligible issues up to `max-issues`. A manual
-run can pass `issue-number` to reconcile one eligible issue directly.
+discovery scans the oldest open eligible issues until it finds up to
+`max-issues` issues with pending reconciliation work. Issues whose linked pull
+request has no unprocessed review marker do not consume the limit. A manual run
+can pass `issue-number` to reconcile one eligible issue directly.
 
 ## Issue and pull request behavior
 
@@ -134,10 +136,12 @@ opens one draft pull request whose body closes the issue.
 
 If a workflow-owned branch was pushed but pull request creation failed, a
 later run recognizes commit trailers on that branch and retries only pull
-request creation. Recovery is refused when any open or closed pull request has
-already used that branch, so closing a generated draft does not cause a
-replacement. An unrelated branch with the deterministic name is not
-overwritten.
+request creation. The trailers include a semantic digest of the issue title,
+body, state, and labels; recovery is blocked when the current issue no longer
+matches the work that produced the branch. Recovery is also refused when any
+open or closed pull request has already used that branch, so closing a
+generated draft does not cause a replacement. An unrelated branch with the
+deterministic name is not overwritten.
 
 With exactly one linked open pull request, Codex runs only when that pull
 request has an unprocessed review marker. The head branch must be in the
@@ -163,7 +167,9 @@ After a successful update, the workflow replies in the review thread with the
 result and a machine-readable marker containing the command comment ID and
 commit SHA. Later runs treat that marker as processed. A no-change result is
 also acknowledged, using the unchanged pull request head SHA. Review threads
-are not resolved automatically.
+are not resolved automatically. Review comment bodies and diff hunks are
+preserved in full; the run fails instead of acknowledging feedback when the
+complete prepared state exceeds the overall context size limit.
 
 ## Revalidation and failure behavior
 
@@ -211,5 +217,5 @@ The workflow:
   publication token is used.
 
 The automatic `GITHUB_TOKEN` is read-only in the worker. The separate
-publication token is passed only to the publication checkout and mutation step,
-after model execution, and is not available to Codex.
+publication token is passed only to trusted actor-resolution, publication
+checkout, and mutation steps, and is not available to Codex.
