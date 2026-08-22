@@ -107,29 +107,20 @@ env:
   DEFAULT_REASONING_EFFORT: high
 
 jobs:
-  resolve:
-    name: Resolve eligible issues
+  resolve_publication_actor:
+    name: Resolve publication actor
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'workflow_call'
     runs-on: ubuntu-latest
     environment: ai-pr-review-runtime
-    timeout-minutes: 10
-    permissions:
-      contents: read
-      issues: read
-      pull-requests: read
+    timeout-minutes: 5
+    permissions: {}
     outputs:
-      matrix: ${{ steps.resolve.outputs.matrix }}
-      count: ${{ steps.resolve.outputs.count }}
       publish_actor: ${{ steps.publisher.outputs.publish_actor }}
 
     steps:
-      - name: Check out Codex implementation toolkit
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: ${{ job.workflow_repository }}
-          ref: ${{ job.workflow_sha }}
-          sparse-checkout: scripts
-          persist-credentials: false
-
       - name: Resolve publication actor
         id: publisher
         env:
@@ -153,10 +144,39 @@ jobs:
           fi
           echo "publish_actor=$publish_actor" >> "$GITHUB_OUTPUT"
 
+  resolve:
+    name: Resolve eligible issues
+    needs: resolve_publication_actor
+    if: >-
+      always() &&
+      (
+        needs.resolve_publication_actor.result == 'success' ||
+        needs.resolve_publication_actor.result == 'skipped'
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+    outputs:
+      matrix: ${{ steps.resolve.outputs.matrix }}
+      count: ${{ steps.resolve.outputs.count }}
+
+    steps:
+      - name: Check out Codex implementation toolkit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          sparse-checkout: scripts
+          persist-credentials: false
+
       - name: Resolve work to issue numbers
         id: resolve
         env:
-          CODEX_PUBLISH_ACTOR: ${{ steps.publisher.outputs.publish_actor }}
+          CODEX_PUBLISH_ACTOR: >-
+            ${{ needs.resolve_publication_actor.outputs.publish_actor }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           IMPLEMENTATION_LABEL: >-
             ${{ inputs['implementation-label'] ||
@@ -226,7 +246,6 @@ jobs:
         env:
           ALLOW_WORKFLOW_CHANGES: >-
             ${{ inputs['allow-workflow-changes'] || false }}
-          CODEX_PUBLISH_ACTOR: ${{ needs.resolve.outputs.publish_actor }}
           CODEX_PUBLISH_TOKEN: ${{ secrets.CODEX_PUBLISH_TOKEN }}
           CODEX_MODEL: ${{ inputs['model'] || env.DEFAULT_CODEX_MODEL }}
           CODEX_REASONING_EFFORT: >-
@@ -267,8 +286,13 @@ jobs:
             exit 1
           fi
 
-          if [[ ! "$CODEX_PUBLISH_ACTOR" =~ ^[A-Za-z0-9-]+(\[bot\])?$ ]]; then
-            echo "::error::Publication token actor is invalid."
+          publish_actor="$(
+            GH_TOKEN="$CODEX_PUBLISH_TOKEN" gh api graphql \
+              --field query='query { viewer { login } }' \
+              --jq '.data.viewer.login'
+          )"
+          if [[ ! "$publish_actor" =~ ^[A-Za-z0-9-]+(\[bot\])?$ ]]; then
+            echo "::error::Could not resolve the publication token actor."
             exit 1
           fi
 
@@ -276,7 +300,7 @@ jobs:
             echo "model=$CODEX_MODEL"
             echo "reasoning_effort=$CODEX_REASONING_EFFORT"
             echo "allow_workflow_changes=$ALLOW_WORKFLOW_CHANGES"
-            echo "publish_actor=$CODEX_PUBLISH_ACTOR"
+            echo "publish_actor=$publish_actor"
           } >> "$GITHUB_OUTPUT"
 
       - name: Re-fetch issue and pull request state

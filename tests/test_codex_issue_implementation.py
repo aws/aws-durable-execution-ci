@@ -1414,8 +1414,22 @@ class WorkflowPolicyTest(unittest.TestCase):
             r"(?ms)^  resolve:\n(.*?)(?=^  reconcile:)",
             WORKFLOW,
         )
-        assert resolve is not None
-        self.assertIn("environment: ai-pr-review-runtime", resolve.group(1))
+        publisher = re.search(
+            r"(?ms)^  resolve_publication_actor:\n(.*?)(?=^  resolve:)",
+            WORKFLOW,
+        )
+        assert resolve is not None and publisher is not None
+        self.assertNotIn("environment:", resolve.group(1))
+        self.assertIn("needs: resolve_publication_actor", resolve.group(1))
+        self.assertIn("always()", resolve.group(1))
+        self.assertIn(
+            "environment: ai-pr-review-runtime",
+            publisher.group(1),
+        )
+        self.assertIn(
+            "github.event_name == 'schedule'",
+            publisher.group(1),
+        )
 
     def test_file_sparse_checkout_disables_cone_mode(self):
         checkout = re.search(
@@ -1533,12 +1547,15 @@ class WorkflowPolicyTest(unittest.TestCase):
             publisher.group(1),
         )
         self.assertIn(
+            "query { viewer { login } }",
+            config.group(1),
+        )
+        self.assertIn(
             "echo \"publish_actor=$publish_actor\"",
             publisher.group(1),
         )
         self.assertIn(
-            "CODEX_PUBLISH_ACTOR: "
-            "${{ needs.resolve.outputs.publish_actor }}",
+            "echo \"publish_actor=$publish_actor\"",
             config.group(1),
         )
         self.assertIn(
