@@ -8,7 +8,7 @@ draft pull requests when an authorized maintainer comments:
 ```
 
 Independently of issue linkage, it also updates an existing pull request when
-an authorized maintainer marks a review thread with:
+an authorized maintainer posts:
 
 ```text
 /ai address
@@ -75,10 +75,9 @@ request creation completed by finding open issues with an authorized command.
 Implementation labels are not inspected; applying `codex:implement` alone does
 not start work. Command variants and emoji reactions do not start work.
 
-`/ai address` is scoped directly to the pull request review thread
-containing the command. It does not require that pull request to close or
-reference an issue and never creates a new implementation branch or pull
-request.
+`/ai address` is scoped directly to the pull request containing the command.
+It does not require that pull request to close or reference an issue and never
+creates a new implementation branch or pull request.
 
 Create an `ai-pr-review-runtime` environment with this secret:
 
@@ -119,7 +118,8 @@ Pass optional inputs from the caller job:
 ```
 
 - `no-pr-label` defaults to `codex:no-pr`.
-- `max-issues` defaults to 3 and is limited to 10 per discovery run.
+- `max-issues` defaults to 3 and is limited to 10 work items per discovery
+  run.
 - `model` defaults to `openai.gpt-5.6-sol`.
 - `reasoning-effort` defaults to `high`.
 - `allow-workflow-changes` defaults to `false`. When false, a model result that
@@ -128,14 +128,16 @@ Pass optional inputs from the caller job:
 The configured no-PR label follows GitHub's case-insensitive label behavior.
 
 The schedule in the caller controls run frequency. Scheduled and manual
-discovery scans the oldest open issues until it finds up to `max-issues` issues
-with an authorized `/ai implement` command and pending reconciliation work.
-Issues whose linked pull request has no unprocessed review marker do not
-consume the limit. Blocked or ambiguous issues consume a slot until their
-current state is reported; later discovery runs skip the same actor-authored
-notification marker and continue scanning. A manual run can pass
-`issue-number` to reconcile one issue directly, but the worker still requires
-an authorized implementation command.
+discovery scans open issues and pull requests in creation order until it finds
+up to `max-issues` pending work items. This recovers authorized `/ai implement`
+commands and unprocessed `/ai address` commands even when the pull request does
+not close an eligible issue. Address work is always emitted as a pull request
+work item, including when it was found through a linked issue, so recovery does
+not start duplicate issue-scoped and pull-request-scoped workers. Blocked or
+ambiguous issues consume a slot until their current state is reported; later
+discovery runs skip the same actor-authored notification marker and continue
+scanning. A manual run can pass `issue-number` to reconcile one issue directly,
+but the worker still requires an authorized implementation command.
 
 ## Issue and pull request behavior
 
@@ -187,9 +189,17 @@ ambiguity.
 
 ## Review marker
 
-Post `/ai address` as a reply in the relevant pull request review thread.
-The trimmed body must exactly match that command. General comments, unmarked
-review comments, command variants, and reactions do not start work.
+Post `/ai address` as a reply in a pull request review thread to address that
+complete thread. The trimmed body must exactly match the command. All currently
+unprocessed marked threads are reconciled together.
+
+Post `/ai address` as a top-level pull request conversation comment to address
+all human conversation comments, submitted review summaries, and inline review
+comments created at or after the current head commit's committer timestamp.
+Explicitly marked inline threads are included once as complete threads rather
+than duplicated in the batch feedback. Multiple pending top-level commands are
+acknowledged together. Command variants, bot comments, previous
+acknowledgements, and reactions do not start or contribute feedback.
 
 No linked issue is required. If the pull request closes, moves to an
 unwritable head, or otherwise changes before reconciliation, the address-only
@@ -199,13 +209,14 @@ The command author must currently have `write`, `maintain`, or `admin`
 permission. Bot users and users without sufficient repository permission are
 ignored. `author_association` is not used as authorization.
 
-After a successful update, the workflow replies in the review thread with the
-result and a machine-readable marker containing the command comment ID and
-commit SHA. Later runs treat that marker as processed. A no-change result is
-also acknowledged, using the unchanged pull request head SHA. Review threads
-are not resolved automatically. Review comment bodies and diff hunks are
-preserved in full; the run fails instead of acknowledging feedback when the
-complete prepared state exceeds the overall context size limit.
+After a successful update, the workflow replies in each marked review thread
+and posts a pull request conversation acknowledgement for top-level commands.
+Machine-readable markers contain the command comment IDs and commit SHA, so
+later runs treat those commands as processed. A no-change result is also
+acknowledged, using the unchanged pull request head SHA. Review threads are not
+resolved automatically. Conversation bodies, review comment bodies, and diff
+hunks are preserved in full; the run fails instead of acknowledging feedback
+when the complete prepared state exceeds the overall context size limit.
 
 ## Revalidation and failure behavior
 
@@ -218,7 +229,8 @@ of these change after model execution:
   work;
 - the exact pull request identity, refs, and head SHA for review commands;
 - default branch designation or SHA, or pull request head SHA;
-- unprocessed authorized review markers;
+- unprocessed authorized review markers, batch commands, and feedback since
+  the prepared head commit;
 - deterministic implementation branch state.
 
 Pushes use an exact `--force-with-lease` expectation anchored by the validated

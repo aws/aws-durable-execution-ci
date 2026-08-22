@@ -20,7 +20,7 @@ on:
         type: string
         default: codex:no-pr
       max-issues:
-        description: Maximum discovered issues processed per run
+        description: Maximum discovered work items processed per run
         required: false
         type: number
         default: 3
@@ -60,7 +60,7 @@ on:
         type: string
         default: codex:no-pr
       max-issues:
-        description: Maximum discovered issues processed per run
+        description: Maximum discovered work items processed per run
         required: false
         type: number
         default: 3

@@ -95,6 +95,7 @@ def pull_request_api(**overrides):
 def marker(command_id=700):
     return {
         "command_id": command_id,
+        "command_kind": "review_comment",
         "author": "maintainer",
         "thread_root_id": 600,
         "thread": [
@@ -146,6 +147,14 @@ def implementation_command(command_id=500, author="maintainer"):
         "created_at": "2026-08-22T00:00:00Z",
         "updated_at": "2026-08-22T00:00:00Z",
     }
+
+
+def issue_item(number=31):
+    return {"kind": "issue", "number": number}
+
+
+def pull_request_item(number=44):
+    return {"kind": "pull_request", "number": number}
 
 
 def environment(**overrides):
@@ -234,7 +243,7 @@ class EventSelectionTest(unittest.TestCase):
         ):
             self.assertEqual(
                 IMPLEMENTATION.resolve_work_items("issue_comment", event),
-                [31],
+                [issue_item()],
             )
 
         event["comment"]["body"] = "/ai implement please"
@@ -334,7 +343,7 @@ class EventSelectionTest(unittest.TestCase):
             ), patch.object(
                 IMPLEMENTATION,
                 "resolve_work_items",
-                return_value=[44],
+                return_value=[pull_request_item()],
             ):
                 IMPLEMENTATION.resolve_command(event_path)
 
@@ -354,6 +363,106 @@ class EventSelectionTest(unittest.TestCase):
                             "address_only": True,
                             "work_key": "pr-44",
                         }
+                    ]
+                },
+            )
+
+    def test_pr_conversation_command_matrix_is_address_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            event_path = root / "event.json"
+            output_path = root / "output"
+            event_path.write_text(
+                json.dumps(
+                    {
+                        "issue": {
+                            "number": 44,
+                            "state": "open",
+                            "pull_request": {},
+                        },
+                        "comment": implementation_comment(
+                            body="/ai address"
+                        ),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with patch.dict(
+                os.environ,
+                environment(
+                    GITHUB_EVENT_NAME="issue_comment",
+                    GITHUB_OUTPUT=str(output_path),
+                ),
+                clear=True,
+            ), patch.object(
+                IMPLEMENTATION,
+                "resolve_work_items",
+                return_value=[pull_request_item()],
+            ):
+                IMPLEMENTATION.resolve_command(event_path)
+
+            outputs = dict(
+                line.split("=", 1)
+                for line in output_path.read_text(
+                    encoding="utf-8"
+                ).splitlines()
+            )
+            self.assertEqual(
+                json.loads(outputs["matrix"]),
+                {
+                    "include": [
+                        {
+                            "issue_number": 0,
+                            "pull_request_number": 44,
+                            "address_only": True,
+                            "work_key": "pr-44",
+                        }
+                    ]
+                },
+            )
+
+    def test_recovery_matrix_preserves_each_work_item_type(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            event_path = root / "event.json"
+            output_path = root / "output"
+            event_path.write_text("{}", encoding="utf-8")
+            with patch.dict(
+                os.environ,
+                environment(
+                    GITHUB_EVENT_NAME="schedule",
+                    GITHUB_OUTPUT=str(output_path),
+                ),
+                clear=True,
+            ), patch.object(
+                IMPLEMENTATION,
+                "resolve_work_items",
+                return_value=[issue_item(), pull_request_item()],
+            ):
+                IMPLEMENTATION.resolve_command(event_path)
+
+            outputs = dict(
+                line.split("=", 1)
+                for line in output_path.read_text(
+                    encoding="utf-8"
+                ).splitlines()
+            )
+            self.assertEqual(
+                json.loads(outputs["matrix"]),
+                {
+                    "include": [
+                        {
+                            "issue_number": 31,
+                            "pull_request_number": 0,
+                            "address_only": False,
+                            "work_key": "issue-31",
+                        },
+                        {
+                            "issue_number": 0,
+                            "pull_request_number": 44,
+                            "address_only": True,
+                            "work_key": "pr-44",
+                        },
                     ]
                 },
             )
@@ -471,12 +580,12 @@ class EventSelectionTest(unittest.TestCase):
             clear=True,
         ), patch.object(
             IMPLEMENTATION,
-            "discover_issues",
-            return_value=[3, 5],
+            "discover_work_items",
+            return_value=[issue_item(3), pull_request_item(5)],
         ) as discover:
             self.assertEqual(
                 IMPLEMENTATION.resolve_work_items("schedule", {}),
-                [3, 5],
+                [issue_item(3), pull_request_item(5)],
             )
 
         discover.assert_called_once_with(
@@ -485,6 +594,76 @@ class EventSelectionTest(unittest.TestCase):
             2,
             "publisher[bot]",
         )
+
+    def test_discovery_recovers_pending_pr_without_a_linked_issue(self):
+        candidate = issue(number=44)
+        candidate["pull_request"] = {}
+        with patch.object(
+            IMPLEMENTATION,
+            "run_gh_json",
+            return_value=[candidate],
+        ), patch.object(
+            IMPLEMENTATION,
+            "fetch_pull_request",
+            return_value=pull_request(),
+        ) as fetch, patch.object(
+            IMPLEMENTATION,
+            "prepare_pull_request_state",
+            return_value={"action": "address"},
+        ) as prepare, patch.object(
+            IMPLEMENTATION,
+            "prepare_issue_state",
+        ) as prepare_issue:
+            self.assertEqual(
+                IMPLEMENTATION.discover_work_items(
+                    "aws/example",
+                    "codex:no-pr",
+                    3,
+                    "publisher[bot]",
+                ),
+                [pull_request_item()],
+            )
+
+        fetch.assert_called_once_with("aws/example", 44)
+        prepare.assert_called_once_with(
+            "aws/example",
+            "publisher[bot]",
+            pull_request(),
+        )
+        prepare_issue.assert_not_called()
+
+    def test_issue_address_recovery_uses_pr_scope_without_duplicates(self):
+        candidate = issue(number=44)
+        candidate["pull_request"] = {}
+        with patch.object(
+            IMPLEMENTATION,
+            "run_gh_json",
+            return_value=[issue(), candidate],
+        ), patch.object(
+            IMPLEMENTATION,
+            "prepare_issue_state",
+            return_value={
+                "action": "address",
+                "pull_request": pull_request(),
+            },
+        ), patch.object(
+            IMPLEMENTATION,
+            "fetch_pull_request",
+            return_value=pull_request(),
+        ), patch.object(
+            IMPLEMENTATION,
+            "prepare_pull_request_state",
+            return_value={"action": "address"},
+        ):
+            self.assertEqual(
+                IMPLEMENTATION.discover_work_items(
+                    "aws/example",
+                    "codex:no-pr",
+                    3,
+                    "publisher[bot]",
+                ),
+                [pull_request_item()],
+            )
 
     def test_discovery_skips_non_actionable_issues(self):
         response = [
@@ -507,13 +686,13 @@ class EventSelectionTest(unittest.TestCase):
             ],
         ):
             self.assertEqual(
-                IMPLEMENTATION.discover_issues(
+                IMPLEMENTATION.discover_work_items(
                     "aws/example",
                     "codex:no-pr",
                     3,
                     "publisher[bot]",
                 ),
-                [31],
+                [issue_item()],
             )
 
     def test_discovery_continues_past_excluded_first_page(self):
@@ -541,13 +720,13 @@ class EventSelectionTest(unittest.TestCase):
             ],
         ):
             self.assertEqual(
-                IMPLEMENTATION.discover_issues(
+                IMPLEMENTATION.discover_work_items(
                     "aws/example",
                     "codex:no-pr",
                     2,
                     "publisher[bot]",
                 ),
-                [101, 102],
+                [issue_item(101), issue_item(102)],
             )
 
         self.assertIn("per_page=100&page=1", run.call_args_list[0].args[0][0])
@@ -574,13 +753,13 @@ class EventSelectionTest(unittest.TestCase):
             ],
         ) as prepare:
             self.assertEqual(
-                IMPLEMENTATION.discover_issues(
+                IMPLEMENTATION.discover_work_items(
                     "aws/example",
                     "codex:no-pr",
                     1,
                     "publisher[bot]",
                 ),
-                [101],
+                [issue_item(101)],
             )
 
         self.assertEqual(prepare.call_count, 101)
@@ -617,13 +796,13 @@ class EventSelectionTest(unittest.TestCase):
             return_value=True,
         ) as marker_exists:
             self.assertEqual(
-                IMPLEMENTATION.discover_issues(
+                IMPLEMENTATION.discover_work_items(
                     "aws/example",
                     "codex:no-pr",
                     1,
                     "publisher[bot]",
                 ),
-                [101],
+                [issue_item(101)],
             )
 
         self.assertEqual(marker_exists.call_count, 100)
@@ -673,7 +852,7 @@ class EventSelectionTest(unittest.TestCase):
                     "aws/example",
                     event,
                 ),
-                [44],
+                [pull_request_item()],
             )
 
         event["comment"]["body"] = "/ai address please"
@@ -689,6 +868,29 @@ class EventSelectionTest(unittest.TestCase):
                 [],
             )
         permission.assert_not_called()
+
+    def test_pr_conversation_address_command_is_authorized(self):
+        event = {
+            "action": "created",
+            "issue": {
+                "number": 44,
+                "state": "open",
+                "pull_request": {},
+            },
+            "comment": implementation_comment(body=" /ai address "),
+        }
+        with patch.object(
+            IMPLEMENTATION,
+            "collaborator_has_write_permission",
+            return_value=True,
+        ):
+            self.assertEqual(
+                IMPLEMENTATION.resolve_issue_comment_event(
+                    "aws/example",
+                    event,
+                ),
+                [pull_request_item()],
+            )
 
     def test_unauthorized_and_bot_commands_are_ignored(self):
         event = {
@@ -775,6 +977,10 @@ class MarkerPolicyTest(unittest.TestCase):
                     return_value=comments,
                 ), patch.object(
                     IMPLEMENTATION,
+                    "issue_comments",
+                    return_value=[],
+                ), patch.object(
+                    IMPLEMENTATION,
                     "collaborator_has_write_permission",
                 ) as permission:
                     self.assertEqual(
@@ -782,6 +988,7 @@ class MarkerPolicyTest(unittest.TestCase):
                             "aws/example",
                             44,
                             actor,
+                            "b" * 40,
                         ),
                         [],
                     )
@@ -811,6 +1018,10 @@ class MarkerPolicyTest(unittest.TestCase):
             return_value=comments,
         ), patch.object(
             IMPLEMENTATION,
+            "issue_comments",
+            return_value=[],
+        ), patch.object(
+            IMPLEMENTATION,
             "collaborator_has_write_permission",
             return_value=True,
         ):
@@ -818,6 +1029,7 @@ class MarkerPolicyTest(unittest.TestCase):
                 "aws/example",
                 44,
                 "publisher[bot]",
+                "b" * 40,
             )
 
         self.assertEqual(
@@ -825,6 +1037,272 @@ class MarkerPolicyTest(unittest.TestCase):
             [600, 700],
         )
         self.assertEqual(markers[0]["thread_root_id"], 600)
+
+    def test_pr_conversation_command_collects_feedback_since_head_commit(self):
+        review = [
+            {
+                "id": 500,
+                "body": "Old inline feedback.",
+                "user": {"login": "reviewer", "type": "User"},
+                "created_at": "2026-08-22T00:00:00Z",
+                "updated_at": "2026-08-22T00:00:00Z",
+            },
+            {
+                "id": 600,
+                "body": "New inline feedback.",
+                "path": "src/example.py",
+                "user": {"login": "reviewer", "type": "User"},
+                "created_at": "2026-08-22T00:02:00Z",
+                "updated_at": "2026-08-22T00:02:00Z",
+            },
+        ]
+        conversation = [
+            {
+                "id": 800,
+                "body": "Old conversation feedback.",
+                "user": {"login": "reviewer", "type": "User"},
+                "created_at": "2026-08-22T00:00:00Z",
+                "updated_at": "2026-08-22T00:00:00Z",
+            },
+            {
+                "id": 850,
+                "body": "New conversation feedback.",
+                "user": {"login": "reviewer", "type": "User"},
+                "created_at": "2026-08-22T00:03:00Z",
+                "updated_at": "2026-08-22T00:03:00Z",
+            },
+            implementation_comment(
+                command_id=900,
+                body="/ai address",
+            ),
+            implementation_comment(
+                command_id=901,
+                body="/ai address",
+            ),
+        ]
+        with patch.object(
+            IMPLEMENTATION,
+            "review_comments",
+            return_value=review,
+        ), patch.object(
+            IMPLEMENTATION,
+            "pull_request_reviews",
+            return_value=[
+                {
+                    "id": 750,
+                    "body": "New review summary.",
+                    "state": "CHANGES_REQUESTED",
+                    "commit_id": "b" * 40,
+                    "user": {"login": "reviewer", "type": "User"},
+                    "submitted_at": "2026-08-22T00:02:30Z",
+                }
+            ],
+        ), patch.object(
+            IMPLEMENTATION,
+            "issue_comments",
+            return_value=conversation,
+        ), patch.object(
+            IMPLEMENTATION,
+            "pull_request_head_commit",
+            return_value={
+                "sha": "b" * 40,
+                "committed_at": "2026-08-22T00:01:00Z",
+            },
+        ), patch.object(
+            IMPLEMENTATION,
+            "collaborator_has_write_permission",
+            return_value=True,
+        ):
+            markers = IMPLEMENTATION.unprocessed_markers(
+                "aws/example",
+                44,
+                "publisher[bot]",
+                "b" * 40,
+            )
+
+        self.assertEqual(len(markers), 1)
+        self.assertEqual(markers[0]["command_kind"], "issue_comment")
+        self.assertEqual(markers[0]["command_id"], 901)
+        self.assertEqual(markers[0]["command_ids"], [900, 901])
+        self.assertEqual(
+            [value["body"] for value in markers[0]["feedback"]],
+            [
+                "New inline feedback.",
+                "New review summary.",
+                "New conversation feedback.",
+            ],
+        )
+
+    def test_pr_conversation_command_does_not_duplicate_marked_threads(self):
+        review = [
+            {
+                "id": 600,
+                "body": "Marked thread feedback.",
+                "user": {"login": "reviewer", "type": "User"},
+                "created_at": "2026-08-22T00:02:00Z",
+                "updated_at": "2026-08-22T00:02:00Z",
+            },
+            {
+                "id": 700,
+                "in_reply_to_id": 600,
+                "body": "/ai address",
+                "user": {"login": "maintainer", "type": "User"},
+                "created_at": "2026-08-22T00:03:00Z",
+                "updated_at": "2026-08-22T00:03:00Z",
+            },
+            {
+                "id": 601,
+                "body": "Unmarked thread feedback.",
+                "user": {"login": "reviewer", "type": "User"},
+                "created_at": "2026-08-22T00:04:00Z",
+                "updated_at": "2026-08-22T00:04:00Z",
+            },
+        ]
+        conversation = [
+            implementation_comment(
+                command_id=900,
+                body="/ai address",
+            )
+        ]
+        with patch.object(
+            IMPLEMENTATION,
+            "review_comments",
+            return_value=review,
+        ), patch.object(
+            IMPLEMENTATION,
+            "pull_request_reviews",
+            return_value=[],
+        ), patch.object(
+            IMPLEMENTATION,
+            "issue_comments",
+            return_value=conversation,
+        ), patch.object(
+            IMPLEMENTATION,
+            "pull_request_head_commit",
+            return_value={
+                "sha": "b" * 40,
+                "committed_at": "2026-08-22T00:01:00Z",
+            },
+        ), patch.object(
+            IMPLEMENTATION,
+            "collaborator_has_write_permission",
+            return_value=True,
+        ):
+            markers = IMPLEMENTATION.unprocessed_markers(
+                "aws/example",
+                44,
+                "publisher[bot]",
+                "b" * 40,
+            )
+
+        self.assertEqual(
+            [value["command_kind"] for value in markers],
+            ["review_comment", "issue_comment"],
+        )
+        self.assertEqual(
+            [value["body"] for value in markers[1]["feedback"]],
+            ["Unmarked thread feedback."],
+        )
+
+    def test_acknowledgement_uses_the_command_comment_api(self):
+        batch = {
+            "command_id": 901,
+            "command_ids": [900, 901],
+            "command_kind": "issue_comment",
+            "author": "maintainer",
+            "command": {},
+            "since_commit": {
+                "sha": "b" * 40,
+                "committed_at": "2026-08-22T00:01:00Z",
+            },
+            "feedback": [],
+        }
+        state = {
+            "repository": "aws/example",
+            "target": {"pull_request_number": 44},
+            "markers": [marker(), batch],
+        }
+        result = {
+            "outcome": "changed",
+            "summary": "Addressed the feedback.",
+            "validation": [],
+        }
+        with patch.object(
+            IMPLEMENTATION,
+            "run_gh_json",
+        ) as run:
+            IMPLEMENTATION.acknowledge_markers(
+                state,
+                "d" * 40,
+                result,
+            )
+
+        self.assertEqual(
+            run.call_args_list[0].args[0][0],
+            "repos/aws/example/pulls/44/comments/600/replies",
+        )
+        self.assertEqual(
+            run.call_args_list[1].args[0][0],
+            "repos/aws/example/issues/44/comments",
+        )
+        batch_body = run.call_args_list[1].kwargs["input_value"]["body"]
+        self.assertIn("command-id=900", batch_body)
+        self.assertIn("command-id=901", batch_body)
+
+    def test_batch_acknowledgements_are_not_processed_again(self):
+        conversation = [
+            implementation_comment(
+                command_id=900,
+                body="/ai address",
+            ),
+            implementation_comment(
+                command_id=901,
+                body="/ai address",
+            ),
+            {
+                "id": 902,
+                "body": (
+                    "Addressed.\n\n"
+                    "<!-- codex-addressed command-id=900 "
+                    f"commit={'d' * 40} -->\n"
+                    "<!-- codex-addressed command-id=901 "
+                    f"commit={'d' * 40} -->"
+                ),
+                "user": {
+                    "login": "publisher[bot]",
+                    "type": "Bot",
+                },
+                "created_at": "2026-08-22T00:05:00Z",
+                "updated_at": "2026-08-22T00:05:00Z",
+            },
+        ]
+        with patch.object(
+            IMPLEMENTATION,
+            "review_comments",
+            return_value=[],
+        ), patch.object(
+            IMPLEMENTATION,
+            "issue_comments",
+            return_value=conversation,
+        ), patch.object(
+            IMPLEMENTATION,
+            "collaborator_has_write_permission",
+        ) as permission, patch.object(
+            IMPLEMENTATION,
+            "pull_request_head_commit",
+        ) as head_commit:
+            self.assertEqual(
+                IMPLEMENTATION.unprocessed_markers(
+                    "aws/example",
+                    44,
+                    "publisher[bot]",
+                    "b" * 40,
+                ),
+                [],
+            )
+
+        permission.assert_not_called()
+        head_commit.assert_not_called()
 
     def test_marker_context_does_not_truncate_comment_or_diff(self):
         body = "body-" + ("x" * 25_000) + "-tail"
@@ -876,6 +1354,64 @@ class MarkerPolicyTest(unittest.TestCase):
                 "changed during the run",
             ):
                 IMPLEMENTATION.require_markers_unchanged(state)
+
+    def test_post_push_batch_check_ignores_mutable_code_context(self):
+        prepared = [
+            {
+                "command_id": 900,
+                "command_ids": [900],
+                "command_kind": "issue_comment",
+                "author": "maintainer",
+                "command": {
+                    "kind": "conversation_comment",
+                    "id": 900,
+                    "author": "maintainer",
+                    "body": "/ai address",
+                    "created_at": "2026-08-22T00:03:00Z",
+                    "updated_at": "2026-08-22T00:03:00Z",
+                },
+                "since_commit": {
+                    "sha": "b" * 40,
+                    "committed_at": "2026-08-22T00:01:00Z",
+                },
+                "feedback": [
+                    {
+                        "kind": "review_comment",
+                        "id": 600,
+                        "in_reply_to_id": None,
+                        "author": "reviewer",
+                        "body": "Please add a test.",
+                        "path": "src/example.py",
+                        "line": 10,
+                        "diff_hunk": "@@ -8,2 +8,3 @@",
+                        "created_at": "2026-08-22T00:02:00Z",
+                        "updated_at": "2026-08-22T00:02:00Z",
+                    }
+                ],
+            }
+        ]
+        current = json.loads(json.dumps(prepared))
+        current[0]["feedback"][0]["line"] = None
+        current[0]["feedback"][0]["diff_hunk"] = ""
+        state = {"markers": prepared}
+        with patch.object(
+            IMPLEMENTATION,
+            "current_marker_snapshot",
+            return_value=current,
+        ):
+            IMPLEMENTATION.require_markers_still_actionable(state)
+
+        current[0]["feedback"][0]["body"] = "Changed feedback."
+        with patch.object(
+            IMPLEMENTATION,
+            "current_marker_snapshot",
+            return_value=current,
+        ):
+            with self.assertRaisesRegex(
+                IMPLEMENTATION.ImplementationError,
+                "changed before acknowledgement",
+            ):
+                IMPLEMENTATION.require_markers_still_actionable(state)
 
 
 class PreparationPolicyTest(unittest.TestCase):
@@ -992,6 +1528,7 @@ class PreparationPolicyTest(unittest.TestCase):
             "aws/example",
             44,
             "publisher[bot]",
+            pull["head_sha"],
         )
 
     def test_address_only_updates_pull_request_without_linked_issue(self):

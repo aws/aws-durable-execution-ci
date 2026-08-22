@@ -9,6 +9,7 @@ import re
 import subprocess
 import sys
 import urllib.parse
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -505,6 +506,67 @@ def review_comments(
         page += 1
 
 
+def pull_request_reviews(
+    repository: str,
+    pull_request_number: int,
+) -> list[dict[str, Any]]:
+    reviews: list[dict[str, Any]] = []
+    page = 1
+    while True:
+        response = run_gh_json(
+            [
+                f"repos/{repository}/pulls/{pull_request_number}/reviews"
+                f"?per_page=100&page={page}"
+            ]
+        )
+        if not isinstance(response, list):
+            raise ImplementationError(
+                "GitHub returned invalid pull request reviews"
+            )
+        reviews.extend(response)
+        if len(response) < 100:
+            return reviews
+        if len(reviews) >= MAX_REVIEW_COMMENTS:
+            raise ImplementationError(
+                "pull request has too many reviews"
+            )
+        page += 1
+
+
+def parse_github_timestamp(value: Any, description: str) -> datetime:
+    if not isinstance(value, str):
+        raise ImplementationError(f"GitHub returned an invalid {description}")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ImplementationError(
+            f"GitHub returned an invalid {description}"
+        ) from error
+    if parsed.tzinfo is None:
+        raise ImplementationError(f"GitHub returned an invalid {description}")
+    return parsed
+
+
+def pull_request_head_commit(
+    repository: str,
+    head_sha: str,
+) -> dict[str, str]:
+    if re.fullmatch(r"[0-9a-f]{40}", head_sha) is None:
+        raise ImplementationError("pull request head SHA is invalid")
+    commit = run_gh_json([f"repos/{repository}/commits/{head_sha}"])
+    try:
+        committed_at = commit["commit"]["committer"]["date"]
+    except (KeyError, TypeError) as error:
+        raise ImplementationError(
+            "GitHub returned an invalid pull request head commit"
+        ) from error
+    parse_github_timestamp(committed_at, "commit timestamp")
+    return {
+        "sha": head_sha,
+        "committed_at": committed_at,
+    }
+
+
 def is_bot_user(user: Any) -> bool:
     if not isinstance(user, dict):
         return True
@@ -562,16 +624,105 @@ def normalized_thread_comment(comment: dict[str, Any]) -> dict[str, Any]:
             else ""
         ),
         "created_at": comment.get("created_at"),
+        "updated_at": comment.get("updated_at"),
     }
+
+
+def normalized_conversation_comment(
+    comment: dict[str, Any],
+) -> dict[str, Any]:
+    user = comment.get("user")
+    body = comment.get("body")
+    return {
+        "kind": "conversation_comment",
+        "id": comment.get("id"),
+        "author": (
+            user.get("login")
+            if isinstance(user, dict)
+            and isinstance(user.get("login"), str)
+            else "unknown"
+        ),
+        "body": body if isinstance(body, str) else "",
+        "created_at": comment.get("created_at"),
+        "updated_at": comment.get("updated_at"),
+    }
+
+
+def normalized_pull_request_review(
+    review: dict[str, Any],
+) -> dict[str, Any]:
+    user = review.get("user")
+    body = review.get("body")
+    return {
+        "kind": "pull_request_review",
+        "id": review.get("id"),
+        "author": (
+            user.get("login")
+            if isinstance(user, dict)
+            and isinstance(user.get("login"), str)
+            else "unknown"
+        ),
+        "body": body if isinstance(body, str) else "",
+        "state": review.get("state"),
+        "commit_id": review.get("commit_id"),
+        "created_at": review.get("submitted_at"),
+        "updated_at": review.get("submitted_at"),
+    }
+
+
+def is_address_feedback(
+    comment: dict[str, Any],
+    committed_at: datetime,
+) -> bool:
+    body = comment.get("body")
+    created_at = comment.get("created_at")
+    return (
+        isinstance(body, str)
+        and bool(body.strip())
+        and body.strip() not in (ADDRESS_COMMAND, IMPLEMENT_COMMAND)
+        and ACKNOWLEDGEMENT_PATTERN.search(body) is None
+        and not is_bot_user(comment.get("user"))
+        and parse_github_timestamp(
+            created_at,
+            "pull request comment timestamp",
+        )
+        >= committed_at
+    )
+
+
+def is_review_feedback(
+    review: dict[str, Any],
+    committed_at: datetime,
+) -> bool:
+    body = review.get("body")
+    submitted_at = review.get("submitted_at")
+    return (
+        isinstance(body, str)
+        and bool(body.strip())
+        and body.strip() not in (ADDRESS_COMMAND, IMPLEMENT_COMMAND)
+        and ACKNOWLEDGEMENT_PATTERN.search(body) is None
+        and not is_bot_user(review.get("user"))
+        and isinstance(submitted_at, str)
+        and parse_github_timestamp(
+            submitted_at,
+            "pull request review timestamp",
+        )
+        >= committed_at
+    )
 
 
 def unprocessed_markers(
     repository: str,
     pull_request_number: int,
     actor: str,
+    head_sha: str,
 ) -> list[dict[str, Any]]:
     comments = review_comments(repository, pull_request_number)
-    acknowledged = acknowledged_command_ids(comments, actor)
+    conversation = issue_comments(repository, pull_request_number)
+    acknowledged = acknowledged_command_ids(
+        comments + conversation,
+        actor,
+    )
     permissions: dict[str, bool] = {}
     markers: list[dict[str, Any]] = []
 
@@ -618,9 +769,102 @@ def unprocessed_markers(
         markers.append(
             {
                 "command_id": command_id,
+                "command_kind": "review_comment",
                 "author": login,
                 "thread_root_id": root_id,
                 "thread": thread,
+            }
+        )
+
+    batch_commands: list[dict[str, Any]] = []
+    for comment in conversation:
+        if not isinstance(comment, dict):
+            continue
+        command_id = comment.get("id")
+        body = comment.get("body")
+        user = comment.get("user")
+        if (
+            type(command_id) is not int
+            or command_id in acknowledged
+            or not isinstance(body, str)
+            or body.strip() != ADDRESS_COMMAND
+            or not isinstance(comment.get("created_at"), str)
+            or not isinstance(comment.get("updated_at"), str)
+            or is_bot_user(user)
+        ):
+            continue
+        login = user["login"]
+        if login not in permissions:
+            permissions[login] = collaborator_has_write_permission(
+                repository,
+                login,
+            )
+        if permissions[login]:
+            batch_commands.append(comment)
+
+    if batch_commands:
+        batch_commands.sort(key=lambda value: value["id"])
+        command = batch_commands[-1]
+        commit = pull_request_head_commit(repository, head_sha)
+        committed_at = parse_github_timestamp(
+            commit["committed_at"],
+            "commit timestamp",
+        )
+        covered_roots = {
+            marker["thread_root_id"]
+            for marker in markers
+            if marker.get("command_kind") == "review_comment"
+        }
+        feedback: list[dict[str, Any]] = []
+        for review in pull_request_reviews(
+            repository,
+            pull_request_number,
+        ):
+            if (
+                isinstance(review, dict)
+                and is_review_feedback(review, committed_at)
+            ):
+                feedback.append(normalized_pull_request_review(review))
+        for comment in conversation:
+            if (
+                isinstance(comment, dict)
+                and is_address_feedback(comment, committed_at)
+            ):
+                feedback.append(normalized_conversation_comment(comment))
+        for comment in comments:
+            if not isinstance(comment, dict):
+                continue
+            root_id = comment.get("in_reply_to_id") or comment.get("id")
+            if (
+                root_id not in covered_roots
+                and is_address_feedback(comment, committed_at)
+            ):
+                feedback.append(
+                    {
+                        "kind": "review_comment",
+                        **normalized_thread_comment(comment),
+                    }
+                )
+        feedback.sort(
+            key=lambda value: (
+                value.get("created_at") or "",
+                value.get("kind") or "",
+                value.get("id") or 0,
+            )
+        )
+        user = command["user"]
+        markers.append(
+            {
+                "command_id": command["id"],
+                "command_ids": [
+                    value["id"]
+                    for value in batch_commands
+                ],
+                "command_kind": "issue_comment",
+                "author": user["login"],
+                "command": normalized_conversation_comment(command),
+                "since_commit": commit,
+                "feedback": feedback,
             }
         )
 
@@ -762,15 +1006,26 @@ def commit_has_automation_trailers(
     )
 
 
-def discover_issues(
+def work_item(kind: str, number: int) -> dict[str, Any]:
+    if (
+        kind not in ("issue", "pull_request")
+        or type(number) is not int
+        or number <= 0
+    ):
+        raise ImplementationError("work item is invalid")
+    return {"kind": kind, "number": number}
+
+
+def discover_work_items(
     repository: str,
     excluded_label: str,
     maximum: int,
     actor: str,
-) -> list[int]:
-    issue_numbers: list[int] = []
+) -> list[dict[str, Any]]:
+    work_items: list[dict[str, Any]] = []
+    seen: set[tuple[str, int]] = set()
     page = 1
-    while len(issue_numbers) < maximum:
+    while len(work_items) < maximum:
         response = run_gh_json(
             [
                 f"repos/{repository}/issues?state=open"
@@ -779,70 +1034,115 @@ def discover_issues(
         )
         if not isinstance(response, list):
             raise ImplementationError("GitHub returned an invalid issue list")
-        for issue in response:
+        for candidate in response:
             if (
-                not isinstance(issue, dict)
-                or "pull_request" in issue
-                or type(issue.get("number")) is not int
+                not isinstance(candidate, dict)
+                or type(candidate.get("number")) is not int
             ):
                 continue
-            state = prepare_issue_state(
-                repository,
-                excluded_label,
-                actor,
-                issue,
-            )
+            number = candidate["number"]
+            if "pull_request" in candidate:
+                state = prepare_pull_request_state(
+                    repository,
+                    actor,
+                    fetch_pull_request(repository, number),
+                )
+                if state["action"] != "address":
+                    continue
+                item = work_item("pull_request", number)
+            else:
+                state = prepare_issue_state(
+                    repository,
+                    excluded_label,
+                    actor,
+                    candidate,
+                )
+                if state["action"] == "address":
+                    pull_request = state.get("pull_request")
+                    if (
+                        not isinstance(pull_request, dict)
+                        or type(pull_request.get("number")) is not int
+                    ):
+                        raise ImplementationError(
+                            "address state has no pull request"
+                        )
+                    item = work_item(
+                        "pull_request",
+                        pull_request["number"],
+                    )
+                else:
+                    item = work_item("issue", number)
             if state["action"] == "skip":
                 continue
             notification_marker = state_notification_marker(state)
-            if notification_marker is not None and issue_comment_marker_exists(
-                repository,
-                issue["number"],
-                notification_marker,
-                actor,
-            ):
+            if notification_marker is not None:
+                if item["kind"] != "issue":
+                    raise ImplementationError(
+                        "pull request work has an issue notification"
+                    )
+                if issue_comment_marker_exists(
+                    repository,
+                    number,
+                    notification_marker,
+                    actor,
+                ):
+                    continue
+            item_key = (item["kind"], item["number"])
+            if item_key in seen:
                 continue
-            issue_numbers.append(issue["number"])
-            if len(issue_numbers) == maximum:
-                return issue_numbers
+            seen.add(item_key)
+            work_items.append(item)
+            if len(work_items) == maximum:
+                return work_items
         if len(response) < 100:
-            return issue_numbers
+            return work_items
         page += 1
-    return issue_numbers
+    return work_items
 
 
 def resolve_issue_comment_event(
     repository: str,
     event: dict[str, Any],
-) -> list[int]:
+) -> list[dict[str, Any]]:
     issue = event.get("issue")
     comment = event.get("comment")
+    is_pull_request = (
+        isinstance(issue, dict)
+        and "pull_request" in issue
+    )
+    expected_command = (
+        ADDRESS_COMMAND if is_pull_request else IMPLEMENT_COMMAND
+    )
     if (
         event.get("action") != "created"
         or not isinstance(issue, dict)
-        or "pull_request" in issue
         or issue.get("state") != "open"
         or type(issue.get("number")) is not int
         or not isinstance(comment, dict)
         or not isinstance(comment.get("body"), str)
-        or comment["body"].strip() != IMPLEMENT_COMMAND
+        or comment["body"].strip() != expected_command
         or is_bot_user(comment.get("user"))
     ):
         return []
     user = comment["user"]["login"]
     if not collaborator_has_write_permission(repository, user):
         print(
-            f"::warning::Ignoring {IMPLEMENT_COMMAND} from unauthorized "
+            f"::warning::Ignoring {expected_command} from unauthorized "
             f"user {user}."
         )
         return []
-    return [issue["number"]]
+    return [
+        work_item(
+            "pull_request" if is_pull_request else "issue",
+            issue["number"],
+        )
+    ]
 
 
 def resolve_review_event(
     repository: str,
     event: dict[str, Any],
-) -> list[int]:
+) -> list[dict[str, Any]]:
     comment = event.get("comment")
     pull_request = event.get("pull_request")
     if not isinstance(comment, dict) or not isinstance(pull_request, dict):
@@ -867,10 +1167,13 @@ def resolve_review_event(
     pull_request_number = pull_request.get("number")
     if type(pull_request_number) is not int:
         return []
-    return [pull_request_number]
+    return [work_item("pull_request", pull_request_number)]
 
 
-def resolve_work_items(event_name: str, event: dict[str, Any]) -> list[int]:
+def resolve_work_items(
+    event_name: str,
+    event: dict[str, Any],
+) -> list[dict[str, Any]]:
     repository = repository_name()
     excluded_label = no_pr_label()
     maximum = positive_integer(
@@ -884,7 +1187,15 @@ def resolve_work_items(event_name: str, event: dict[str, Any]) -> list[int]:
 
     explicit_issue = os.environ.get("REQUESTED_ISSUE_NUMBER", "").strip()
     if explicit_issue:
-        return [positive_integer(explicit_issue, "REQUESTED_ISSUE_NUMBER")]
+        return [
+            work_item(
+                "issue",
+                positive_integer(
+                    explicit_issue,
+                    "REQUESTED_ISSUE_NUMBER",
+                ),
+            )
+        ]
 
     if event_name == "issue_comment":
         return resolve_issue_comment_event(repository, event)
@@ -898,7 +1209,7 @@ def resolve_work_items(event_name: str, event: dict[str, Any]) -> list[int]:
         )
 
     if event_name in ("schedule", "workflow_dispatch", "workflow_call"):
-        return discover_issues(
+        return discover_work_items(
             repository,
             excluded_label,
             maximum,
@@ -913,30 +1224,47 @@ def resolve_command(event_path: Path) -> None:
     if not isinstance(event, dict):
         raise ImplementationError("GitHub event must be an object")
     event_name = require_environment("GITHUB_EVENT_NAME")
-    issue_numbers = resolve_work_items(
+    work_items = resolve_work_items(
         event_name,
         event,
     )
-    unique_numbers = list(dict.fromkeys(issue_numbers))
-    address_only = event_name == "pull_request_review_comment"
+    unique_work_items: list[dict[str, Any]] = []
+    seen: set[tuple[str, int]] = set()
+    for item in work_items:
+        if not isinstance(item, dict):
+            raise ImplementationError("work item is invalid")
+        normalized = work_item(item.get("kind"), item.get("number"))
+        item_key = (normalized["kind"], normalized["number"])
+        if item_key in seen:
+            continue
+        seen.add(item_key)
+        unique_work_items.append(normalized)
     matrix = {
         "include": [
             {
-                "issue_number": 0 if address_only else number,
-                "pull_request_number": number if address_only else 0,
-                "address_only": address_only,
+                "issue_number": (
+                    0
+                    if item["kind"] == "pull_request"
+                    else item["number"]
+                ),
+                "pull_request_number": (
+                    item["number"]
+                    if item["kind"] == "pull_request"
+                    else 0
+                ),
+                "address_only": item["kind"] == "pull_request",
                 "work_key": (
-                    f"pr-{number}"
-                    if address_only
-                    else f"issue-{number}"
+                    f"pr-{item['number']}"
+                    if item["kind"] == "pull_request"
+                    else f"issue-{item['number']}"
                 ),
             }
-            for number in unique_numbers
+            for item in unique_work_items
         ]
     }
     encoded_matrix = json.dumps(matrix, separators=(",", ":"))
     write_output("matrix", encoded_matrix)
-    write_output("count", str(len(unique_numbers)))
+    write_output("count", str(len(unique_work_items)))
     print(encoded_matrix)
 
 
@@ -1039,6 +1367,7 @@ def prepare_issue_state(
             repository,
             pull_request["number"],
             actor,
+            pull_request["head_sha"],
         )
         if not markers:
             return state
@@ -1151,6 +1480,7 @@ def prepare_pull_request_state(
         repository,
         pull_request["number"],
         actor,
+        pull_request["head_sha"],
     )
     if not markers:
         return state
@@ -1852,36 +2182,65 @@ def current_marker_snapshot(state: dict[str, Any]) -> list[dict[str, Any]]:
         state["repository"],
         pull_request_number,
         state["publication_actor"],
+        state["pull_request"]["head_sha"],
     )
 
 
 def marker_acknowledgement_snapshot(
     markers: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    immutable_thread_fields = (
+    immutable_comment_fields = (
+        "kind",
         "id",
         "in_reply_to_id",
         "author",
         "body",
+        "state",
+        "commit_id",
         "created_at",
+        "updated_at",
     )
-    return [
-        {
+    snapshots: list[dict[str, Any]] = []
+    for marker in markers:
+        if not isinstance(marker, dict):
+            continue
+        snapshot = {
             "command_id": marker.get("command_id"),
+            "command_ids": marker.get("command_ids"),
+            "command_kind": marker.get("command_kind"),
             "author": marker.get("author"),
-            "thread_root_id": marker.get("thread_root_id"),
-            "thread": [
+        }
+        if marker.get("command_kind") == "issue_comment":
+            command = marker.get("command")
+            snapshot["command"] = (
+                {
+                    field: command.get(field)
+                    for field in immutable_comment_fields
+                }
+                if isinstance(command, dict)
+                else None
+            )
+            snapshot["since_commit"] = marker.get("since_commit")
+            snapshot["feedback"] = [
                 {
                     field: comment.get(field)
-                    for field in immutable_thread_fields
+                    for field in immutable_comment_fields
+                }
+                for comment in marker.get("feedback", [])
+                if isinstance(comment, dict)
+            ]
+        else:
+            snapshot["thread_root_id"] = marker.get("thread_root_id")
+            snapshot["thread"] = [
+                {
+                    field: comment.get(field)
+                    for field in immutable_comment_fields
                 }
                 for comment in marker.get("thread", [])
                 if isinstance(comment, dict)
-            ],
-        }
-        for marker in markers
-        if isinstance(marker, dict)
-    ]
+            ]
+        snapshots.append(snapshot)
+    return snapshots
 
 
 def require_markers_unchanged(state: dict[str, Any]) -> None:
@@ -2250,18 +2609,24 @@ def push_commit(
 
 
 def acknowledgement_body(
-    command_id: int, commit_sha: str, result: dict[str, Any]
+    command_ids: list[int],
+    commit_sha: str,
+    result: dict[str, Any],
 ) -> str:
     prefix = (
         "Addressed by Codex"
         if result["outcome"] == "changed"
         else "No repository change was required"
     )
+    markers = "\n".join(
+        f"<!-- codex-addressed command-id={command_id} "
+        f"commit={commit_sha} -->"
+        for command_id in command_ids
+    )
     return (
         f"{prefix} at `{commit_sha}`. "
         f"{safe_github_text(result['summary'])}\n\n"
-        f"<!-- codex-addressed command-id={command_id} "
-        f"commit={commit_sha} -->"
+        f"{markers}"
     )
 
 
@@ -2271,19 +2636,24 @@ def acknowledge_markers(
     repository = state["repository"]
     pull_request_number = state["target"]["pull_request_number"]
     for marker in state["markers"]:
-        run_gh_json(
-            [
-                f"repos/{repository}/pulls/{pull_request_number}/comments/"
-                f"{marker['thread_root_id']}/replies"
-            ],
-            input_value={
-                "body": acknowledgement_body(
-                    marker["command_id"],
-                    commit_sha,
-                    result,
-                )
-            },
+        body = acknowledgement_body(
+            marker.get("command_ids") or [marker["command_id"]],
+            commit_sha,
+            result,
         )
+        if marker.get("command_kind") == "issue_comment":
+            run_gh_json(
+                [f"repos/{repository}/issues/{pull_request_number}/comments"],
+                input_value={"body": body},
+            )
+        else:
+            run_gh_json(
+                [
+                    f"repos/{repository}/pulls/{pull_request_number}/comments/"
+                    f"{marker['thread_root_id']}/replies"
+                ],
+                input_value={"body": body},
+            )
 
 
 def publish_ambiguous(state: dict[str, Any]) -> None:
