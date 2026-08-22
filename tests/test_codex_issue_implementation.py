@@ -981,6 +981,52 @@ class ValidationPolicyTest(unittest.TestCase):
                 }
             )
 
+    def test_model_result_cannot_publish_a_runtime_credential(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state_path = root / "state.json"
+            result_path = root / "result.json"
+            artifact_path = root / "artifact.json"
+            patch_path = root / "change.patch"
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "action": "implement",
+                        "target": {"sha": "a" * 40},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            result_path.write_text(
+                json.dumps(
+                    {
+                        "outcome": "no_change",
+                        "summary": "Credential: test-session-token",
+                        "validation": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.dict(
+                os.environ,
+                {"AWS_SESSION_TOKEN": "test-session-token"},
+                clear=True,
+            ):
+                with self.assertRaisesRegex(
+                    IMPLEMENTATION.ImplementationError,
+                    "model result contains a runtime credential",
+                ):
+                    IMPLEMENTATION.validate_model_command(
+                        result_path,
+                        state_path,
+                        artifact_path,
+                        patch_path,
+                        root / "unused-workspace",
+                    )
+
+            self.assertFalse(artifact_path.exists())
+
     def test_output_schema_matches_publication_text_validation(self):
         summary_pattern = SCHEMA["properties"]["summary"]["pattern"]
         validation_pattern = SCHEMA["properties"]["validation"]["items"][
@@ -1453,6 +1499,100 @@ class ValidationPolicyTest(unittest.TestCase):
                         workspace,
                     )
 
+    def test_workflow_rename_preserves_the_protected_source_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "repository"
+            workspace.mkdir()
+            os.environ.setdefault("GIT_AUTHOR_NAME", "Test")
+            os.environ.setdefault("GIT_AUTHOR_EMAIL", "test@example.com")
+            os.environ.setdefault("GIT_COMMITTER_NAME", "Test")
+            os.environ.setdefault("GIT_COMMITTER_EMAIL", "test@example.com")
+            self.assertEqual(
+                IMPLEMENTATION.run_command(
+                    ["git", "init", "-b", "main"],
+                    cwd=workspace,
+                ).returncode,
+                0,
+            )
+            workflow_dir = workspace / ".github/workflows"
+            workflow_dir.mkdir(parents=True)
+            (workflow_dir / "build.yml").write_text(
+                "permissions: read-all\n",
+                encoding="utf-8",
+            )
+            IMPLEMENTATION.run_command(
+                ["git", "add", "--all"],
+                cwd=workspace,
+            )
+            IMPLEMENTATION.run_command(
+                ["git", "commit", "-m", "initial"],
+                cwd=workspace,
+            )
+            sha = IMPLEMENTATION.git_output(
+                ["rev-parse", "HEAD"],
+                workspace,
+            ).strip()
+            (workspace / "docs").mkdir()
+            IMPLEMENTATION.run_command(
+                [
+                    "git",
+                    "mv",
+                    ".github/workflows/build.yml",
+                    "docs/build.yml",
+                ],
+                cwd=workspace,
+            )
+            state_path = root / "state.json"
+            result_path = root / "result.json"
+            artifact_path = root / "artifact.json"
+            patch_path = root / "change.patch"
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "action": "implement",
+                        "target": {"sha": sha},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            result_path.write_text(
+                json.dumps(
+                    {
+                        "outcome": "changed",
+                        "summary": "Move the workflow.",
+                        "validation": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.dict(
+                os.environ,
+                {"ALLOW_WORKFLOW_CHANGES": "false"},
+                clear=True,
+            ):
+                with self.assertRaisesRegex(
+                    IMPLEMENTATION.ImplementationError,
+                    "explicit opt-in",
+                ):
+                    IMPLEMENTATION.validate_model_command(
+                        result_path,
+                        state_path,
+                        artifact_path,
+                        patch_path,
+                        workspace,
+                    )
+
+            IMPLEMENTATION.git_output(["add", "--all"], workspace)
+            self.assertEqual(
+                IMPLEMENTATION.changed_paths(workspace),
+                [
+                    ".github/workflows/build.yml",
+                    "docs/build.yml",
+                ],
+            )
+
     def test_push_uses_exact_force_with_lease(self):
         workspace = Path("/workspace")
         cases = (
@@ -1634,6 +1774,7 @@ class WorkflowPolicyTest(unittest.TestCase):
         )
         assert checkout is not None
         self.assertIn("sparse-checkout-cone-mode: false", checkout.group(1))
+        self.assertIn("scripts/serve_aws_credentials.py", checkout.group(1))
 
     def test_numeric_max_issues_preserves_zero_for_validation(self):
         expression = (
@@ -1688,6 +1829,28 @@ class WorkflowPolicyTest(unittest.TestCase):
             block,
         )
         self.assertNotIn("--skip-git-repo-check", block)
+        self.assertNotIn("codex-implementation-env", WORKFLOW)
+        self.assertIn(
+            "AWS_CONTAINER_CREDENTIALS_FULL_URI=\"$credential_uri\"",
+            block,
+        )
+        self.assertIn("--sandbox-state-disable-network", block)
+        self.assertIn(
+            "network-disabled model tools reached AWS credentials",
+            block,
+        )
+        self.assertIn("/usr/bin/true", block)
+        self.assertIn("sudo -u codex-implement -- env -i", block)
+        model_command_start = block.rindex(
+            "sudo -u codex-implement -- env -i"
+        )
+        model_command = block[
+            model_command_start:
+            block.index('"$codex_bin" \\\n', model_command_start)
+        ]
+        self.assertNotIn("AWS_ACCESS_KEY_ID", model_command)
+        self.assertNotIn("AWS_SECRET_ACCESS_KEY", model_command)
+        self.assertNotIn("AWS_SESSION_TOKEN", model_command)
         self.assertIn("--disable multi_agent", block)
         self.assertIn("-o root", block)
         self.assertIn("-m 440", block)

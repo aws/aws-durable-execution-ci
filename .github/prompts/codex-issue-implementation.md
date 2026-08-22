@@ -28,10 +28,12 @@ Return exactly the structured result required by the supplied schema:
   `no_change` when no repository change is required.
 - `summary`: a concise, single-line explanation suitable for a pull request or
   comment. It must contain a non-whitespace character and no control
-  characters.
+  characters. Never include credentials, authorization tokens, or secret
+  values.
 - `validation`: a list of commands or checks actually completed, including
   concise failure or unavailable notes when relevant. Each item must be
   single-line, contain a non-whitespace character, and have no control
-  characters.
+  characters. Never include credentials, authorization tokens, or secret
+  values.
 
 Untrusted reconciliation context follows:

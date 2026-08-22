@@ -225,6 +225,7 @@ jobs:
             .github/prompts/codex-issue-implementation-schema.json
             scripts/codex_issue_implementation.py
             scripts/prepare_codex_implementation_user.sh
+            scripts/serve_aws_credentials.py
           sparse-checkout-cone-mode: false
           persist-credentials: false
 
@@ -339,13 +340,6 @@ jobs:
 
           bash "$TOOLKIT_PATH/scripts/prepare_codex_implementation_user.sh"
 
-          sudo sh -c \
-            'printf "%s\n" \
-              "Defaults:runner env_keep += \"AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_REGION AWS_DEFAULT_REGION\"" \
-              > /etc/sudoers.d/codex-implementation-env'
-          sudo chmod 440 /etc/sudoers.d/codex-implementation-env
-          sudo visudo -cf /etc/sudoers.d/codex-implementation-env
-
           current_userns="$(
             sysctl -n kernel.unprivileged_userns_clone 2>/dev/null || true
           )"
@@ -410,6 +404,8 @@ jobs:
             ${{ steps.aws-credentials.outputs.aws-secret-access-key }}
           AWS_SESSION_TOKEN: >-
             ${{ steps.aws-credentials.outputs.aws-session-token }}
+          AWS_CREDENTIAL_EXPIRATION: >-
+            ${{ steps.aws-credentials.outputs.aws-expiration }}
           AWS_REGION: us-east-1
           AWS_DEFAULT_REGION: us-east-1
           CODEX_MODEL: ${{ steps.config.outputs.model }}
@@ -437,9 +433,21 @@ jobs:
           output_file="${output_dir}/result.json"
           output_schema="${output_dir}/schema.json"
           prompt_file="${RUNNER_TEMP}/codex-implementation-prompt.md"
+          credential_proxy_dir="${RUNNER_TEMP}/codex-credential-proxy"
+          credential_port_file="${credential_proxy_dir}/port"
+          credential_log="${credential_proxy_dir}/server.log"
+          credential_proxy_pid=""
           trusted_prompt="${TOOLKIT_PATH}/.github/prompts/codex-issue-implementation.md"
           trusted_schema="${TOOLKIT_PATH}/.github/prompts/codex-issue-implementation-schema.json"
-          trap 'sudo rm -rf "$output_parent"' EXIT
+          cleanup() {
+            if [[ -n "$credential_proxy_pid" ]]; then
+              kill "$credential_proxy_pid" 2>/dev/null || true
+              wait "$credential_proxy_pid" 2>/dev/null || true
+            fi
+            rm -rf "$credential_proxy_dir"
+            sudo rm -rf "$output_parent"
+          }
+          trap cleanup EXIT
 
           {
             cat "$trusted_prompt"
@@ -461,16 +469,89 @@ jobs:
             /dev/null \
             "$output_file"
 
+          install -d -m 700 "$credential_proxy_dir"
+          credential_proxy_token="$(openssl rand -hex 32)"
+          echo "::add-mask::$credential_proxy_token"
+          CODEX_CREDENTIAL_PROXY_TOKEN="$credential_proxy_token" \
+          python3 \
+            "$TOOLKIT_PATH/scripts/serve_aws_credentials.py" \
+            "$credential_port_file" \
+            >"$credential_log" 2>&1 &
+          credential_proxy_pid="$!"
+
+          for _ in {1..100}; do
+            if [[ -s "$credential_port_file" ]]; then
+              break
+            fi
+            if ! kill -0 "$credential_proxy_pid" 2>/dev/null; then
+              cat "$credential_log" >&2
+              exit 1
+            fi
+            sleep 0.1
+          done
+          if [[ ! -s "$credential_port_file" ]]; then
+            echo "AWS credential proxy did not become ready" >&2
+            exit 1
+          fi
+          credential_port="$(cat "$credential_port_file")"
+          if [[ ! "$credential_port" =~ ^[0-9]+$ ]]; then
+            echo "AWS credential proxy returned an invalid port" >&2
+            exit 1
+          fi
+          credential_uri="http://127.0.0.1:${credential_port}/credentials"
+
+          sudo -u codex-implement -- env -i \
+            HOME=/home/codex-implement \
+            PATH="$PATH" \
+            "$codex_bin" \
+            sandbox \
+            --sandbox-state-disable-network \
+            /usr/bin/true
+
+          # A model tool that learns the proxy token must still be unable to
+          # reach the runner-owned credential endpoint.
+          if sudo -u codex-implement -- env -i \
+            HOME=/home/codex-implement \
+            PATH="$PATH" \
+            "$codex_bin" \
+            sandbox \
+            --sandbox-state-disable-network \
+            /usr/bin/curl \
+            --fail \
+            --silent \
+            --show-error \
+            --header "Authorization: $credential_proxy_token" \
+            "$credential_uri" \
+            >/dev/null 2>&1; then
+            echo "network-disabled model tools reached AWS credentials" >&2
+            exit 1
+          fi
+
+          runtime_aws_access_key_id="$AWS_ACCESS_KEY_ID"
+          runtime_aws_secret_access_key="$AWS_SECRET_ACCESS_KEY"
+          runtime_aws_session_token="$AWS_SESSION_TOKEN"
+          unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+
           # The runner intentionally opens stdin before sudo changes users.
           # shellcheck disable=SC2024
-          sudo -u codex-implement -- timeout \
-            --signal=TERM \
-            --kill-after=30s \
-            40m \
-            env \
+          sudo -u codex-implement -- env -i \
+            AWS_CONTAINER_AUTHORIZATION_TOKEN="$credential_proxy_token" \
+            AWS_CONTAINER_CREDENTIALS_FULL_URI="$credential_uri" \
+            AWS_DEFAULT_REGION="$AWS_DEFAULT_REGION" \
+            AWS_EC2_METADATA_DISABLED=true \
+            AWS_REGION="$AWS_REGION" \
             CODEX_HOME=/home/codex-implement/.codex \
             GIT_OPTIONAL_LOCKS=0 \
             HOME=/home/codex-implement \
+            LANG=C.UTF-8 \
+            LOGNAME=codex-implement \
+            PATH="$PATH" \
+            SHELL=/bin/bash \
+            USER=codex-implement \
+            /usr/bin/timeout \
+            --signal=TERM \
+            --kill-after=30s \
+            40m \
             "$codex_bin" \
             --ask-for-approval never \
             --sandbox workspace-write \
@@ -518,6 +599,11 @@ jobs:
           sudo chown -R runner:runner "$GITHUB_WORKSPACE"
           sudo chmod -R u+rwX,go-rwx "$GITHUB_WORKSPACE"
 
+          export AWS_ACCESS_KEY_ID="$runtime_aws_access_key_id"
+          export AWS_SECRET_ACCESS_KEY="$runtime_aws_secret_access_key"
+          export AWS_SESSION_TOKEN="$runtime_aws_session_token"
+          export AWS_CONTAINER_AUTHORIZATION_TOKEN="$credential_proxy_token"
+          export CODEX_CREDENTIAL_PROXY_TOKEN="$credential_proxy_token"
           python3 "$TOOLKIT_PATH/scripts/codex_issue_implementation.py" \
             validate-model \
             "${RUNNER_TEMP}/codex-implementation-result.json" \
@@ -525,6 +611,12 @@ jobs:
             "${RUNNER_TEMP}/codex-implementation-artifact.json" \
             "${RUNNER_TEMP}/codex-implementation.patch" \
             "$GITHUB_WORKSPACE"
+          unset \
+            AWS_ACCESS_KEY_ID \
+            AWS_SECRET_ACCESS_KEY \
+            AWS_SESSION_TOKEN \
+            AWS_CONTAINER_AUTHORIZATION_TOKEN \
+            CODEX_CREDENTIAL_PROXY_TOKEN
 
       - name: Check out exact publication target
         if: >-

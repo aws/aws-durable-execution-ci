@@ -1170,7 +1170,7 @@ def git_output(arguments: list[str], workspace: Path) -> str:
 
 def changed_paths(workspace: Path) -> list[str]:
     raw_paths = git_output(
-        ["diff", "--cached", "--name-only", "-z"],
+        ["diff", "--cached", "--name-only", "--no-renames", "-z"],
         workspace,
     )
     paths = [path for path in raw_paths.split("\0") if path]
@@ -1194,16 +1194,18 @@ def reject_gitlinks(workspace: Path, paths: list[str]) -> None:
                 )
 
 
-def patch_contains_secret(patch: bytes) -> bool:
+def contains_runtime_credential(content: bytes) -> bool:
     for name in (
         "AWS_ACCESS_KEY_ID",
         "AWS_SECRET_ACCESS_KEY",
         "AWS_SESSION_TOKEN",
+        "AWS_CONTAINER_AUTHORIZATION_TOKEN",
+        "CODEX_CREDENTIAL_PROXY_TOKEN",
         "GH_TOKEN",
         "GITHUB_TOKEN",
     ):
         value = os.environ.get(name, "")
-        if value and value.encode("utf-8") in patch:
+        if value and value.encode("utf-8") in content:
             return True
     return False
 
@@ -1222,6 +1224,16 @@ def validate_model_command(
     ):
         raise ImplementationError("prepared state does not require a model")
     result = validate_model_result(read_json(result_path, "model result"))
+    serialized_result = json.dumps(
+        result,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    if contains_runtime_credential(serialized_result):
+        raise ImplementationError(
+            "model result contains a runtime credential"
+        )
 
     expected_sha = state.get("target", {}).get("sha")
     actual_sha = git_output(["rev-parse", "HEAD"], workspace).strip()
@@ -1266,7 +1278,7 @@ def validate_model_command(
     patch = patch_result.stdout
     if len(patch) > MAX_PATCH_BYTES:
         raise ImplementationError("model patch exceeds the size limit")
-    if patch_contains_secret(patch):
+    if contains_runtime_credential(patch):
         raise ImplementationError("model patch contains a runtime credential")
 
     has_changes = bool(paths)

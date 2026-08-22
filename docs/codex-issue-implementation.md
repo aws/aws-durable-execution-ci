@@ -212,16 +212,20 @@ The workflow:
 - runs Codex as an unprivileged user with a writable worktree, read-only Git
   metadata, an exact safe-directory registration, and optional Git locks
   disabled;
+- serves Bedrock credentials through a runner-owned loopback endpoint and
+  verifies that network-disabled model tools cannot reach it; Codex receives
+  only the endpoint URI and a short-lived authorization token;
 - uses `workspace-write` with approval prompts disabled, outbound network and
   web search disabled, temporary directories excluded, and apps, plugins,
   hooks, image, browser, computer, and multi-agent tools disabled;
-- exposes only the Bedrock credential chain to the Codex process and removes
-  AWS, GitHub, key, secret, and token variables from spawned shell commands;
+- removes AWS, GitHub, key, secret, and token variables from spawned shell
+  commands;
 - never places the publication token or automatic `GITHUB_TOKEN` in the Codex
   step;
 - accepts only a closed JSON result contract and a size-limited Git patch;
-- rejects gitlinks, leaked runtime credentials, unexpected workflow changes,
-  stale state, and changes outside the checked-out repository;
+- rejects gitlinks, runtime credentials in both model-authored result text and
+  patches, protected workflow renames or edits, stale state, and changes
+  outside the checked-out repository;
 - re-checks all mutation preconditions in the publication step before the
   publication token is used.
 
