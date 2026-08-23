@@ -148,11 +148,15 @@ def implementation_comment(
     }
 
 
-def implementation_command(command_id=500, author="maintainer"):
+def implementation_command(
+    command_id=500,
+    author="maintainer",
+    body="/ai implement",
+):
     return {
         "id": command_id,
         "author": author,
-        "body": "/ai implement",
+        "body": body,
         "created_at": "2026-08-22T00:00:00Z",
         "updated_at": "2026-08-22T00:00:00Z",
     }
@@ -240,7 +244,7 @@ def write_model_inputs(root, sha):
 
 
 class EventSelectionTest(unittest.TestCase):
-    def test_exact_implementation_comment_requires_current_write_permission(
+    def test_implementation_comment_requires_current_write_permission(
         self,
     ):
         event = {
@@ -283,6 +287,31 @@ class EventSelectionTest(unittest.TestCase):
                 [],
             )
         permission.assert_not_called()
+
+    def test_implementation_command_accepts_horizontal_whitespace(self):
+        commands = (
+            " /ai implement ",
+            "\t/ai\timplement\t",
+            "  /ai    implement\t",
+        )
+        for command in commands:
+            event = {
+                "action": "created",
+                "issue": {"number": 31, "state": "open"},
+                "comment": implementation_comment(body=command),
+            }
+            with self.subTest(command=command), patch.object(
+                IMPLEMENTATION,
+                "collaborator_has_write_permission",
+                return_value=True,
+            ):
+                self.assertEqual(
+                    IMPLEMENTATION.resolve_issue_comment_event(
+                        "aws/example",
+                        event,
+                    ),
+                    [issue_item()],
+                )
 
     def test_issue_event_address_work_uses_pull_request_scope(self):
         event = {
@@ -369,12 +398,19 @@ class EventSelectionTest(unittest.TestCase):
 
     def test_latest_authorized_implementation_command_is_prepared(self):
         comments = [
-            implementation_comment(command_id=500),
+            implementation_comment(
+                command_id=500,
+                body="\t/ai   implement\t",
+            ),
             implementation_comment(
                 command_id=600,
                 body="/ai implement please",
             ),
-            implementation_comment(command_id=700, author="admin"),
+            implementation_comment(
+                command_id=700,
+                author="admin",
+                body=" /ai\timplement ",
+            ),
         ]
         with patch.object(
             IMPLEMENTATION,
@@ -390,7 +426,11 @@ class EventSelectionTest(unittest.TestCase):
                     "aws/example",
                     31,
                 ),
-                implementation_command(command_id=700, author="admin"),
+                implementation_command(
+                    command_id=700,
+                    author="admin",
+                    body=" /ai\timplement ",
+                ),
             )
 
     def test_changed_implementation_command_invalidates_prepared_state(self):
@@ -1132,7 +1172,7 @@ class EventSelectionTest(unittest.TestCase):
             ),
         )
 
-    def test_exact_review_command_requires_current_write_permission(self):
+    def test_review_command_requires_current_write_permission(self):
         event = {
             "action": "created",
             "comment": {
@@ -1168,6 +1208,38 @@ class EventSelectionTest(unittest.TestCase):
                 [],
             )
         permission.assert_not_called()
+
+    def test_address_command_accepts_horizontal_whitespace(self):
+        commands = (
+            " /ai address ",
+            "\t/ai\taddress\t",
+            "  /ai    address\t",
+        )
+        for command in commands:
+            event = {
+                "action": "created",
+                "comment": {
+                    "body": command,
+                    "in_reply_to_id": 10,
+                    "user": {
+                        "login": "maintainer",
+                        "type": "User",
+                    },
+                },
+                "pull_request": {"number": 44, "state": "open"},
+            }
+            with self.subTest(command=command), patch.object(
+                IMPLEMENTATION,
+                "collaborator_has_write_permission",
+                return_value=True,
+            ):
+                self.assertEqual(
+                    IMPLEMENTATION.resolve_review_event(
+                        "aws/example",
+                        event,
+                    ),
+                    [pull_request_item()],
+                )
 
     def test_pr_conversation_address_command_is_authorized(self):
         event = {
@@ -1412,7 +1484,7 @@ class MarkerPolicyTest(unittest.TestCase):
             {
                 "id": 700,
                 "in_reply_to_id": 600,
-                "body": "/ai address",
+                "body": "\t/ai   address\t",
                 "path": "src/example.py",
                 "user": {"login": "maintainer", "type": "User"},
                 "created_at": "2026-08-22T00:01:00Z",

@@ -16,8 +16,12 @@ from typing import Any
 
 ADDRESS_COMMAND = "/ai address"
 IMPLEMENT_COMMAND = "/ai implement"
+COMMAND_PATTERNS = {
+    ADDRESS_COMMAND: re.compile(r"^[ \t]*/ai[ \t]+address[ \t]*$"),
+    IMPLEMENT_COMMAND: re.compile(r"^[ \t]*/ai[ \t]+implement[ \t]*$"),
+}
 AI_COMMAND_PATTERN = re.compile(
-    r"^/ai\s+(?:address|implement)(?:\s|$)",
+    r"^/ai\s+(?:address|implement|review)(?:\s|$)",
     re.IGNORECASE,
 )
 ACKNOWLEDGEMENT_PATTERN = re.compile(
@@ -915,6 +919,11 @@ def is_ai_command_comment(body: str) -> bool:
     return AI_COMMAND_PATTERN.search(body.strip()) is not None
 
 
+def matches_ai_command(body: str, command: str) -> bool:
+    pattern = COMMAND_PATTERNS.get(command)
+    return pattern is not None and pattern.fullmatch(body) is not None
+
+
 def is_publisher_acknowledgement(
     value: dict[str, Any],
     actor: str,
@@ -1001,7 +1010,7 @@ def unprocessed_markers(
             type(command_id) is not int
             or ("review_comment", command_id) in acknowledged
             or not isinstance(body, str)
-            or body.strip() != ADDRESS_COMMAND
+            or not matches_ai_command(body, ADDRESS_COMMAND)
             or type(root_id) is not int
             or is_bot_user(user)
         ):
@@ -1051,7 +1060,7 @@ def unprocessed_markers(
             type(command_id) is not int
             or ("issue_comment", command_id) in acknowledged
             or not isinstance(body, str)
-            or body.strip() != ADDRESS_COMMAND
+            or not matches_ai_command(body, ADDRESS_COMMAND)
             or not isinstance(comment.get("created_at"), str)
             or not isinstance(comment.get("updated_at"), str)
             or is_bot_user(user)
@@ -1576,7 +1585,7 @@ def resolve_issue_comment_event(
         or type(issue.get("number")) is not int
         or not isinstance(comment, dict)
         or not isinstance(comment.get("body"), str)
-        or comment["body"].strip() != expected_command
+        or not matches_ai_command(comment["body"], expected_command)
         or is_bot_user(comment.get("user"))
     ):
         return []
@@ -1605,7 +1614,7 @@ def resolve_review_event(
         return []
     if (
         not isinstance(comment.get("body"), str)
-        or comment["body"].strip() != ADDRESS_COMMAND
+        or not matches_ai_command(comment["body"], ADDRESS_COMMAND)
         or type(comment.get("in_reply_to_id")) is not int
         or is_bot_user(comment.get("user"))
         or pull_request.get("state") != "open"
@@ -2826,7 +2835,7 @@ def implementation_command_snapshot(
     if (
         type(comment.get("id")) is not int
         or not isinstance(comment.get("body"), str)
-        or comment["body"].strip() != IMPLEMENT_COMMAND
+        or not matches_ai_command(comment["body"], IMPLEMENT_COMMAND)
         or not isinstance(comment.get("created_at"), str)
         or not isinstance(comment.get("updated_at"), str)
         or is_bot_user(user)

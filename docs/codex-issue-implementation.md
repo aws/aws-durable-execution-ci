@@ -67,8 +67,9 @@ triggers to the caller.
 
 ## Repository setup
 
-Post `/ai implement` as a standalone comment on an open issue. The trimmed
-body must exactly match the command. The author must currently have `write`,
+Post `/ai implement` as a standalone comment on an open issue. Leading and
+trailing spaces or tabs are ignored, and one or more spaces or tabs may
+separate `/ai` and `implement`. The author must currently have `write`,
 `maintain`, or `admin` repository permission and must not be a bot. The daily
 schedule recovers missed events, failed runs, and branches pushed before pull
 request creation completed by finding open issues with an authorized command.
@@ -197,8 +198,9 @@ ambiguity.
 ## Review marker
 
 Post `/ai address` as a reply in a pull request review thread to address that
-complete thread. The trimmed body must exactly match the command. All currently
-unprocessed marked threads are reconciled together.
+complete thread. Leading and trailing spaces or tabs are ignored, and one or
+more spaces or tabs may separate `/ai` and `address`. All currently unprocessed
+marked threads are reconciled together.
 
 Post `/ai address` as a top-level pull request conversation comment to address
 all conversation comments, submitted review summaries, and inline review
