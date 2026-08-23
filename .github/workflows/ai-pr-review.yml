@@ -3,6 +3,8 @@ name: AI PR Review
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review]
+  issue_comment:
+    types: [created]
   workflow_call:
     inputs:
       prompt-path:
@@ -48,53 +50,72 @@ on:
 permissions: {}
 
 concurrency:
-  group: ai-pr-review-${{ github.event.pull_request.number }}
+  group: >-
+    ai-pr-review-${{
+      github.event.pull_request.number ||
+      github.event.issue.number ||
+      github.run_id
+    }}-${{
+      github.event_name == 'issue_comment' &&
+      github.actor ||
+      'automatic'
+    }}
   cancel-in-progress: true
 
 jobs:
-  # Direct pull_request_target runs have no workflow_call inputs. Formatting
-  # distinguishes a missing value from an explicit false supplied by a caller.
-  approve_review:
-    name: Approve AI PR review
+  resolve_review:
+    name: Resolve AI PR review
     if: >-
+      github.event_name == 'pull_request_target' ||
       (
-        format('{0}', inputs['run-claude']) != 'false' ||
-        format('{0}', inputs['run-codex']) != 'false'
-      ) &&
-      (
-        github.event.pull_request.user.login == 'dependabot[bot]' ||
-        github.event.pull_request.draft ||
-        github.event.pull_request.head.repo.full_name != github.repository
+        github.event_name == 'issue_comment' &&
+        github.event.action == 'created' &&
+        github.event.issue.pull_request &&
+        github.event.comment.body == '/ai review'
       )
     runs-on: ubuntu-latest
-    environment: ai-pr-review
-    permissions: {}
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      review-requested: ${{ steps.resolve.outputs.review-requested }}
+      pull-request-number: ${{ steps.resolve.outputs.pull-request-number }}
+      base-sha: ${{ steps.resolve.outputs.base-sha }}
+      head-sha: ${{ steps.resolve.outputs.head-sha }}
     steps:
-      - name: Record approval
-        env:
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: echo "Approved review of $HEAD_SHA"
+      - name: Check out AI review toolkit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .ai-review-toolkit
+          sparse-checkout: scripts
+          persist-credentials: false
 
+      - name: Resolve review request
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .ai-review-toolkit/scripts/resolve_ai_review.py
+
+  # Direct event runs have no workflow_call inputs. Formatting distinguishes a
+  # missing value from an explicit false supplied by a caller.
   claude-review:
     name: Claude review
-    needs: approve_review
+    needs: resolve_review
     if: >-
-      always() &&
-      format('{0}', inputs['run-claude']) != 'false' &&
-      (
-        (
-          github.event.pull_request.user.login != 'dependabot[bot]' &&
-          !github.event.pull_request.draft &&
-          github.event.pull_request.head.repo.full_name == github.repository
-        ) ||
-        needs.approve_review.result == 'success'
-      )
+      needs.resolve_review.outputs.review-requested == 'true' &&
+      format('{0}', inputs['run-claude']) != 'false'
     permissions:
       contents: read
       id-token: write
       pull-requests: write
     uses: ./.github/workflows/claude-review.yml
     with:
+      pull-request-number: >-
+        ${{ needs.resolve_review.outputs.pull-request-number }}
+      base-sha: ${{ needs.resolve_review.outputs.base-sha }}
+      head-sha: ${{ needs.resolve_review.outputs.head-sha }}
       prompt-path: ${{ inputs['prompt-path'] }}
       model: ${{ inputs['claude-model'] || 'us.anthropic.claude-sonnet-5' }}
       reasoning-effort: ${{ inputs['claude-reasoning-effort'] || 'xhigh' }}
@@ -102,24 +123,20 @@ jobs:
 
   codex-review:
     name: Codex review
-    needs: approve_review
+    needs: resolve_review
     if: >-
-      always() &&
-      format('{0}', inputs['run-codex']) != 'false' &&
-      (
-        (
-          github.event.pull_request.user.login != 'dependabot[bot]' &&
-          !github.event.pull_request.draft &&
-          github.event.pull_request.head.repo.full_name == github.repository
-        ) ||
-        needs.approve_review.result == 'success'
-      )
+      needs.resolve_review.outputs.review-requested == 'true' &&
+      format('{0}', inputs['run-codex']) != 'false'
     permissions:
       contents: read
       id-token: write
       pull-requests: write
     uses: ./.github/workflows/codex-review.yml
     with:
+      pull-request-number: >-
+        ${{ needs.resolve_review.outputs.pull-request-number }}
+      base-sha: ${{ needs.resolve_review.outputs.base-sha }}
+      head-sha: ${{ needs.resolve_review.outputs.head-sha }}
       prompt-path: ${{ inputs['prompt-path'] }}
       model: ${{ inputs['codex-model'] || 'openai.gpt-5.6-sol' }}
       reasoning-effort: ${{ inputs['codex-reasoning-effort'] || 'xhigh' }}

@@ -147,19 +147,59 @@ class AiPrReviewWorkflowTest(unittest.TestCase):
             CODEX_WORKFLOW,
         )
 
-    def test_approval_requires_at_least_one_enabled_reviewer(self):
-        approval = job_block(AI_WORKFLOW, "approve_review")
+    def test_issue_comment_command_is_resolved_before_review(self):
+        resolve = job_block(AI_WORKFLOW, "resolve_review")
 
-        self.assertIn(enabled_guard("run-claude"), approval)
-        self.assertIn(enabled_guard("run-codex"), approval)
-        self.assertRegex(
-            approval,
-            re.compile(
-                re.escape(enabled_guard("run-claude"))
-                + r"\s+\|\|\s+"
-                + re.escape(enabled_guard("run-codex"))
-            ),
+        self.assertIn("issue_comment:", AI_WORKFLOW)
+        self.assertIn("types: [created]", AI_WORKFLOW)
+        self.assertIn("github.actor ||", AI_WORKFLOW)
+        self.assertIn("github.event.comment.body == '/ai review'", resolve)
+        self.assertIn(
+            "python3 .ai-review-toolkit/scripts/resolve_ai_review.py",
+            resolve,
         )
+        self.assertIn("contents: read", resolve)
+        self.assertIn("pull-requests: read", resolve)
+
+    def test_reviewers_use_resolved_pull_request_identity(self):
+        for name, workflow in (
+            ("claude-review", CLAUDE_WORKFLOW),
+            ("codex-review", CODEX_WORKFLOW),
+        ):
+            with self.subTest(reviewer=name):
+                reviewer = job_block(AI_WORKFLOW, name)
+                self.assertIn(
+                    "needs: resolve_review",
+                    reviewer,
+                )
+                self.assertNotIn("approve_review", reviewer)
+                self.assertIn(
+                    "pull-request-number: >-",
+                    reviewer,
+                )
+                self.assertIn(
+                    "${{ needs.resolve_review.outputs.base-sha }}",
+                    reviewer,
+                )
+                self.assertIn(
+                    "${{ needs.resolve_review.outputs.head-sha }}",
+                    reviewer,
+                )
+                for input_name in (
+                    "pull-request-number",
+                    "base-sha",
+                    "head-sha",
+                ):
+                    self.assertIn(
+                        "required: true",
+                        input_block(workflow, input_name),
+                    )
+                self.assertNotIn("github.event.pull_request", workflow)
+
+    def test_workflow_has_no_manual_approval_job_or_environment(self):
+        self.assertNotIn("approve_review:", AI_WORKFLOW)
+        self.assertNotIn("environment: ai-pr-review\n", AI_WORKFLOW)
+        self.assertNotIn("approval-required", AI_WORKFLOW)
 
     def test_each_reviewer_job_has_its_own_guard(self):
         self.assertIn(
