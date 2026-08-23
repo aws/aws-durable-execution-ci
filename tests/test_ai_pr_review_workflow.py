@@ -152,7 +152,6 @@ class AiPrReviewWorkflowTest(unittest.TestCase):
 
         self.assertIn("issue_comment:", AI_WORKFLOW)
         self.assertIn("types: [created]", AI_WORKFLOW)
-        self.assertIn("github.actor ||", AI_WORKFLOW)
         self.assertIn(
             "contains(github.event.comment.body, '/ai')",
             resolve,
@@ -167,6 +166,33 @@ class AiPrReviewWorkflowTest(unittest.TestCase):
         )
         self.assertIn("contents: read", resolve)
         self.assertIn("pull-requests: read", resolve)
+
+    def test_only_resolved_reviews_enter_pr_scoped_concurrency(self):
+        entry_header = AI_WORKFLOW.split("jobs:", 1)[0]
+        self.assertNotIn("concurrency:", entry_header)
+
+        expected_groups = {
+            "claude": (
+                "ai-pr-review-claude-${{ github.repository_id }}-${{\n"
+                "      inputs['pull-request-number']\n"
+                "    }}"
+            ),
+            "codex": (
+                "ai-pr-review-codex-${{ github.repository_id }}-${{\n"
+                "      inputs['pull-request-number']\n"
+                "    }}"
+            ),
+        }
+        for reviewer, workflow in (
+            ("claude", CLAUDE_WORKFLOW),
+            ("codex", CODEX_WORKFLOW),
+        ):
+            with self.subTest(reviewer=reviewer):
+                header = workflow.split("jobs:", 1)[0]
+                self.assertIn(expected_groups[reviewer], header)
+                self.assertIn("cancel-in-progress: true", header)
+                self.assertNotIn("github.actor", header)
+                self.assertNotIn("github.event", header)
 
     def test_reviewers_use_resolved_pull_request_identity(self):
         for name, workflow in (

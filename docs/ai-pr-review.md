@@ -62,6 +62,13 @@ publication jobs directly for those pull requests. The workflow resolves the
 pull request's current base and head revisions before starting, and publication
 still stops if either revision changes while the review is running.
 
+Concurrency is applied only after resolution. Claude and Codex each use a
+separate group keyed by repository ID and pull request number, so both
+reviewers can run in parallel while a newer command or synchronization event
+replaces only an older run of the same reviewer on the same pull request.
+Ordinary comments that are not authorized review commands never enter those
+groups and cannot cancel an active review.
+
 The caller must declare the `issue_comment` event shown above. A reusable
 workflow does not add its own event triggers to the caller.
 

@@ -49,19 +49,6 @@ on:
 
 permissions: {}
 
-concurrency:
-  group: >-
-    ai-pr-review-${{
-      github.event.pull_request.number ||
-      github.event.issue.number ||
-      github.run_id
-    }}-${{
-      github.event_name == 'issue_comment' &&
-      github.actor ||
-      'automatic'
-    }}
-  cancel-in-progress: true
-
 jobs:
   resolve_review:
     name: Resolve AI PR review

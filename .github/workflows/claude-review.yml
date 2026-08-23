@@ -37,6 +37,13 @@ on:
 
 permissions: {}
 
+concurrency:
+  group: >-
+    ai-pr-review-claude-${{ github.repository_id }}-${{
+      inputs['pull-request-number']
+    }}
+  cancel-in-progress: true
+
 jobs:
   generate:
     name: Generate Claude review
