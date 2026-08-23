@@ -145,11 +145,9 @@ def resolve_review(
 
     base = pull_request.get("base")
     head = pull_request.get("head")
-    user = pull_request.get("user")
     if (
         not isinstance(base, dict)
         or not isinstance(head, dict)
-        or not isinstance(user, dict)
     ):
         raise ReviewResolutionError(
             "GitHub returned incomplete pull request metadata"
@@ -157,7 +155,6 @@ def resolve_review(
 
     base_sha = require_sha(base.get("sha"), "base SHA")
     head_sha = require_sha(head.get("sha"), "head SHA")
-    author = require_string(user.get("login"), "pull request author")
     head_repository = head.get("repo")
     head_repository_name = (
         head_repository.get("full_name")
@@ -167,6 +164,16 @@ def resolve_review(
     draft = pull_request.get("draft")
     if not isinstance(draft, bool):
         raise ReviewResolutionError("GitHub returned no pull request draft state")
+
+    author = None
+    if not command_requested:
+        user = pull_request.get("user")
+        if user is not None:
+            if not isinstance(user, dict):
+                raise ReviewResolutionError(
+                    "GitHub returned invalid pull request author metadata"
+                )
+            author = require_string(user.get("login"), "pull request author")
 
     if (
         not command_requested

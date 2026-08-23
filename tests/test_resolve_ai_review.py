@@ -23,7 +23,7 @@ REPOSITORY = "aws/example"
 
 def pull_request(
     *,
-    author: str = "contributor",
+    author: str | None = "contributor",
     draft: bool = False,
     head_repository: str | None = REPOSITORY,
     state: str = "open",
@@ -37,7 +37,7 @@ def pull_request(
         "number": 42,
         "state": state,
         "draft": draft,
-        "user": {"login": author},
+        "user": {"login": author} if author is not None else None,
         "base": {"sha": BASE_SHA},
         "head": {"sha": HEAD_SHA, "repo": head_repo},
     }
@@ -148,6 +148,26 @@ class ResolveAiReviewTest(unittest.TestCase):
             run_gh.call_args_list[1].args[0],
             f"repos/{REPOSITORY}/pulls/42",
         )
+
+    def test_authorized_review_command_allows_deleted_pull_request_author(self):
+        with patch.object(
+            RESOLVER,
+            "run_gh_json",
+            side_effect=[
+                {"permission": "write"},
+                pull_request(
+                    author=None,
+                    draft=True,
+                    head_repository="contributor/example",
+                ),
+            ],
+        ):
+            result = RESOLVER.resolve_review(
+                "issue_comment",
+                review_command_event(),
+            )
+
+        self.assertIsNotNone(result)
 
     def test_each_write_level_can_request_review(self):
         for permission in ("write", "maintain", "admin"):
