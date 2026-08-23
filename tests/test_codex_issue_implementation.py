@@ -1259,6 +1259,14 @@ class MarkerPolicyTest(unittest.TestCase):
             **publisher_comment,
             "submitted_at": timestamp,
         }
+        bot_comment = {
+            **human_comment,
+            "user": {"login": "reviewer[bot]", "type": "Bot"},
+        }
+        bot_review = {
+            **bot_comment,
+            "submitted_at": timestamp,
+        }
 
         self.assertTrue(
             IMPLEMENTATION.is_address_feedback(
@@ -1284,6 +1292,20 @@ class MarkerPolicyTest(unittest.TestCase):
         self.assertFalse(
             IMPLEMENTATION.is_review_feedback(
                 publisher_review,
+                None,
+                "publisher",
+            )
+        )
+        self.assertTrue(
+            IMPLEMENTATION.is_address_feedback(
+                bot_comment,
+                None,
+                "publisher",
+            )
+        )
+        self.assertTrue(
+            IMPLEMENTATION.is_review_feedback(
+                bot_review,
                 None,
                 "publisher",
             )
@@ -1423,20 +1445,23 @@ class MarkerPolicyTest(unittest.TestCase):
         )
         self.assertEqual(markers[0]["thread_root_id"], 600)
 
-    def test_future_dated_commit_cannot_hide_current_head_feedback(self):
+    def test_head_push_time_selects_feedback_created_for_current_head(self):
         review = [
             {
                 "id": 500,
                 "body": "Old inline feedback.",
                 "user": {"login": "reviewer", "type": "User"},
                 "created_at": "2026-08-22T00:00:00Z",
-                "updated_at": "2026-08-22T00:00:00Z",
+                "updated_at": "2026-08-22T00:04:00Z",
             },
             {
                 "id": 600,
                 "body": "New inline feedback.",
                 "path": "src/example.py",
-                "user": {"login": "reviewer", "type": "User"},
+                "user": {
+                    "login": "reviewer[bot]",
+                    "type": "Bot",
+                },
                 "created_at": "2026-08-22T00:02:00Z",
                 "updated_at": "2026-08-22T00:02:00Z",
             },
@@ -1447,12 +1472,15 @@ class MarkerPolicyTest(unittest.TestCase):
                 "body": "Old conversation feedback.",
                 "user": {"login": "reviewer", "type": "User"},
                 "created_at": "2026-08-22T00:00:00Z",
-                "updated_at": "2026-08-22T00:00:00Z",
+                "updated_at": "2026-08-22T00:04:00Z",
             },
             {
                 "id": 850,
                 "body": "New conversation feedback.",
-                "user": {"login": "reviewer", "type": "User"},
+                "user": {
+                    "login": "reviewer[bot]",
+                    "type": "Bot",
+                },
                 "created_at": "2026-08-22T00:03:00Z",
                 "updated_at": "2026-08-22T00:03:00Z",
             },
@@ -1474,11 +1502,26 @@ class MarkerPolicyTest(unittest.TestCase):
             "pull_request_reviews",
             return_value=[
                 {
+                    "id": 700,
+                    "body": "Old review summary.",
+                    "state": "CHANGES_REQUESTED",
+                    "commit_id": "a" * 40,
+                    "user": {
+                        "login": "reviewer[bot]",
+                        "type": "Bot",
+                    },
+                    "submitted_at": "2026-08-22T00:00:00Z",
+                    "updated_at": "2026-08-22T00:04:00Z",
+                },
+                {
                     "id": 750,
                     "body": "New review summary.",
                     "state": "CHANGES_REQUESTED",
                     "commit_id": "b" * 40,
-                    "user": {"login": "reviewer", "type": "User"},
+                    "user": {
+                        "login": "reviewer[bot]",
+                        "type": "Bot",
+                    },
                     "submitted_at": "2026-08-22T00:02:30Z",
                     "updated_at": "2026-08-22T00:02:30Z",
                 }

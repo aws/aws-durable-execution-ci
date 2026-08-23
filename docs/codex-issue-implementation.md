@@ -201,15 +201,17 @@ complete thread. The trimmed body must exactly match the command. All currently
 unprocessed marked threads are reconciled together.
 
 Post `/ai address` as a top-level pull request conversation comment to address
-all human conversation comments, submitted review summaries, and inline review
-comments created or edited at or after GitHub's server-recorded push time for
-the current head. If that activity record is unavailable, the workflow includes
-all otherwise eligible feedback rather than risk silently omitting feedback.
-Explicitly marked inline threads are included once as complete threads rather
-than duplicated in the batch feedback. Multiple pending top-level commands are
-acknowledged together. Command variants, bot comments, publisher-authored
-acknowledgements, and reactions do not start or contribute feedback.
-Acknowledgement-shaped text from any other human remains feedback.
+all conversation comments, submitted review summaries, and inline review
+comments created at or after GitHub's server-recorded push time for the current
+head. Human and bot-authored feedback are both included so automated review
+findings are addressed. Edits to older comments do not carry findings from a
+previous head into the batch. If that activity record is unavailable, the
+workflow includes all otherwise eligible feedback rather than risk silently
+omitting feedback. Explicitly marked inline threads are included once as
+complete threads rather than duplicated in the batch feedback. Multiple pending
+top-level commands are acknowledged together. Command variants,
+publisher-authored acknowledgements, and reactions do not start or contribute
+feedback. Acknowledgement-shaped text from any other author remains feedback.
 
 No linked issue is required. If the pull request closes, moves to an
 unwritable head, or otherwise changes before reconciliation, the address-only

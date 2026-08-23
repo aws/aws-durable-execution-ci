@@ -904,20 +904,11 @@ def normalized_pull_request_review(
 
 def feedback_is_current(
     created_at: Any,
-    updated_at: Any,
     head_updated_at: datetime | None,
     description: str,
 ) -> bool:
     created = parse_github_timestamp(created_at, description)
-    updated = (
-        parse_github_timestamp(updated_at, description)
-        if updated_at is not None
-        else created
-    )
-    return (
-        head_updated_at is None
-        or max(created, updated) >= head_updated_at
-    )
+    return head_updated_at is None or created >= head_updated_at
 
 
 def is_ai_command_comment(body: str) -> bool:
@@ -950,10 +941,8 @@ def is_address_feedback(
         and bool(body.strip())
         and not is_ai_command_comment(body)
         and not is_publisher_acknowledgement(comment, actor)
-        and not is_bot_user(comment.get("user"))
         and feedback_is_current(
             comment.get("created_at"),
-            comment.get("updated_at"),
             head_updated_at,
             "pull request comment timestamp",
         )
@@ -971,10 +960,8 @@ def is_review_feedback(
         and bool(body.strip())
         and not is_ai_command_comment(body)
         and not is_publisher_acknowledgement(review, actor)
-        and not is_bot_user(review.get("user"))
         and feedback_is_current(
             review.get("submitted_at"),
-            review.get("updated_at"),
             head_updated_at,
             "pull request review timestamp",
         )
