@@ -74,7 +74,9 @@ separate `/ai` and `implement`. The author must currently have `write`,
 schedule recovers missed events, failed runs, and branches pushed before pull
 request creation completed by finding open issues with an authorized command.
 Implementation labels are not inspected; applying `codex:implement` alone does
-not start work. Command variants and emoji reactions do not start work.
+not start work. Text after the command is passed to Codex as task-specific
+maintainer guidance and may continue on later lines. Other command names and
+emoji reactions do not start work.
 
 `/ai address` is scoped directly to the pull request containing the command.
 It does not require that pull request to close or reference an issue and never
@@ -200,7 +202,8 @@ ambiguity.
 Post `/ai address` as a reply in a pull request review thread to address that
 complete thread. Leading and trailing spaces or tabs are ignored, and one or
 more spaces or tabs may separate `/ai` and `address`. All currently unprocessed
-marked threads are reconciled together.
+marked threads are reconciled together. Text after the command is passed as
+maintainer guidance for that thread and may continue on later lines.
 
 Post `/ai address` as a top-level pull request conversation comment to address
 all conversation comments, submitted review summaries, and inline review
@@ -211,9 +214,10 @@ previous head into the batch. If that activity record is unavailable, the
 workflow includes all otherwise eligible feedback rather than risk silently
 omitting feedback. Explicitly marked inline threads are included once as
 complete threads rather than duplicated in the batch feedback. Multiple pending
-top-level commands are acknowledged together. Command variants,
-publisher-authored acknowledgements, and reactions do not start or contribute
-feedback. Acknowledgement-shaped text from any other author remains feedback.
+top-level commands and their appended guidance are reconciled and acknowledged
+together. Other command names, publisher-authored acknowledgements, and
+reactions do not start or contribute feedback. Acknowledgement-shaped text from
+any other author remains feedback.
 
 No linked issue is required. If the pull request closes, moves to an
 unwritable head, or otherwise changes before reconciliation, the address-only
@@ -222,6 +226,11 @@ run skips or aborts instead of starting issue implementation.
 The command author must currently have `write`, `maintain`, or `admin`
 permission. Bot users and users without sufficient repository permission are
 ignored. `author_association` is not used as authorization.
+
+Maintainer guidance is authorized task direction but remains untrusted for
+security purposes. It cannot override repository instructions, credential
+isolation, publication controls, sandbox restrictions, or the model output
+contract.
 
 If publication pushes a Codex review commit but new feedback prevents
 acknowledgement, the retry follows consecutive Codex review commits back to

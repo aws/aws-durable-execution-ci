@@ -152,11 +152,13 @@ def implementation_command(
     command_id=500,
     author="maintainer",
     body="/ai implement",
+    guidance="",
 ):
     return {
         "id": command_id,
         "author": author,
         "body": body,
+        "guidance": guidance,
         "created_at": "2026-08-22T00:00:00Z",
         "updated_at": "2026-08-22T00:00:00Z",
     }
@@ -274,7 +276,7 @@ class EventSelectionTest(unittest.TestCase):
                 [issue_item()],
             )
 
-        event["comment"]["body"] = "/ai implement please"
+        event["comment"]["body"] = "/ai implementation"
         with patch.object(
             IMPLEMENTATION,
             "collaborator_has_write_permission",
@@ -293,6 +295,31 @@ class EventSelectionTest(unittest.TestCase):
             " /ai implement ",
             "\t/ai\timplement\t",
             "  /ai    implement\t",
+        )
+        for command in commands:
+            event = {
+                "action": "created",
+                "issue": {"number": 31, "state": "open"},
+                "comment": implementation_comment(body=command),
+            }
+            with self.subTest(command=command), patch.object(
+                IMPLEMENTATION,
+                "collaborator_has_write_permission",
+                return_value=True,
+            ):
+                self.assertEqual(
+                    IMPLEMENTATION.resolve_issue_comment_event(
+                        "aws/example",
+                        event,
+                    ),
+                    [issue_item()],
+                )
+
+    def test_implementation_command_accepts_appended_guidance(self):
+        commands = (
+            "/ai implement Use the existing parser.",
+            "/ai implement\n\nAdd replay coverage.",
+            "\t/ai  implement\tKeep the public API unchanged.\nRun tests.",
         )
         for command in commands:
             event = {
@@ -404,12 +431,15 @@ class EventSelectionTest(unittest.TestCase):
             ),
             implementation_comment(
                 command_id=600,
-                body="/ai implement please",
+                body="/ai implementation",
             ),
             implementation_comment(
                 command_id=700,
                 author="admin",
-                body=" /ai\timplement ",
+                body=(
+                    " /ai\timplement\n"
+                    "Preserve backward compatibility."
+                ),
             ),
         ]
         with patch.object(
@@ -429,7 +459,11 @@ class EventSelectionTest(unittest.TestCase):
                 implementation_command(
                     command_id=700,
                     author="admin",
-                    body=" /ai\timplement ",
+                    body=(
+                        " /ai\timplement\n"
+                        "Preserve backward compatibility."
+                    ),
+                    guidance="Preserve backward compatibility.",
                 ),
             )
 
@@ -1195,7 +1229,7 @@ class EventSelectionTest(unittest.TestCase):
                 [pull_request_item()],
             )
 
-        event["comment"]["body"] = "/ai address please"
+        event["comment"]["body"] = "/ai addressing"
         with patch.object(
             IMPLEMENTATION,
             "collaborator_has_write_permission",
@@ -1214,6 +1248,38 @@ class EventSelectionTest(unittest.TestCase):
             " /ai address ",
             "\t/ai\taddress\t",
             "  /ai    address\t",
+        )
+        for command in commands:
+            event = {
+                "action": "created",
+                "comment": {
+                    "body": command,
+                    "in_reply_to_id": 10,
+                    "user": {
+                        "login": "maintainer",
+                        "type": "User",
+                    },
+                },
+                "pull_request": {"number": 44, "state": "open"},
+            }
+            with self.subTest(command=command), patch.object(
+                IMPLEMENTATION,
+                "collaborator_has_write_permission",
+                return_value=True,
+            ):
+                self.assertEqual(
+                    IMPLEMENTATION.resolve_review_event(
+                        "aws/example",
+                        event,
+                    ),
+                    [pull_request_item()],
+                )
+
+    def test_address_command_accepts_appended_guidance(self):
+        commands = (
+            "/ai address Add the missing regression test.",
+            "/ai address\n\nKeep the fix scoped to this thread.",
+            "\t/ai  address\tPreserve the public API.\nRun unit tests.",
         )
         for command in commands:
             event = {
@@ -1484,7 +1550,10 @@ class MarkerPolicyTest(unittest.TestCase):
             {
                 "id": 700,
                 "in_reply_to_id": 600,
-                "body": "\t/ai   address\t",
+                "body": (
+                    "\t/ai   address\n"
+                    "Keep the public API unchanged."
+                ),
                 "path": "src/example.py",
                 "user": {"login": "maintainer", "type": "User"},
                 "created_at": "2026-08-22T00:01:00Z",
@@ -1516,6 +1585,16 @@ class MarkerPolicyTest(unittest.TestCase):
             [600, 700],
         )
         self.assertEqual(markers[0]["thread_root_id"], 600)
+        self.assertEqual(
+            markers[0]["maintainer_guidance"],
+            [
+                {
+                    "command_id": 700,
+                    "author": "maintainer",
+                    "text": "Keep the public API unchanged.",
+                }
+            ],
+        )
 
     def test_head_push_time_selects_feedback_created_for_current_head(self):
         review = [
@@ -1558,11 +1637,14 @@ class MarkerPolicyTest(unittest.TestCase):
             },
             implementation_comment(
                 command_id=900,
-                body="/ai address",
+                body="/ai address Add a focused unit test.",
             ),
             implementation_comment(
                 command_id=901,
-                body="/ai address",
+                body=(
+                    "/ai address\n"
+                    "Do not change the public API."
+                ),
             ),
         ]
         with patch.object(
@@ -1635,6 +1717,21 @@ class MarkerPolicyTest(unittest.TestCase):
         self.assertEqual(markers[0]["command_kind"], "issue_comment")
         self.assertEqual(markers[0]["command_id"], 901)
         self.assertEqual(markers[0]["command_ids"], [900, 901])
+        self.assertEqual(
+            markers[0]["maintainer_guidance"],
+            [
+                {
+                    "command_id": 900,
+                    "author": "maintainer",
+                    "text": "Add a focused unit test.",
+                },
+                {
+                    "command_id": 901,
+                    "author": "maintainer",
+                    "text": "Do not change the public API.",
+                },
+            ],
+        )
         self.assertEqual(
             [value["body"] for value in markers[0]["feedback"]],
             [
@@ -2250,6 +2347,32 @@ class MarkerPolicyTest(unittest.TestCase):
             ):
                 IMPLEMENTATION.require_markers_unchanged(state)
 
+    def test_post_push_marker_check_rejects_changed_guidance(self):
+        prepared = [marker()]
+        prepared[0]["maintainer_guidance"] = [
+            {
+                "command_id": 700,
+                "author": "maintainer",
+                "text": "Add a focused test.",
+            }
+        ]
+        current = json.loads(json.dumps(prepared))
+        current[0]["maintainer_guidance"][0]["text"] = (
+            "Change the public API."
+        )
+        state = {"markers": prepared}
+
+        with patch.object(
+            IMPLEMENTATION,
+            "current_marker_snapshot",
+            return_value=current,
+        ):
+            with self.assertRaisesRegex(
+                IMPLEMENTATION.ImplementationError,
+                "changed before acknowledgement",
+            ):
+                IMPLEMENTATION.require_markers_still_actionable(state)
+
     def test_post_push_batch_check_ignores_mutable_code_context(self):
         prepared = [
             {
@@ -2318,6 +2441,86 @@ class PreparationPolicyTest(unittest.TestCase):
         )
         command.start()
         self.addCleanup(command.stop)
+
+    def test_model_context_exposes_implementation_guidance(self):
+        state = {
+            "action": "implement",
+            "repository": "aws/example",
+            "issue": issue(),
+            "implementation_command": implementation_command(
+                body=(
+                    "/ai implement\n"
+                    "Keep the public API unchanged."
+                ),
+                guidance="Keep the public API unchanged.",
+            ),
+            "pull_request": None,
+            "markers": [],
+        }
+
+        context = IMPLEMENTATION.model_context(state)
+
+        self.assertEqual(
+            context["maintainer_guidance"],
+            [
+                {
+                    "command_id": 500,
+                    "author": "maintainer",
+                    "scope": "issue",
+                    "text": "Keep the public API unchanged.",
+                }
+            ],
+        )
+
+    def test_model_context_scopes_review_guidance(self):
+        state = {
+            "action": "address",
+            "repository": "aws/example",
+            "issue": None,
+            "pull_request": pull_request(),
+            "markers": [
+                {
+                    "command_kind": "review_comment",
+                    "maintainer_guidance": [
+                        {
+                            "command_id": 700,
+                            "author": "maintainer",
+                            "text": "Add a regression test.",
+                        }
+                    ],
+                },
+                {
+                    "command_kind": "issue_comment",
+                    "maintainer_guidance": [
+                        {
+                            "command_id": 900,
+                            "author": "admin",
+                            "text": "Keep the change narrowly scoped.",
+                        }
+                    ],
+                },
+            ],
+        }
+
+        context = IMPLEMENTATION.model_context(state)
+
+        self.assertEqual(
+            context["maintainer_guidance"],
+            [
+                {
+                    "command_id": 700,
+                    "author": "maintainer",
+                    "scope": "review_comment",
+                    "text": "Add a regression test.",
+                },
+                {
+                    "command_id": 900,
+                    "author": "admin",
+                    "scope": "issue_comment",
+                    "text": "Keep the change narrowly scoped.",
+                },
+            ],
+        )
 
     def test_issue_without_implementation_command_is_skipped(self):
         with patch.dict(os.environ, environment(), clear=True), patch.object(
