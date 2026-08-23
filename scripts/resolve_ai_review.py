@@ -11,6 +11,9 @@ from typing import Any
 
 
 REVIEW_COMMAND = "/ai review"
+REVIEW_COMMAND_PATTERN = re.compile(
+    r"^[ \t]*/ai[ \t]+review[ \t]*$"
+)
 WRITE_PERMISSIONS = frozenset(("admin", "maintain", "write"))
 SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 
@@ -87,7 +90,7 @@ def pull_request_number(
         or type(issue.get("number")) is not int
         or not isinstance(comment, dict)
         or not isinstance(comment.get("body"), str)
-        or comment["body"].strip() != REVIEW_COMMAND
+        or not REVIEW_COMMAND_PATTERN.fullmatch(comment["body"])
         or is_bot_user(comment.get("user"))
     ):
         raise ReviewNotRequested("event is not an AI review command")

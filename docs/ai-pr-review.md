@@ -51,9 +51,10 @@ access to secrets available to the caller.
 ## Request a review
 
 A team member can post `/ai review` as a standalone comment on an open pull
-request to review its current revision. The comment body must exactly match the
-command. The author must currently have `write`, `maintain`, or `admin`
-repository permission and must not be a bot.
+request to review its current revision. Leading and trailing spaces or tabs are
+ignored, and one or more spaces or tabs may separate `/ai` and `review`. The
+author must currently have `write`, `maintain`, or `admin` repository
+permission and must not be a bot.
 
 Dependabot, draft pull requests, and pull requests from forks do not run an
 automatic AI review. An authorized command starts the enabled generation and

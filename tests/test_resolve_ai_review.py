@@ -166,6 +166,28 @@ class ResolveAiReviewTest(unittest.TestCase):
 
             self.assertIsNotNone(result)
 
+    def test_review_command_accepts_surrounding_and_inner_blanks(self):
+        commands = (
+            " /ai review ",
+            "\t/ai\treview\t",
+            "  /ai    review\t",
+        )
+        for command in commands:
+            with self.subTest(command=command), patch.object(
+                RESOLVER,
+                "run_gh_json",
+                side_effect=[
+                    {"permission": "write"},
+                    pull_request(),
+                ],
+            ):
+                result = RESOLVER.resolve_review(
+                    "issue_comment",
+                    review_command_event(body=command),
+                )
+
+            self.assertIsNotNone(result)
+
     def test_unauthorized_review_command_is_ignored(self):
         with patch.object(
             RESOLVER,
@@ -183,6 +205,8 @@ class ResolveAiReviewTest(unittest.TestCase):
     def test_non_commands_and_bots_are_ignored_without_api_calls(self):
         events = (
             review_command_event(body="/ai review please"),
+            review_command_event(body="/ai\nreview"),
+            review_command_event(body="/aireview"),
             review_command_event(login="dependabot[bot]", user_type="Bot"),
             review_command_event(login="automation[bot]", user_type="User"),
         )

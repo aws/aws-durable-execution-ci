@@ -153,7 +153,14 @@ class AiPrReviewWorkflowTest(unittest.TestCase):
         self.assertIn("issue_comment:", AI_WORKFLOW)
         self.assertIn("types: [created]", AI_WORKFLOW)
         self.assertIn("github.actor ||", AI_WORKFLOW)
-        self.assertIn("github.event.comment.body == '/ai review'", resolve)
+        self.assertIn(
+            "contains(github.event.comment.body, '/ai')",
+            resolve,
+        )
+        self.assertIn(
+            "contains(github.event.comment.body, 'review')",
+            resolve,
+        )
         self.assertIn(
             "python3 .ai-review-toolkit/scripts/resolve_ai_review.py",
             resolve,
