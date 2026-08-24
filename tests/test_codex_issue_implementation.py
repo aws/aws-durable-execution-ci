@@ -4997,7 +4997,15 @@ class WorkflowPolicyTest(unittest.TestCase):
             "AWS_CONTAINER_CREDENTIALS_FULL_URI=\"$credential_uri\"",
             block,
         )
-        self.assertIn("--sandbox-state-disable-network", block)
+        self.assertNotIn("--sandbox-state-disable-network", block)
+        self.assertEqual(block.count("--permission-profile :workspace"), 2)
+        self.assertEqual(block.count('--cd "$GITHUB_WORKSPACE"'), 3)
+        self.assertEqual(
+            block.count(
+                "sandbox_workspace_write.network_access=false"
+            ),
+            3,
+        )
         self.assertIn(
             "network-disabled model tools reached AWS credentials",
             block,

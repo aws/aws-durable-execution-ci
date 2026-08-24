@@ -223,7 +223,7 @@ jobs:
 
       - name: Install Codex CLI
         if: steps.prepare.outputs.run_model == 'true'
-        run: npm install -g "@openai/codex@0.147.0"
+        run: npm install -g "@openai/codex@0.149.1"
 
       - name: Configure AWS credentials for Codex
         if: steps.prepare.outputs.run_model == 'true'
@@ -377,7 +377,9 @@ jobs:
             PATH="$PATH" \
             "$codex_bin" \
             sandbox \
-            --sandbox-state-disable-network \
+            --config 'sandbox_workspace_write.network_access=false' \
+            --permission-profile :workspace \
+            --cd "$GITHUB_WORKSPACE" \
             /usr/bin/true
 
           # A model tool that learns the proxy token must still be unable to
@@ -387,7 +389,9 @@ jobs:
             PATH="$PATH" \
             "$codex_bin" \
             sandbox \
-            --sandbox-state-disable-network \
+            --config 'sandbox_workspace_write.network_access=false' \
+            --permission-profile :workspace \
+            --cd "$GITHUB_WORKSPACE" \
             /usr/bin/curl \
             --fail \
             --silent \
