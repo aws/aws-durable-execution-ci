@@ -43,6 +43,9 @@ on:
       BEDROCK_ROLE_ARN:
         description: IAM role used to invoke Codex on Amazon Bedrock
         required: false
+      CODEX_WORKFLOW_PUSH_TOKEN:
+        description: Token allowed to push changes under .github/workflows
+        required: false
 
 permissions: {}
 
@@ -587,6 +590,21 @@ jobs:
           "${RUNNER_TEMP}/codex-publication/codex-implementation-artifact.json"
           "${RUNNER_TEMP}/codex-publication/codex-implementation.patch"
 
+      - name: Require workflow push token
+        if: >-
+          steps.download.outcome == 'success' &&
+          steps.plan.outputs.checkout == 'true' &&
+          steps.plan.outputs.workflow_changes == 'true'
+        env:
+          CODEX_WORKFLOW_PUSH_TOKEN: >-
+            ${{ secrets.CODEX_WORKFLOW_PUSH_TOKEN }}
+        run: |
+          if [[ -z "$CODEX_WORKFLOW_PUSH_TOKEN" ]]; then
+            echo \
+              "::error title=Workflow push token is not configured::Configure CODEX_WORKFLOW_PUSH_TOKEN with Contents and Workflows write permissions."
+            exit 1
+          fi
+
       - name: Check out exact publication target
         if: >-
           steps.download.outcome == 'success' &&
@@ -596,10 +614,13 @@ jobs:
           repository: ${{ steps.plan.outputs.target_repository }}
           ref: ${{ steps.plan.outputs.target_sha }}
           fetch-depth: 0
-          token: ${{ github.token }}
+          token: >-
+            ${{ steps.plan.outputs.workflow_changes == 'true' &&
+                secrets.CODEX_WORKFLOW_PUSH_TOKEN ||
+                github.token }}
           persist-credentials: true
 
-      - name: Revalidate and publish with event-suppressing token
+      - name: Revalidate and publish
         if: >-
           steps.download.outcome == 'success' &&
           steps.plan.outputs.action != 'skip'

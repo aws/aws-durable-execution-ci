@@ -3087,7 +3087,7 @@ class ValidationPolicyTest(unittest.TestCase):
             {"body": "Implemented."},
         )
 
-    def test_implementation_commit_records_issue_snapshot_digest(self):
+    def test_workflow_commit_records_issue_snapshot_and_skips_checks(self):
         with tempfile.TemporaryDirectory() as directory:
             patch_path = Path(directory) / "change.patch"
             patch_path.write_bytes(b"validated patch")
@@ -3125,7 +3125,7 @@ class ValidationPolicyTest(unittest.TestCase):
             ), patch.object(
                 IMPLEMENTATION,
                 "changed_paths",
-                return_value=["src/example.py"],
+                return_value=[".github/workflows/build.yml"],
             ), patch.object(
                 IMPLEMENTATION,
                 "configure_git",
@@ -3144,9 +3144,12 @@ class ValidationPolicyTest(unittest.TestCase):
                     "b" * 40,
                 )
 
-        message = run.call_args.args[0][3]
+        command = run.call_args.args[0]
+        message = command[-1]
         digest = IMPLEMENTATION.issue_semantic_digest(prepared_issue)
+        self.assertIn("--cleanup=verbatim", command)
         self.assertIn(f"Codex-Issue-Snapshot: {digest}", message)
+        self.assertIn("skip-checks: true", message)
 
     def test_review_commit_records_pull_request_without_issue(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -3204,10 +3207,13 @@ class ValidationPolicyTest(unittest.TestCase):
                     result,
                 )
 
-        message = run.call_args.args[0][3]
+        command = run.call_args.args[0]
+        message = command[-1]
+        self.assertIn("--cleanup=verbatim", command)
         self.assertIn("Address review feedback for PR #44", message)
         self.assertIn("Codex-Pull-Request: #44", message)
         self.assertNotIn("Codex-Issue:", message)
+        self.assertNotIn("skip-checks: true", message)
 
     def test_model_result_has_a_closed_output_contract(self):
         self.assertEqual(
@@ -3234,9 +3240,28 @@ class ValidationPolicyTest(unittest.TestCase):
             )
 
     def test_publication_plan_checks_out_only_changed_model_results(self):
-        for outcome, changed_paths, patch_content, expected_checkout in (
-            ("changed", ["src/example.py"], b"validated patch", "true"),
-            ("no_change", [], b"", "false"),
+        for (
+            outcome,
+            changed_paths,
+            patch_content,
+            expected_checkout,
+            expected_workflow_changes,
+        ) in (
+            (
+                "changed",
+                ["src/example.py"],
+                b"validated patch",
+                "true",
+                "false",
+            ),
+            (
+                "changed",
+                [".github/workflows/build.yml"],
+                b"validated workflow patch",
+                "true",
+                "true",
+            ),
+            ("no_change", [], b"", "false", "false"),
         ):
             with self.subTest(outcome=outcome):
                 with tempfile.TemporaryDirectory() as directory:
@@ -3300,6 +3325,10 @@ class ValidationPolicyTest(unittest.TestCase):
                         expected_checkout,
                     )
                     self.assertEqual(
+                        outputs["workflow_changes"],
+                        expected_workflow_changes,
+                    )
+                    self.assertEqual(
                         outputs["target_repository"],
                         "aws/example",
                     )
@@ -3340,6 +3369,7 @@ class ValidationPolicyTest(unittest.TestCase):
             )
             self.assertEqual(outputs["action"], "blocked")
             self.assertEqual(outputs["checkout"], "false")
+            self.assertEqual(outputs["workflow_changes"], "false")
 
     def test_model_result_rejects_multiline_publication_text(self):
         with self.assertRaisesRegex(
@@ -4889,6 +4919,42 @@ class ValidationPolicyTest(unittest.TestCase):
                 ],
             )
 
+    def test_push_failure_preserves_porcelain_remote_error(self):
+        completed = IMPLEMENTATION.subprocess.CompletedProcess(
+            args=[],
+            returncode=1,
+            stdout=(
+                "remote: refusing to allow a GitHub App to update workflow\n"
+                "!\trefs/heads/feature:refs/heads/feature\t[remote rejected]\n"
+            ),
+            stderr="error: failed to push some refs\n",
+        )
+        with patch.object(
+            IMPLEMENTATION,
+            "repository_name",
+            return_value="aws/example",
+        ), patch.object(
+            IMPLEMENTATION,
+            "branch_ref",
+            return_value=None,
+        ), patch.object(
+            IMPLEMENTATION,
+            "validate_git_branch",
+        ), patch.object(
+            IMPLEMENTATION,
+            "run_command",
+            return_value=completed,
+        ):
+            with self.assertRaisesRegex(
+                IMPLEMENTATION.ImplementationError,
+                "refusing to allow a GitHub App",
+            ):
+                IMPLEMENTATION.push_commit(
+                    Path("/workspace"),
+                    "feature",
+                    None,
+                )
+
     def test_label_creation_tolerates_a_cross_issue_race(self):
         with patch.object(
             IMPLEMENTATION,
@@ -5172,6 +5238,7 @@ class WorkflowPolicyTest(unittest.TestCase):
         assert model is not None
         block = model.group(1)
         self.assertNotIn("CODEX_PUBLISH_TOKEN", block)
+        self.assertNotIn("CODEX_WORKFLOW_PUSH_TOKEN", block)
         self.assertNotIn("CODEX_PUBLISH_ACTOR", block)
         self.assertNotIn("GH_TOKEN", block)
         self.assertNotIn("GITHUB_TOKEN", block)
@@ -5238,9 +5305,7 @@ class WorkflowPolicyTest(unittest.TestCase):
     def test_publication_revalidates_after_model_execution(self):
         self.assertLess(
             WORKER_WORKFLOW.index("Implement current issue work with Codex"),
-            WORKER_WORKFLOW.index(
-                "Revalidate and publish with event-suppressing token"
-            ),
+            WORKER_WORKFLOW.index("Revalidate and publish"),
         )
         self.assertIn(
             "Upload validated publication bundle",
@@ -5253,8 +5318,10 @@ class WorkflowPolicyTest(unittest.TestCase):
         self.assertIn("persist-credentials: false", WORKER_WORKFLOW)
         self.assertIn("persist-credentials: true", WORKER_WORKFLOW)
 
-    def test_publication_is_isolated_and_uses_automatic_token(self):
+    def test_publication_is_isolated_and_selects_workflow_push_token(self):
         self.assertNotIn("CODEX_PUBLISH_TOKEN", WORKER_WORKFLOW)
+        self.assertIn("CODEX_WORKFLOW_PUSH_TOKEN:", WORKFLOW)
+        self.assertIn("CODEX_WORKFLOW_PUSH_TOKEN:", WORKER_WORKFLOW)
         reconcile = re.search(
             r"(?ms)^  reconcile:\n(.*?)(?=^  publish:)",
             WORKER_WORKFLOW,
@@ -5273,9 +5340,13 @@ class WorkflowPolicyTest(unittest.TestCase):
             r"(.*?)(?=^      - name:|\Z)",
             WORKER_WORKFLOW,
         )
+        require_workflow_token = re.search(
+            r"(?ms)^      - name: Require workflow push token\n"
+            r"(.*?)(?=^      - name:|\Z)",
+            WORKER_WORKFLOW,
+        )
         publish = re.search(
-            r"(?ms)^      - name: "
-            r"Revalidate and publish with event-suppressing token\n"
+            r"(?ms)^      - name: Revalidate and publish\n"
             r"(.*?)(?=^      - name:|\Z)",
             WORKER_WORKFLOW,
         )
@@ -5294,6 +5365,7 @@ class WorkflowPolicyTest(unittest.TestCase):
             and publish_job is not None
             and download is not None
             and checkout is not None
+            and require_workflow_token is not None
             and publish is not None
             and prepare is not None
             and publisher is not None
@@ -5316,13 +5388,31 @@ class WorkflowPolicyTest(unittest.TestCase):
             download.group(1),
         )
         self.assertNotIn("continue-on-error", download.group(1))
+        self.assertIn("steps.plan.outputs.workflow_changes", checkout.group(1))
         self.assertIn(
-            "token: ${{ github.token }}",
+            "secrets.CODEX_WORKFLOW_PUSH_TOKEN",
             checkout.group(1),
+        )
+        self.assertIn("github.token", checkout.group(1))
+        self.assertIn(
+            "steps.plan.outputs.workflow_changes == 'true'",
+            require_workflow_token.group(1),
+        )
+        self.assertIn(
+            "Workflow push token is not configured",
+            require_workflow_token.group(1),
+        )
+        self.assertIn(
+            "Contents and Workflows write permissions",
+            require_workflow_token.group(1),
         )
         self.assertIn(
             "GH_TOKEN: ${{ github.token }}",
             publish.group(1),
+        )
+        self.assertNotIn(
+            "CODEX_WORKFLOW_PUSH_TOKEN",
+            reconcile.group(1),
         )
         self.assertIn("publication-plan", publish_job.group(1))
         self.assertIn(

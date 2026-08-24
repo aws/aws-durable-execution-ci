@@ -83,6 +83,9 @@ on:
       BEDROCK_ROLE_ARN:
         description: IAM role used to invoke Codex on Amazon Bedrock
         required: false
+      CODEX_WORKFLOW_PUSH_TOKEN:
+        description: Token allowed to push changes under .github/workflows
+        required: false
 
 permissions: {}
 

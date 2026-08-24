@@ -101,17 +101,29 @@ Create an `ai-pr-review-runtime` environment with this secret:
 
 - `BEDROCK_ROLE_ARN`: the IAM role that GitHub's OIDC provider can assume.
 
+Create a repository or organization Actions secret when workflow changes may
+be authorized:
+
+- `CODEX_WORKFLOW_PUSH_TOKEN`: a token scoped to the target repository with
+  `Contents: write` and `Workflows: write`. The token is used only by the
+  publication checkout when the validated patch changes
+  `.github/workflows/**`; it is never available to the Codex process.
+
 Allow GitHub Actions to create pull requests in the repository settings. The
 caller must grant the reusable workflow contents, issues, and pull request
 write permissions as shown above; a called workflow cannot elevate permissions
 that the caller withheld.
 
-Publication intentionally uses the automatic `GITHUB_TOKEN`. Pushes, pull
-requests, comments, and labels created by that token do not trigger ordinary
-`push` or `pull_request` workflows, so model-authored code is not executed
-automatically with repository secrets. Repositories can provide a separately
-reviewed, secretless manual validation workflow for generated drafts. Any
-validation with privileged credentials should require human approval.
+Ordinary publication uses the automatic `GITHUB_TOKEN`. A validated workflow
+change uses `CODEX_WORKFLOW_PUSH_TOKEN` only for the Git push, while pull
+request creation, comments, and labels continue to use `GITHUB_TOKEN`. The
+generated commit includes `skip-checks: true` so the privileged push does not
+execute model-authored workflow code before human review. If the validated
+patch changes `.github/workflows/**` and the secret is unavailable, publication
+fails before checkout with a specific configuration error. Repositories can
+provide a separately reviewed, secretless manual validation workflow for
+generated drafts. Any validation with privileged credentials should require
+human approval.
 
 The workflow creates the default `codex:no-pr` label if it needs to mark an
 issue that requires no repository change. Creating it in advance is
@@ -305,6 +317,11 @@ a `Workflow changes are not allowed` error annotation instructing the
 maintainer to post a new `/ai implement --allow-workflow-changes` command or
 enable the reusable workflow input before retrying.
 
+Authorized workflow changes require `CODEX_WORKFLOW_PUSH_TOKEN`; the
+publication job reports a configuration error before checkout when the secret
+is missing. Git push failures retain both porcelain output and stderr so token
+permission or repository policy rejections remain actionable.
+
 When Codex determines that a new implementation requires no repository
 change, the workflow applies the non-actionable label and posts a deduplicated
 explanation instead of opening a pull request. It rechecks that the
@@ -340,6 +357,9 @@ The workflow:
 - never places a write-enabled automatic `GITHUB_TOKEN` in the Codex step;
 - transfers only the validated state, artifact, and bounded patch to a separate
   write-enabled publication job;
+- makes the workflow-capable push token available only to the publication
+  checkout when the validated changed-path list includes
+  `.github/workflows/**`;
 - accepts only a closed JSON result contract, bounds individual and cumulative
   staged blob content before diff generation, and streams the Git patch under
   a separate hard size limit;
@@ -348,8 +368,8 @@ The workflow:
   staged blobs, and patch metadata, along with gitlinks, protected workflow
   renames or edits, stale state, prior pull request history, and changes outside
   the checked-out repository;
-- re-checks all mutation preconditions in the publication job before the
-  event-suppressing automatic token is used.
+- re-checks all mutation preconditions in the publication job before either
+  publication credential is used.
 
 The model job has a read-only automatic token. The separate publication job is
 the only job with contents, issues, and pull request write permissions, and it

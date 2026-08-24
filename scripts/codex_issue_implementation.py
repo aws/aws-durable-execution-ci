@@ -2238,6 +2238,10 @@ def changed_paths(workspace: Path) -> list[str]:
     return paths
 
 
+def has_workflow_changes(paths: list[str]) -> bool:
+    return any(path.startswith(".github/workflows/") for path in paths)
+
+
 def staged_blob_oids(workspace: Path, paths: list[str]) -> list[str]:
     blob_oids: list[str] = []
     for path in paths:
@@ -2611,14 +2615,9 @@ def validate_model_command(
         raise ImplementationError(
             "model staged content contains a runtime credential"
         )
-    workflow_changes = [
-        path
-        for path in paths
-        if path.startswith(".github/workflows/")
-    ]
     if (
         os.environ.get("ALLOW_WORKFLOW_CHANGES", "").lower() != "true"
-        and workflow_changes
+        and has_workflow_changes(paths)
     ):
         raise WorkflowChangesNotAllowedError(
             "Codex generated changes under .github/workflows, but workflow "
@@ -2719,6 +2718,7 @@ def publication_plan_command(
         raise ImplementationError("prepared state has an invalid action")
 
     checkout = False
+    workflow_changes = False
     if action in ("implement", "address"):
         artifact = read_json(artifact_path, "model artifact")
         result = validate_artifact(
@@ -2727,6 +2727,9 @@ def publication_plan_command(
             read_model_patch(patch_path),
         )
         checkout = result["outcome"] == "changed"
+        workflow_changes = checkout and has_workflow_changes(
+            artifact["changed_paths"]
+        )
 
     target = state.get("target") or {}
     if checkout and (
@@ -2736,6 +2739,7 @@ def publication_plan_command(
         raise ImplementationError("prepared state has an invalid target")
     write_output("action", action)
     write_output("checkout", str(checkout).lower())
+    write_output("workflow_changes", str(workflow_changes).lower())
     write_output("target_repository", target.get("repository", ""))
     write_output("target_sha", target.get("sha", ""))
 
@@ -3246,8 +3250,10 @@ def apply_patch_and_commit(
         f"{AUTOMATION_TRAILER}\n"
         f"{trailers}"
     )
+    if has_workflow_changes(actual_paths):
+        message += "\nskip-checks: true"
     commit = run_command(
-        ["git", "commit", "-m", message],
+        ["git", "commit", "--cleanup=verbatim", "-m", message],
         cwd=workspace,
     )
     if commit.returncode != 0:
@@ -3286,8 +3292,13 @@ def push_commit(
         cwd=workspace,
     )
     if push.returncode != 0:
+        details = "\n".join(
+            output.strip()
+            for output in (push.stdout, push.stderr)
+            if output.strip()
+        )
         raise ImplementationError(
-            push.stderr.strip() or "atomic branch update was rejected"
+            details or "atomic branch update was rejected"
         )
 
 
