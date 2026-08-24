@@ -16,6 +16,7 @@ from typing import Any
 
 ADDRESS_COMMAND = "/ai address"
 IMPLEMENT_COMMAND = "/ai implement"
+ALLOW_WORKFLOW_CHANGES_OPTION = "--allow-workflow-changes"
 COMMAND_PATTERNS = {
     ADDRESS_COMMAND: re.compile(
         r"^[ \t]*/ai[ \t]+address(?=\Z|[ \t\r\n])"
@@ -24,6 +25,9 @@ COMMAND_PATTERNS = {
         r"^[ \t]*/ai[ \t]+implement(?=\Z|[ \t\r\n])"
     ),
 }
+ALLOW_WORKFLOW_CHANGES_OPTION_PATTERN = re.compile(
+    r"^--allow-workflow-changes(?=\Z|[ \t\r\n])"
+)
 AI_COMMAND_PATTERN = re.compile(
     r"^/ai\s+(?:address|implement|review)(?:\s|$)",
     re.IGNORECASE,
@@ -66,6 +70,10 @@ FEEDBACK_KINDS = frozenset(
 
 
 class ImplementationError(ValueError):
+    pass
+
+
+class WorkflowChangesNotAllowedError(ImplementationError):
     pass
 
 
@@ -923,14 +931,32 @@ def is_ai_command_comment(body: str) -> bool:
     return AI_COMMAND_PATTERN.search(body.strip()) is not None
 
 
-def ai_command_guidance(body: str, command: str) -> str | None:
+def parse_ai_command(
+    body: str,
+    command: str,
+) -> dict[str, Any] | None:
     pattern = COMMAND_PATTERNS.get(command)
     if pattern is None:
         return None
     match = pattern.match(body)
     if match is None:
         return None
-    return body[match.end():].strip()
+    remainder = body[match.end():].strip()
+    allow_workflow_changes = False
+    if command == IMPLEMENT_COMMAND:
+        option_match = ALLOW_WORKFLOW_CHANGES_OPTION_PATTERN.match(remainder)
+        if option_match is not None:
+            allow_workflow_changes = True
+            remainder = remainder[option_match.end():].strip()
+    return {
+        "guidance": remainder,
+        "allow_workflow_changes": allow_workflow_changes,
+    }
+
+
+def ai_command_guidance(body: str, command: str) -> str | None:
+    parsed = parse_ai_command(body, command)
+    return parsed["guidance"] if parsed is not None else None
 
 
 def matches_ai_command(body: str, command: str) -> bool:
@@ -2107,12 +2133,22 @@ def prepare_command(state_path: Path, context_path: Path) -> None:
     state = prepare_state()
     write_json(state_path, state)
     run_model = state["action"] in ("implement", "address")
+    implementation_command = state.get("implementation_command")
+    command_allows_workflow_changes = (
+        state["action"] == "implement"
+        and isinstance(implementation_command, dict)
+        and implementation_command.get("allow_workflow_changes") is True
+    )
     if run_model:
         write_json(context_path, model_context(state))
 
     target = state.get("target") or {}
     write_output("action", state["action"])
     write_output("run_model", str(run_model).lower())
+    write_output(
+        "command_allows_workflow_changes",
+        str(command_allows_workflow_changes).lower(),
+    )
     write_output("target_repository", target.get("repository", ""))
     write_output("target_ref", target.get("ref", ""))
     write_output("target_sha", target.get("sha", ""))
@@ -2541,12 +2577,21 @@ def validate_model_command(
         raise ImplementationError(
             "model staged content contains a runtime credential"
         )
+    workflow_changes = [
+        path
+        for path in paths
+        if path.startswith(".github/workflows/")
+    ]
     if (
         os.environ.get("ALLOW_WORKFLOW_CHANGES", "").lower() != "true"
-        and any(path.startswith(".github/workflows/") for path in paths)
+        and workflow_changes
     ):
-        raise ImplementationError(
-            "model changes to .github/workflows require explicit opt-in"
+        raise WorkflowChangesNotAllowedError(
+            "Codex generated changes under .github/workflows, but workflow "
+            "changes are not allowed for this request. Post a new "
+            f"`{IMPLEMENT_COMMAND} {ALLOW_WORKFLOW_CHANGES_OPTION}` comment "
+            "on the issue, or set the reusable workflow input "
+            "`allow-workflow-changes: true`, then retry."
         )
 
     check = run_command(
@@ -2906,14 +2951,14 @@ def implementation_command_snapshot(
 ) -> dict[str, Any] | None:
     user = comment.get("user")
     body = comment.get("body")
-    guidance = (
-        ai_command_guidance(body, IMPLEMENT_COMMAND)
+    parsed_command = (
+        parse_ai_command(body, IMPLEMENT_COMMAND)
         if isinstance(body, str)
         else None
     )
     if (
         type(comment.get("id")) is not int
-        or guidance is None
+        or parsed_command is None
         or not isinstance(comment.get("created_at"), str)
         or not isinstance(comment.get("updated_at"), str)
         or is_bot_user(user)
@@ -2923,7 +2968,10 @@ def implementation_command_snapshot(
         "id": comment["id"],
         "author": user["login"],
         "body": body,
-        "guidance": guidance,
+        "guidance": parsed_command["guidance"],
+        "allow_workflow_changes": parsed_command[
+            "allow_workflow_changes"
+        ],
         "created_at": comment["created_at"],
         "updated_at": comment["updated_at"],
     }
@@ -3599,6 +3647,13 @@ def main() -> int:
             )
         else:
             raise ImplementationError("unsupported command")
+    except WorkflowChangesNotAllowedError as error:
+        print(
+            "::error title=Workflow changes are not allowed::"
+            f"{error}",
+            file=sys.stderr,
+        )
+        return 1
     except ImplementationError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
