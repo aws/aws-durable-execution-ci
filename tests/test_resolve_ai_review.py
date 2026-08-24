@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import base64
 import importlib.util
 import os
 import unittest
@@ -98,6 +99,7 @@ class ResolveAiReviewTest(unittest.TestCase):
                 "pull-request-number": "42",
                 "base-sha": BASE_SHA,
                 "head-sha": HEAD_SHA,
+                "review-guidance-base64": "",
             },
         )
         run_gh.assert_called_once_with(f"repos/{REPOSITORY}/pulls/42")
@@ -208,6 +210,56 @@ class ResolveAiReviewTest(unittest.TestCase):
 
             self.assertIsNotNone(result)
 
+    def test_review_command_accepts_appended_guidance(self):
+        commands = {
+            "/ai review Focus on serialization.": "Focus on serialization.",
+            "/ai review\n\nAdd replay coverage.": "Add replay coverage.",
+            (
+                "\t/ai  review\tPreserve the public API.\nRun unit tests."
+            ): "Preserve the public API.\nRun unit tests.",
+        }
+        for command, expected_guidance in commands.items():
+            with self.subTest(command=command), patch.object(
+                RESOLVER,
+                "run_gh_json",
+                side_effect=[
+                    {"permission": "write"},
+                    pull_request(),
+                ],
+            ):
+                result = RESOLVER.resolve_review(
+                    "issue_comment",
+                    review_command_event(body=command),
+                )
+
+            self.assertIsNotNone(result)
+            assert result is not None
+            self.assertEqual(
+                base64.b64decode(
+                    result["review-guidance-base64"],
+                    validate=True,
+                ).decode("utf-8"),
+                expected_guidance,
+            )
+
+    def test_review_guidance_is_size_bounded(self):
+        guidance = "x" * (RESOLVER.MAX_REVIEW_GUIDANCE_BYTES + 1)
+        with patch.object(
+            RESOLVER,
+            "run_gh_json",
+            return_value={"permission": "write"},
+        ):
+            with self.assertRaisesRegex(
+                RESOLVER.ReviewResolutionError,
+                "10000-byte limit",
+            ):
+                RESOLVER.resolve_review(
+                    "issue_comment",
+                    review_command_event(
+                        body=f"/ai review {guidance}",
+                    ),
+                )
+
     def test_unauthorized_review_command_is_ignored(self):
         with patch.object(
             RESOLVER,
@@ -224,8 +276,8 @@ class ResolveAiReviewTest(unittest.TestCase):
 
     def test_non_commands_and_bots_are_ignored_without_api_calls(self):
         events = (
-            review_command_event(body="/ai review please"),
             review_command_event(body="/ai\nreview"),
+            review_command_event(body="/ai reviewer"),
             review_command_event(body="/aireview"),
             review_command_event(login="dependabot[bot]", user_type="Bot"),
             review_command_event(login="automation[bot]", user_type="User"),
