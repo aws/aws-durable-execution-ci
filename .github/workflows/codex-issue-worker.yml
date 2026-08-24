@@ -266,7 +266,9 @@ jobs:
         id: model
         env:
           ALLOW_WORKFLOW_CHANGES: >-
-            ${{ steps.config.outputs.allow_workflow_changes }}
+            ${{ steps.config.outputs.allow_workflow_changes == 'true' ||
+                steps.prepare.outputs.command_allows_workflow_changes ==
+                'true' }}
           AWS_ACCESS_KEY_ID: >-
             ${{ steps.aws-credentials.outputs.aws-access-key-id }}
           AWS_SECRET_ACCESS_KEY: >-

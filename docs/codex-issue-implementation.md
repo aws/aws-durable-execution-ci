@@ -78,6 +78,21 @@ not start work. Text after the command is passed to Codex as task-specific
 maintainer guidance and may continue on later lines. Other command names and
 emoji reactions do not start work.
 
+To explicitly authorize changes under `.github/workflows/**` for one
+implementation request, add the option immediately after the command:
+
+```text
+/ai implement --allow-workflow-changes
+
+Keep the workflow change narrowly scoped.
+```
+
+The option is removed from the maintainer guidance before it is sent to Codex.
+Mentioning `--allow-workflow-changes` later in the guidance does not authorize
+workflow changes. The worker re-fetches the current command after acquiring
+its concurrency lock, so editing the command to remove the option also removes
+the authorization.
+
 `/ai address` is scoped directly to the pull request containing the command.
 It does not require that pull request to close or reference an issue and never
 creates a new implementation branch or pull request.
@@ -126,7 +141,9 @@ Pass optional inputs from the caller job:
 - `model` defaults to `openai.gpt-5.6-sol`.
 - `reasoning-effort` defaults to `high`.
 - `allow-workflow-changes` defaults to `false`. When false, a model result that
-  changes `.github/workflows/**` is rejected before publication.
+  changes `.github/workflows/**` is rejected before publication unless the
+  current issue command includes `/ai implement --allow-workflow-changes`.
+  Setting the input to `true` remains a workflow-wide administrative override.
 
 The configured no-PR label follows GitHub's case-insensitive label behavior.
 
@@ -271,6 +288,11 @@ Pushes use an exact `--force-with-lease` expectation anchored by the validated
 remote SHA, or by branch nonexistence for a new implementation. A concurrent
 human or automation update is therefore rejected atomically. Failed validation
 or publication leaves review markers unprocessed for a later retry.
+
+If Codex generates workflow changes without authorization, the model job emits
+a `Workflow changes are not allowed` error annotation instructing the
+maintainer to post a new `/ai implement --allow-workflow-changes` command or
+enable the reusable workflow input before retrying.
 
 When Codex determines that a new implementation requires no repository
 change, the workflow applies the non-actionable label and posts a deduplicated

@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 
 import importlib.util
+import io
 import json
 import os
 import re
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
 from unittest.mock import patch
 
@@ -153,12 +155,14 @@ def implementation_command(
     author="maintainer",
     body="/ai implement",
     guidance="",
+    allow_workflow_changes=False,
 ):
     return {
         "id": command_id,
         "author": author,
         "body": body,
         "guidance": guidance,
+        "allow_workflow_changes": allow_workflow_changes,
         "created_at": "2026-08-22T00:00:00Z",
         "updated_at": "2026-08-22T00:00:00Z",
     }
@@ -339,6 +343,42 @@ class EventSelectionTest(unittest.TestCase):
                     ),
                     [issue_item()],
                 )
+
+    def test_implementation_command_parses_workflow_change_option(self):
+        body = (
+            "/ai implement --allow-workflow-changes\n\n"
+            "Keep the change narrowly scoped."
+        )
+
+        self.assertEqual(
+            IMPLEMENTATION.implementation_command_snapshot(
+                implementation_comment(body=body)
+            ),
+            implementation_command(
+                body=body,
+                guidance="Keep the change narrowly scoped.",
+                allow_workflow_changes=True,
+            ),
+        )
+
+    def test_guidance_cannot_accidentally_enable_workflow_changes(self):
+        body = (
+            "/ai implement Update documentation for "
+            "--allow-workflow-changes."
+        )
+
+        self.assertEqual(
+            IMPLEMENTATION.implementation_command_snapshot(
+                implementation_comment(body=body)
+            ),
+            implementation_command(
+                body=body,
+                guidance=(
+                    "Update documentation for "
+                    "--allow-workflow-changes."
+                ),
+            ),
+        )
 
     def test_issue_event_address_work_uses_pull_request_scope(self):
         event = {
@@ -2472,6 +2512,45 @@ class PreparationPolicyTest(unittest.TestCase):
             ],
         )
 
+    def test_prepare_exposes_current_command_workflow_change_option(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state_path = root / "state.json"
+            context_path = root / "context.json"
+            output_path = root / "output"
+            state = {
+                "action": "implement",
+                "implementation_command": implementation_command(
+                    allow_workflow_changes=True
+                ),
+                "target": {},
+            }
+            with patch.dict(
+                os.environ,
+                {"GITHUB_OUTPUT": str(output_path)},
+                clear=True,
+            ), patch.object(
+                IMPLEMENTATION,
+                "prepare_state",
+                return_value=state,
+            ), patch.object(
+                IMPLEMENTATION,
+                "model_context",
+                return_value={},
+            ):
+                IMPLEMENTATION.prepare_command(state_path, context_path)
+
+            outputs = dict(
+                line.split("=", 1)
+                for line in output_path.read_text(
+                    encoding="utf-8"
+                ).splitlines()
+            )
+            self.assertEqual(
+                outputs["command_allows_workflow_changes"],
+                "true",
+            )
+
     def test_model_context_scopes_review_guidance(self):
         state = {
             "action": "address",
@@ -4585,8 +4664,11 @@ class ValidationPolicyTest(unittest.TestCase):
                 clear=True,
             ):
                 with self.assertRaisesRegex(
-                    IMPLEMENTATION.ImplementationError,
-                    "explicit opt-in",
+                    IMPLEMENTATION.WorkflowChangesNotAllowedError,
+                    (
+                        "Post a new `/ai implement "
+                        "--allow-workflow-changes` comment"
+                    ),
                 ):
                     IMPLEMENTATION.validate_model_command(
                         result_path,
@@ -4670,8 +4752,8 @@ class ValidationPolicyTest(unittest.TestCase):
                 clear=True,
             ):
                 with self.assertRaisesRegex(
-                    IMPLEMENTATION.ImplementationError,
-                    "explicit opt-in",
+                    IMPLEMENTATION.WorkflowChangesNotAllowedError,
+                    "workflow changes are not allowed",
                 ):
                     IMPLEMENTATION.validate_model_command(
                         result_path,
@@ -4689,6 +4771,38 @@ class ValidationPolicyTest(unittest.TestCase):
                     "docs/build.yml",
                 ],
             )
+
+    def test_workflow_change_failure_is_an_actions_error_annotation(self):
+        error = IMPLEMENTATION.WorkflowChangesNotAllowedError(
+            "Post `/ai implement --allow-workflow-changes` and retry."
+        )
+        arguments = IMPLEMENTATION.argparse.Namespace(
+            command="validate-model",
+            result_path=Path("result.json"),
+            state_path=Path("state.json"),
+            artifact_path=Path("artifact.json"),
+            patch_path=Path("change.patch"),
+            workspace=Path("."),
+        )
+        stderr = io.StringIO()
+        with patch.object(
+            IMPLEMENTATION,
+            "parse_arguments",
+            return_value=arguments,
+        ), patch.object(
+            IMPLEMENTATION,
+            "validate_model_command",
+            side_effect=error,
+        ), redirect_stderr(stderr):
+            self.assertEqual(IMPLEMENTATION.main(), 1)
+
+        self.assertEqual(
+            stderr.getvalue(),
+            (
+                "::error title=Workflow changes are not allowed::"
+                "Post `/ai implement --allow-workflow-changes` and retry.\n"
+            ),
+        )
 
     def test_push_uses_exact_force_with_lease(self):
         workspace = Path("/workspace")
@@ -4885,6 +4999,10 @@ class WorkflowPolicyTest(unittest.TestCase):
         self.assertIn(
             "PULL_REQUEST_NUMBER: "
             "${{ inputs['pull-request-number'] }}",
+            reconcile.group(1),
+        )
+        self.assertIn(
+            "steps.prepare.outputs.command_allows_workflow_changes",
             reconcile.group(1),
         )
         resolve = re.search(
