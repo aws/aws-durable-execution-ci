@@ -268,7 +268,7 @@ class RefreshingCredentialProvider:
                 try:
                     refreshed = validate_credentials(self.refresh())
                 except RuntimeError:
-                    if expiration <= current_time:
+                    if expiration <= self.now():
                         raise
                 else:
                     if parse_expiration(
