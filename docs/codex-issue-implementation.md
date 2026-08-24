@@ -210,7 +210,10 @@ branch revision. A change is committed to the deterministic
 `implement-issue-<number>` branch and published with an exact
 `--force-with-lease` comparison that requires the remote branch not to exist.
 The workflow checks again for a linked pull request before it pushes and before
-it opens one draft pull request whose body closes the issue.
+it opens one draft pull request whose title identifies the issue and requested
+work. The body closes the issue and records the issue title, any maintainer
+guidance appended to `/ai implement`, the model summary, changed paths, and
+validation performed.
 
 If the default branch advances after model execution starts, a changed
 implementation is still published from its validated original revision and
@@ -221,9 +224,13 @@ because its decision applies to the repository state that Codex inspected.
 If a workflow-owned branch was pushed but pull request creation failed, a
 later run recognizes commit trailers on that branch and retries only pull
 request creation. The trailers include a semantic digest of the issue title,
-body, state, and labels; recovery is blocked when the current issue no longer
-matches the work that produced the branch. Recovery is also refused when any
-open or closed pull request has already used that branch, so closing a
+body, state, and labels plus bounded publication metadata for the summary,
+changed paths, and validation, so recovery produces the same useful pull
+request description as the original publication attempt. Branches created by
+older workflow revisions recover the summary available in their commit and
+identify unavailable details. Recovery is blocked when the current issue no
+longer matches the work that produced the branch. Recovery is also refused
+when any open or closed pull request has already used that branch, so closing a
 generated draft and deleting its branch does not cause a replacement or orphan
 branch. An unrelated branch with the deterministic name is not overwritten.
 

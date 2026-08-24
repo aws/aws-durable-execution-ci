@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 
 import argparse
+import base64
+import binascii
 import hashlib
 import html
 import json
@@ -43,11 +45,15 @@ FEEDBACK_CURSOR_PATTERN = re.compile(
 )
 AUTOMATION_TRAILER = "Codex-Automation: issue-implementation"
 ISSUE_SNAPSHOT_TRAILER = "Codex-Issue-Snapshot"
+PUBLICATION_METADATA_TRAILER = "Codex-Publication-Metadata"
 MAX_CONTEXT_BYTES = 1_000_000
 MAX_AUTOMATION_COMMIT_CHAIN = 100
 MAX_DISCOVERY_CANDIDATES_PER_RUN = 25
 MAX_ISSUES_PER_RUN = 10
 MAX_PATCH_BYTES = 5_000_000
+MAX_PUBLICATION_METADATA_BYTES = 160_000
+MAX_PUBLICATION_PATH_CHARACTERS = 8_000
+MAX_PUBLICATION_PATHS = 50
 MAX_REVIEW_COMMENTS = 1_000
 MAX_STAGED_BLOB_BYTES = 5_000_000
 MAX_STAGED_CONTENT_BYTES = 5_000_000
@@ -1390,14 +1396,177 @@ def require_implementation_branch_available(state: dict[str, Any]) -> None:
         )
 
 
+def publication_metadata(
+    result: dict[str, Any],
+    paths: list[str],
+) -> dict[str, Any]:
+    validated_result = validate_model_result(result)
+    if validated_result["outcome"] != "changed":
+        raise ImplementationError(
+            "publication metadata requires a changed model result"
+        )
+    if (
+        not isinstance(paths, list)
+        or not paths
+        or any(not isinstance(path, str) or not path for path in paths)
+    ):
+        raise ImplementationError(
+            "publication metadata requires changed paths"
+        )
+
+    selected_paths: list[str] = []
+    selected_characters = 0
+    for path in paths:
+        if len(selected_paths) >= MAX_PUBLICATION_PATHS:
+            break
+        if selected_characters + len(path) > MAX_PUBLICATION_PATH_CHARACTERS:
+            break
+        selected_paths.append(path)
+        selected_characters += len(path)
+    return {
+        "version": 1,
+        "result": validated_result,
+        "changed_paths": selected_paths,
+        "changed_path_count": len(paths),
+    }
+
+
+def validate_publication_metadata(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != {
+        "version",
+        "result",
+        "changed_paths",
+        "changed_path_count",
+    }:
+        raise ImplementationError("publication metadata has invalid fields")
+    if value["version"] != 1:
+        raise ImplementationError("publication metadata version is invalid")
+    paths = value["changed_paths"]
+    count = value["changed_path_count"]
+    if (
+        not isinstance(paths, list)
+        or any(not isinstance(path, str) or not path for path in paths)
+        or type(count) is not int
+        or count <= 0
+        or count < len(paths)
+    ):
+        raise ImplementationError("publication metadata paths are invalid")
+    result = validate_model_result(value["result"])
+    if result["outcome"] != "changed":
+        raise ImplementationError("publication metadata result is invalid")
+    return {
+        "version": 1,
+        "result": result,
+        "changed_paths": paths,
+        "changed_path_count": count,
+    }
+
+
+def encode_publication_metadata(value: dict[str, Any]) -> str:
+    validated = validate_publication_metadata(value)
+    payload = json.dumps(
+        validated,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    if len(payload) > MAX_PUBLICATION_METADATA_BYTES:
+        raise ImplementationError("publication metadata is too large")
+    return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+
+
+def decode_publication_metadata(value: str) -> dict[str, Any]:
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value)
+        > ((MAX_PUBLICATION_METADATA_BYTES + 2) // 3) * 4
+        or re.fullmatch(r"[A-Za-z0-9_-]+", value) is None
+    ):
+        raise ImplementationError("publication metadata encoding is invalid")
+    padding = "=" * (-len(value) % 4)
+    try:
+        payload = base64.b64decode(
+            (value + padding).encode("ascii"),
+            altchars=b"-_",
+            validate=True,
+        )
+    except (ValueError, binascii.Error) as error:
+        raise ImplementationError(
+            "publication metadata encoding is invalid"
+        ) from error
+    if len(payload) > MAX_PUBLICATION_METADATA_BYTES:
+        raise ImplementationError("publication metadata is too large")
+    try:
+        decoded = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ImplementationError("publication metadata is invalid") from error
+    return validate_publication_metadata(decoded)
+
+
+def commit_message(repository: str, sha: str) -> str | None:
+    commit = run_gh_json([f"repos/{repository}/git/commits/{sha}"])
+    message = commit.get("message") if isinstance(commit, dict) else None
+    return message if isinstance(message, str) else None
+
+
+def legacy_publication_metadata(message: str) -> dict[str, Any]:
+    marker = f"\n\n{AUTOMATION_TRAILER}\n"
+    prefix, separator, _ = message.rpartition(marker)
+    summary = ""
+    if separator:
+        _, body_separator, body = prefix.partition("\n\n")
+        if body_separator:
+            summary = html.unescape(body).strip()
+    if not summary:
+        summary = "Implemented the requested issue."
+    result = validate_model_result(
+        {
+            "outcome": "changed",
+            "summary": summary,
+            "validation": [
+                "Validation metadata was not recorded by the creating "
+                "workflow revision."
+            ],
+        }
+    )
+    return {
+        "version": 0,
+        "result": result,
+        "changed_paths": [],
+        "changed_path_count": None,
+    }
+
+
+def commit_publication_metadata(
+    repository: str,
+    sha: str,
+) -> dict[str, Any]:
+    message = commit_message(repository, sha)
+    if message is None:
+        raise ImplementationError("GitHub returned an invalid commit")
+    prefix = f"{PUBLICATION_METADATA_TRAILER}: "
+    encoded = [
+        line[len(prefix):]
+        for line in message.splitlines()
+        if line.startswith(prefix)
+    ]
+    if not encoded:
+        return legacy_publication_metadata(message)
+    if len(encoded) != 1:
+        raise ImplementationError(
+            "automation commit has invalid publication metadata"
+        )
+    return decode_publication_metadata(encoded[0])
+
+
 def commit_has_automation_trailers(
     repository: str,
     sha: str,
     issue_number: int,
     snapshot_digest: str,
 ) -> bool:
-    commit = run_gh_json([f"repos/{repository}/git/commits/{sha}"])
-    message = commit.get("message") if isinstance(commit, dict) else None
+    message = commit_message(repository, sha)
     return (
         isinstance(message, str)
         and AUTOMATION_TRAILER in message.splitlines()
@@ -3135,27 +3304,88 @@ def safe_github_text(value: str) -> str:
     return escaped.replace("#", "&#35;").replace("@", "&#64;")
 
 
+def bounded_safe_github_text(value: str, limit: int) -> str:
+    escaped = safe_github_text(value)
+    if len(escaped) <= limit:
+        return escaped
+    return f"{escaped[: max(0, limit - 3)]}..."
+
+
+def markdown_list(
+    values: list[str],
+    empty: str,
+    limit: int,
+) -> str:
+    if not values:
+        return f"- {empty}"
+    lines: list[str] = []
+    length = 0
+    for value in values:
+        line = f"- {bounded_safe_github_text(value, 2_000)}"
+        if length + len(line) + 1 > limit:
+            lines.append("- Additional details omitted.")
+            break
+        lines.append(line)
+        length += len(line) + 1
+    return "\n".join(lines)
+
+
+def pull_request_title(state: dict[str, Any]) -> str:
+    issue_number = state["issue"]["number"]
+    issue_title = " ".join(state["issue"]["title"].split())
+    title = f"Implement #{issue_number}: {issue_title}"
+    return title[:256]
+
+
 def pull_request_body(
     state: dict[str, Any],
-    result: dict[str, Any] | None,
+    publication: dict[str, Any],
 ) -> str:
     issue_number = state["issue"]["number"]
-    if result is None:
-        summary = (
-            "Recovers the implementation branch created by an earlier "
-            "workflow run."
+    issue_title = bounded_safe_github_text(
+        state["issue"]["title"],
+        2_000,
+    )
+    command = state.get("implementation_command")
+    guidance = (
+        command.get("guidance")
+        if isinstance(command, dict)
+        and isinstance(command.get("guidance"), str)
+        else ""
+    )
+    requested_work = f"**Issue:** {issue_title}"
+    if guidance:
+        requested_work += (
+            "\n\n**Maintainer guidance:**\n\n"
+            f"{bounded_safe_github_text(guidance, 8_000)}"
         )
-        validation = "- Validation details are available in the creating run."
+
+    result = publication["result"]
+    summary = bounded_safe_github_text(result["summary"], 10_000)
+    validation = markdown_list(
+        result["validation"],
+        "Not run (Codex reported no validation commands).",
+        20_000,
+    )
+
+    paths = publication["changed_paths"]
+    changed_path_count = publication["changed_path_count"]
+    if changed_path_count is None:
+        changes = "- Change details are unavailable for this recovered branch."
     else:
-        summary = safe_github_text(result["summary"])
-        validation = "\n".join(
-            f"- {safe_github_text(item)}"
-            for item in result["validation"]
-        ) or "- Not run (Codex reported no validation commands)."
+        changes = markdown_list(paths, "No changed paths recorded.", 10_000)
+        omitted = changed_path_count - len(paths)
+        if omitted > 0:
+            changes += f"\n- {omitted} additional changed path(s) omitted."
+
     return (
         f"Closes #{issue_number}\n\n"
+        "## Requested Work\n\n"
+        f"{requested_work}\n\n"
         "## Summary\n\n"
         f"{summary}\n\n"
+        "## Changes\n\n"
+        f"{changes}\n\n"
         "## Validation\n\n"
         f"{validation}\n\n"
         "<!-- codex-issue-implementation -->"
@@ -3164,9 +3394,8 @@ def pull_request_body(
 
 def create_draft_pull_request(
     state: dict[str, Any],
-    result: dict[str, Any] | None,
+    publication: dict[str, Any],
 ) -> dict[str, Any]:
-    issue_number = state["issue"]["number"]
     target = state["target"]
     base_ref = (
         target["ref"]
@@ -3176,10 +3405,10 @@ def create_draft_pull_request(
     response = run_gh_json(
         [f"repos/{state['repository']}/pulls"],
         input_value={
-            "title": f"Implement issue #{issue_number}",
+            "title": pull_request_title(state),
             "head": state["branch"],
             "base": base_ref,
-            "body": pull_request_body(state, result),
+            "body": pull_request_body(state, publication),
             "draft": True,
         },
     )
@@ -3228,10 +3457,15 @@ def apply_patch_and_commit(
     if state["action"] == "implement":
         issue_number = state["issue"]["number"]
         subject = f"Implement #{issue_number}"
+        encoded_metadata = encode_publication_metadata(
+            publication_metadata(result, actual_paths)
+        )
         trailers = (
             f"Codex-Issue: #{issue_number}\n"
             f"{ISSUE_SNAPSHOT_TRAILER}: "
-            f"{issue_semantic_digest(state['issue'])}"
+            f"{issue_semantic_digest(state['issue'])}\n"
+            f"{PUBLICATION_METADATA_TRAILER}: "
+            f"{encoded_metadata}"
         )
     else:
         pull_request_number = state["target"]["pull_request_number"]
@@ -3445,12 +3679,17 @@ def publish_recovery(state: dict[str, Any]) -> None:
         raise ImplementationError(
             "recovery branch acquired pull request history during the run"
         )
-    create_draft_pull_request(state, None)
+    publication = commit_publication_metadata(
+        state["repository"],
+        current_branch["sha"],
+    )
+    create_draft_pull_request(state, publication)
 
 
 def publish_implementation(
     state: dict[str, Any],
     result: dict[str, Any],
+    publication_paths: list[str],
     patch_path: Path,
     workspace: Path,
 ) -> None:
@@ -3527,7 +3766,10 @@ def publish_implementation(
             "implementation branch acquired pull request history before "
             "pull request creation"
         )
-    create_draft_pull_request(state, result)
+    create_draft_pull_request(
+        state,
+        publication_metadata(result, publication_paths),
+    )
 
 
 def publish_review_update(
@@ -3615,7 +3857,13 @@ def publish_command(
     patch = read_model_patch(patch_path)
     result = validate_artifact(artifact, state, patch)
     if action == "implement":
-        publish_implementation(state, result, patch_path, workspace)
+        publish_implementation(
+            state,
+            result,
+            artifact["changed_paths"],
+            patch_path,
+            workspace,
+        )
     else:
         publish_review_update(state, result, patch_path, workspace)
 
