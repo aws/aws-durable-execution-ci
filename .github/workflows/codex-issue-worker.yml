@@ -19,6 +19,11 @@ on:
         description: Stable issue or pull request concurrency key
         required: true
         type: string
+      environment-name:
+        description: GitHub environment used for the model job
+        required: false
+        type: string
+        default: ai-pr-review-runtime
       publication-actor:
         description: Automatic token actor used for idempotency markers
         required: true
@@ -74,7 +79,8 @@ jobs:
   reconcile:
     name: Reconcile ${{ inputs['work-key'] }}
     runs-on: ubuntu-latest
-    environment: ai-pr-review-runtime
+    environment: >-
+      ${{ inputs['environment-name'] || 'ai-pr-review-runtime' }}
     timeout-minutes: 140
     permissions:
       contents: read

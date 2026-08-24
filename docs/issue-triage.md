@@ -138,8 +138,10 @@ role that GitHub's OIDC provider can assume. Do not add required reviewers or a
 wait timer to this environment because every new issue invokes the model.
 
 The workflow uses the same runtime environment and role as the AI pull request
-review workflow. The caller must specify `secrets: inherit` so GitHub resolves
-the environment-scoped secret inside the reusable job.
+review workflow. To select a different environment, pass
+`environment-name: ai-runtime` in the caller's `with` block. The caller must
+specify `secrets: inherit` so GitHub resolves the environment-scoped secret
+inside the reusable job.
 
 The role is restricted to the Codex Amazon Bedrock inference APIs by an inline
 session policy. The model job receives `contents: read`, `issues: read`, and

@@ -101,6 +101,9 @@ Create an `ai-pr-review-runtime` environment with this secret:
 
 - `BEDROCK_ROLE_ARN`: the IAM role that GitHub's OIDC provider can assume.
 
+To use a different environment, pass `environment-name: ai-runtime` in the
+caller job's `with` block and store `BEDROCK_ROLE_ARN` in that environment.
+
 Create a repository or organization Actions secret when workflow changes may
 be authorized:
 
@@ -142,6 +145,7 @@ Pass optional inputs from the caller job:
     with:
       no-pr-label: automation:no-pr
       max-issues: 5
+      environment-name: ai-runtime
       model: openai.gpt-5.6-sol
       reasoning-effort: xhigh
       allow-workflow-changes: false
@@ -150,6 +154,7 @@ Pass optional inputs from the caller job:
 - `no-pr-label` defaults to `codex:no-pr`.
 - `max-issues` defaults to 3 and is limited to 10 work items per discovery
   run.
+- `environment-name` defaults to `ai-pr-review-runtime`.
 - `model` defaults to `openai.gpt-5.6-sol`.
 - `reasoning-effort` defaults to `xhigh`.
 - `allow-workflow-changes` defaults to `false`. When false, a model result that

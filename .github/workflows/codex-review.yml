@@ -20,6 +20,11 @@ on:
         required: false
         type: string
         default: ""
+      environment-name:
+        description: GitHub environment used for the model job
+        required: false
+        type: string
+        default: ai-pr-review-runtime
       model:
         description: Codex model ID to use through Amazon Bedrock
         required: false
@@ -48,7 +53,8 @@ jobs:
   generate:
     name: Generate Codex review
     runs-on: ubuntu-latest
-    environment: ai-pr-review-runtime
+    environment: >-
+      ${{ inputs['environment-name'] || 'ai-pr-review-runtime' }}
     timeout-minutes: 45
     permissions:
       contents: read

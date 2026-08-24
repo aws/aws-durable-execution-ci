@@ -12,6 +12,11 @@ on:
         required: false
         type: string
         default: ""
+      environment-name:
+        description: GitHub environment used for AI model jobs
+        required: false
+        type: string
+        default: ai-pr-review-runtime
       run-claude:
         description: Run the Claude pull request review
         required: false
@@ -105,6 +110,8 @@ jobs:
       base-sha: ${{ needs.resolve_review.outputs.base-sha }}
       head-sha: ${{ needs.resolve_review.outputs.head-sha }}
       prompt-path: ${{ inputs['prompt-path'] }}
+      environment-name: >-
+        ${{ inputs['environment-name'] || 'ai-pr-review-runtime' }}
       model: ${{ inputs['claude-model'] || 'us.anthropic.claude-sonnet-5' }}
       reasoning-effort: ${{ inputs['claude-reasoning-effort'] || 'xhigh' }}
     secrets: inherit
@@ -126,6 +133,8 @@ jobs:
       base-sha: ${{ needs.resolve_review.outputs.base-sha }}
       head-sha: ${{ needs.resolve_review.outputs.head-sha }}
       prompt-path: ${{ inputs['prompt-path'] }}
+      environment-name: >-
+        ${{ inputs['environment-name'] || 'ai-pr-review-runtime' }}
       model: ${{ inputs['codex-model'] || 'openai.gpt-5.6-sol' }}
       reasoning-effort: ${{ inputs['codex-reasoning-effort'] || 'xhigh' }}
     secrets: inherit

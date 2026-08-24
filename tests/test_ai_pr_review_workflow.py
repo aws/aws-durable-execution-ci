@@ -56,6 +56,7 @@ class AiPrReviewWorkflowTest(unittest.TestCase):
 
     def test_public_reviewer_configuration_defaults(self):
         expected_defaults = {
+            "environment-name": "ai-pr-review-runtime",
             "claude-model": "us.anthropic.claude-sonnet-5",
             "claude-reasoning-effort": "xhigh",
             "codex-model": "openai.gpt-5.6-sol",
@@ -73,6 +74,12 @@ class AiPrReviewWorkflowTest(unittest.TestCase):
     def test_reviewer_configuration_is_forwarded(self):
         claude = job_block(AI_WORKFLOW, "claude-review")
         self.assertIn(
+            "environment-name: >-\n"
+            "        ${{ inputs['environment-name'] || "
+            "'ai-pr-review-runtime' }}",
+            claude,
+        )
+        self.assertIn(
             "model: ${{ inputs['claude-model'] || "
             "'us.anthropic.claude-sonnet-5' }}",
             claude,
@@ -85,6 +92,12 @@ class AiPrReviewWorkflowTest(unittest.TestCase):
 
         codex = job_block(AI_WORKFLOW, "codex-review")
         self.assertIn(
+            "environment-name: >-\n"
+            "        ${{ inputs['environment-name'] || "
+            "'ai-pr-review-runtime' }}",
+            codex,
+        )
+        self.assertIn(
             "model: ${{ inputs['codex-model'] || 'openai.gpt-5.6-sol' }}",
             codex,
         )
@@ -95,6 +108,11 @@ class AiPrReviewWorkflowTest(unittest.TestCase):
         )
 
     def test_claude_workflow_uses_model_and_reasoning_inputs(self):
+        self.assert_input_default(
+            CLAUDE_WORKFLOW,
+            "environment-name",
+            "ai-pr-review-runtime",
+        )
         self.assert_input_default(
             CLAUDE_WORKFLOW,
             "model",
@@ -136,6 +154,11 @@ class AiPrReviewWorkflowTest(unittest.TestCase):
     def test_codex_workflow_uses_model_and_reasoning_inputs(self):
         self.assert_input_default(
             CODEX_WORKFLOW,
+            "environment-name",
+            "ai-pr-review-runtime",
+        )
+        self.assert_input_default(
+            CODEX_WORKFLOW,
             "model",
             "openai.gpt-5.6-sol",
         )
@@ -146,6 +169,15 @@ class AiPrReviewWorkflowTest(unittest.TestCase):
             '\\"${CODEX_REASONING_EFFORT}\\""',
             CODEX_WORKFLOW,
         )
+
+    def test_reviewer_jobs_use_configurable_runtime_environment(self):
+        expected = (
+            "environment: >-\n"
+            "      ${{ inputs['environment-name'] || "
+            "'ai-pr-review-runtime' }}"
+        )
+        self.assertIn(expected, job_block(CLAUDE_WORKFLOW, "generate"))
+        self.assertIn(expected, job_block(CODEX_WORKFLOW, "generate"))
 
     def test_issue_comment_command_is_resolved_before_review(self):
         resolve = job_block(AI_WORKFLOW, "resolve_review")

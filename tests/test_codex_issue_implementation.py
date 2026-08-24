@@ -5087,6 +5087,12 @@ class WorkflowPolicyTest(unittest.TestCase):
             implement.group(1),
         )
         self.assertIn(
+            "environment-name: >-\n"
+            "        ${{ inputs['environment-name'] || "
+            "'ai-pr-review-runtime' }}",
+            implement.group(1),
+        )
+        self.assertIn(
             "address-only: ${{ matrix.address_only }}",
             implement.group(1),
         )
@@ -5114,12 +5120,31 @@ class WorkflowPolicyTest(unittest.TestCase):
         assert resolve is not None
         self.assertNotIn("environment:", resolve.group(1))
         self.assertIn(
-            "environment: ai-pr-review-runtime",
+            "environment: >-\n"
+            "      ${{ inputs['environment-name'] || "
+            "'ai-pr-review-runtime' }}",
             reconcile.group(1),
         )
         self.assertNotIn("environment:", publish.group(1))
         self.assertNotIn("concurrency:", reconcile.group(1))
         self.assertNotIn("concurrency:", publish.group(1))
+
+    def test_runtime_environment_inputs_preserve_the_default(self):
+        self.assertEqual(
+            len(
+                re.findall(
+                    r"(?ms)^      environment-name:\n"
+                    r".*?default: ai-pr-review-runtime",
+                    WORKFLOW,
+                )
+            ),
+            2,
+        )
+        self.assertRegex(
+            WORKER_WORKFLOW,
+            r"(?ms)^      environment-name:\n"
+            r".*?default: ai-pr-review-runtime",
+        )
 
     def test_model_has_two_hours_and_refreshable_aws_credentials(self):
         reconcile = re.search(
