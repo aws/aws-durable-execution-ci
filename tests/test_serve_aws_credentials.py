@@ -11,6 +11,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from scripts.serve_aws_credentials import normalize_expiration
+
 
 SCRIPT = (
     Path(__file__).resolve().parents[1]
@@ -29,7 +31,7 @@ class CredentialServerTest(unittest.TestCase):
                     "AWS_SECRET_ACCESS_KEY": "test-secret",
                     "AWS_SESSION_TOKEN": "test-session",
                     "AWS_CREDENTIAL_EXPIRATION": (
-                        "2026-08-22T06:30:00Z"
+                        '"2026-08-22T06:30:00Z"'
                     ),
                     "CODEX_CREDENTIAL_PROXY_TOKEN": "proxy-token",
                 }
@@ -88,6 +90,14 @@ class CredentialServerTest(unittest.TestCase):
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.communicate(timeout=2)
+
+    def test_preserves_plain_expiration(self):
+        expiration = "2026-08-22T06:30:00Z"
+
+        self.assertEqual(
+            normalize_expiration(expiration),
+            expiration,
+        )
 
 
 if __name__ == "__main__":
