@@ -3400,6 +3400,30 @@ class ValidationPolicyTest(unittest.TestCase):
 
             self.assertFalse(artifact_path.exists())
 
+    def test_runtime_credential_audit_includes_refreshed_sessions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            audit_path = Path(directory) / "credentials.json"
+            audit_path.write_text(
+                json.dumps(
+                    [
+                        "ASIAREFRESHED",
+                        "refreshed-secret",
+                        "refreshed-session",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            with patch.dict(
+                os.environ,
+                {"CODEX_RUNTIME_CREDENTIALS_PATH": str(audit_path)},
+                clear=True,
+            ):
+                self.assertTrue(
+                    IMPLEMENTATION.contains_runtime_credential(
+                        b"Credential: refreshed-session"
+                    )
+                )
+
     def test_binary_staged_content_cannot_hide_a_runtime_credential(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -5031,6 +5055,36 @@ class WorkflowPolicyTest(unittest.TestCase):
         self.assertNotIn("concurrency:", reconcile.group(1))
         self.assertNotIn("concurrency:", publish.group(1))
 
+    def test_model_has_two_hours_and_refreshable_aws_credentials(self):
+        reconcile = re.search(
+            r"(?ms)^  reconcile:\n(.*?)(?=^  publish:)",
+            WORKER_WORKFLOW,
+        )
+        model = re.search(
+            r"(?ms)^      - name: Implement current issue work with Codex\n"
+            r"(.*?)(?=^      - name:|\Z)",
+            WORKER_WORKFLOW,
+        )
+        assert reconcile is not None and model is not None
+        self.assertIn("timeout-minutes: 140", reconcile.group(1))
+        self.assertIn("\n            2h \\\n", model.group(1))
+        self.assertIn(
+            "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
+            model.group(1),
+        )
+        self.assertIn("AWS_ROLE_ARN:", model.group(1))
+        self.assertIn("AWS_ROLE_SESSION_NAME:", model.group(1))
+        self.assertIn(
+            '"$credential_audit_file" \\\n',
+            model.group(1),
+        )
+        self.assertIn(
+            "CODEX_RUNTIME_CREDENTIALS_PATH="
+            '"$credential_audit_file"',
+            model.group(1),
+        )
+        self.assertNotIn("runtime_aws_access_key_id", model.group(1))
+
     def test_file_sparse_checkout_disables_cone_mode(self):
         checkout = re.search(
             r"(?ms)^      - name: Load trusted Codex implementation toolkit\n"
@@ -5171,6 +5225,7 @@ class WorkflowPolicyTest(unittest.TestCase):
         self.assertNotIn("AWS_ACCESS_KEY_ID", model_command)
         self.assertNotIn("AWS_SECRET_ACCESS_KEY", model_command)
         self.assertNotIn("AWS_SESSION_TOKEN", model_command)
+        self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST", model_command)
         self.assertIn("--disable multi_agent", block)
         self.assertIn("--ignore-rules", block)
         self.assertIn("project_doc_max_bytes=0", block)

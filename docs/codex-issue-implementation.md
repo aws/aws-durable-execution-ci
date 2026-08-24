@@ -184,6 +184,10 @@ by a newer event for the same issue. GitHub may replace an older pending worker
 before it starts, since the newer worker will reconcile fresher state. Different
 issue numbers remain independent matrix jobs and can run in parallel.
 
+Codex model execution is limited to two hours. The reconcile job has a
+140-minute timeout so setup and post-model validation retain the existing
+20-minute allowance.
+
 With no linked open pull request, Codex checks out the exact current default
 branch revision. A change is committed to the deterministic
 `implement-issue-<number>` branch and published with an exact
@@ -324,9 +328,10 @@ The workflow:
 - runs Codex as an unprivileged user with a writable worktree, read-only Git
   metadata, an exact safe-directory registration, and optional Git locks
   disabled;
-- serves Bedrock credentials through a runner-owned loopback endpoint and
-  verifies that network-disabled model tools cannot reach it; Codex receives
-  only the endpoint URI and a short-lived authorization token;
+- serves Bedrock credentials through a runner-owned loopback endpoint,
+  refreshes the role session with a new GitHub OIDC token before expiration,
+  and verifies that network-disabled model tools cannot reach the endpoint;
+  Codex receives only the endpoint URI and a short-lived authorization token;
 - uses `workspace-write` with approval prompts disabled, outbound network and
   web search disabled, temporary directories excluded, and apps, plugins,
   hooks, image, browser, computer, and multi-agent tools disabled;
@@ -338,10 +343,11 @@ The workflow:
 - accepts only a closed JSON result contract, bounds individual and cumulative
   staged blob content before diff generation, and streams the Git patch under
   a separate hard size limit;
-- rejects gitlinks, runtime credentials in model-authored result text, raw
-  staged blobs, and patch metadata, protected workflow renames or edits, stale
-  state, prior pull request history, and changes outside the checked-out
-  repository;
+- records every initial and refreshed session credential in a runner-private
+  audit file and rejects those credentials in model-authored result text, raw
+  staged blobs, and patch metadata, along with gitlinks, protected workflow
+  renames or edits, stale state, prior pull request history, and changes outside
+  the checked-out repository;
 - re-checks all mutation preconditions in the publication job before the
   event-suppressing automatic token is used.
 

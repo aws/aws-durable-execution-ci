@@ -2314,7 +2314,7 @@ def validate_staged_blob_sizes(
 
 
 def runtime_credential_values() -> list[bytes]:
-    values: list[bytes] = []
+    values: set[bytes] = set()
     for name in (
         "AWS_ACCESS_KEY_ID",
         "AWS_SECRET_ACCESS_KEY",
@@ -2326,8 +2326,35 @@ def runtime_credential_values() -> list[bytes]:
     ):
         value = os.environ.get(name, "")
         if value:
-            values.append(value.encode("utf-8"))
-    return values
+            values.add(value.encode("utf-8"))
+
+    audit_path = os.environ.get("CODEX_RUNTIME_CREDENTIALS_PATH", "")
+    if audit_path:
+        path = Path(audit_path)
+        try:
+            if path.stat().st_size > 5_000_000:
+                raise ImplementationError(
+                    "runtime credential audit is too large"
+                )
+            audited = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise ImplementationError(
+                "runtime credential audit is invalid"
+            ) from error
+        if (
+            not isinstance(audited, list)
+            or len(audited) > 100
+            or any(
+                not isinstance(value, str)
+                or not value
+                for value in audited
+            )
+        ):
+            raise ImplementationError(
+                "runtime credential audit is invalid"
+            )
+        values.update(value.encode("utf-8") for value in audited)
+    return sorted(values)
 
 
 def contains_runtime_credential(content: bytes) -> bool:
