@@ -161,7 +161,7 @@ jobs:
           node-version: "24"
 
       - name: Install Codex CLI
-        run: npm install -g "@openai/codex@0.145.0"
+        run: npm install -g "@openai/codex@0.149.1"
 
       - name: Configure AWS credentials for Codex
         id: aws-credentials
