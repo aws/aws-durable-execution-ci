@@ -191,6 +191,12 @@ branch revision. A change is committed to the deterministic
 The workflow checks again for a linked pull request before it pushes and before
 it opens one draft pull request whose body closes the issue.
 
+If the default branch advances after model execution starts, a changed
+implementation is still published from its validated original revision and
+the draft pull request is opened against the current default branch. A
+`no_change` result still requires the default branch SHA to remain unchanged
+because its decision applies to the repository state that Codex inspected.
+
 If a workflow-owned branch was pushed but pull request creation failed, a
 later run recognizes commit trailers on that branch and retries only pull
 request creation. The trailers include a semantic digest of the issue title,
@@ -277,9 +283,10 @@ of these change after model execution:
 - the selected `/ai implement` comment or its author's current permission;
 - linked pull request count, identity, and issue ownership for issue-scoped
   work;
-- the exact pull request identity, refs, and head SHA for review commands;
-- default branch designation or SHA, including immediately before a pull
-  request head update;
+- the exact pull request identity, refs, head SHA, and base SHA for review
+  commands;
+- the default branch designation for new implementation pull requests, and
+  both its designation and SHA for `no_change` decisions;
 - unprocessed authorized review markers, batch commands, and feedback since
   the prepared head commit;
 - deterministic implementation branch state.

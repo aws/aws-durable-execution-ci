@@ -1353,7 +1353,9 @@ def branch_has_pull_request_history(repository: str, branch: str) -> bool:
     return bool(response)
 
 
-def require_default_branch_unchanged(state: dict[str, Any]) -> None:
+def require_default_branch_designation_unchanged(
+    state: dict[str, Any],
+) -> None:
     repository = state["repository"]
     target = state["target"]
     metadata = repository_metadata(repository)
@@ -1362,6 +1364,11 @@ def require_default_branch_unchanged(state: dict[str, Any]) -> None:
             "default branch designation changed during the run"
         )
 
+
+def require_default_branch_unchanged(state: dict[str, Any]) -> None:
+    require_default_branch_designation_unchanged(state)
+    repository = state["repository"]
+    target = state["target"]
     current_default = branch_ref(repository, target["ref"])
     if current_default is None or current_default["sha"] != target["sha"]:
         raise ImplementationError(
@@ -3411,10 +3418,10 @@ def publish_implementation(
 ) -> None:
     require_current_issue(state)
     require_linked_pull_requests(state)
-    require_default_branch_unchanged(state)
 
     issue_number = state["issue"]["number"]
     if result["outcome"] == "no_change":
+        require_default_branch_unchanged(state)
         require_current_issue(state)
         if linked_open_pull_requests(state["repository"], issue_number):
             raise ImplementationError(
@@ -3454,12 +3461,13 @@ def publish_implementation(
         add_issue_label(state["repository"], issue_number, label)
         return
 
+    require_default_branch_designation_unchanged(state)
     commit_sha = apply_patch_and_commit(
         workspace, patch_path, state, result
     )
     require_current_issue(state)
     require_linked_pull_requests(state)
-    require_default_branch_unchanged(state)
+    require_default_branch_designation_unchanged(state)
     if branch_has_pull_request_history(
         state["repository"], state["branch"]
     ):
@@ -3475,7 +3483,7 @@ def publish_implementation(
             "a linked pull request appeared before pull request creation"
         )
     require_current_issue(state)
-    require_default_branch_unchanged(state)
+    require_default_branch_designation_unchanged(state)
     if branch_has_pull_request_history(state["repository"], state["branch"]):
         raise ImplementationError(
             "implementation branch acquired pull request history before "

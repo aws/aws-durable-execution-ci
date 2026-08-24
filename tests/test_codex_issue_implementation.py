@@ -3795,16 +3795,20 @@ class ValidationPolicyTest(unittest.TestCase):
                 prepared,
             )
 
-        with patch.object(
-            IMPLEMENTATION,
-            "fetch_pull_request",
-            return_value=pull_request(head_sha="c" * 40),
+        for changed in (
+            pull_request(head_sha="c" * 40),
+            pull_request(base_sha="c" * 40),
         ):
-            with self.assertRaisesRegex(
-                IMPLEMENTATION.ImplementationError,
-                "pull request changed",
+            with self.subTest(changed=changed), patch.object(
+                IMPLEMENTATION,
+                "fetch_pull_request",
+                return_value=changed,
             ):
-                IMPLEMENTATION.require_current_pull_request(state)
+                with self.assertRaisesRegex(
+                    IMPLEMENTATION.ImplementationError,
+                    "pull request changed",
+                ):
+                    IMPLEMENTATION.require_current_pull_request(state)
 
     def test_no_pr_gate_ignores_only_updated_at(self):
         prepared = IMPLEMENTATION.issue_snapshot(issue())
@@ -4168,11 +4172,13 @@ class ValidationPolicyTest(unittest.TestCase):
                 IMPLEMENTATION.ImplementationError,
                 "designation changed",
             ):
-                IMPLEMENTATION.require_default_branch_unchanged(state)
+                IMPLEMENTATION.require_default_branch_designation_unchanged(
+                    state
+                )
 
         branch.assert_not_called()
 
-    def test_implementation_revalidates_default_branch_at_each_gate(self):
+    def test_new_pr_allows_default_branch_head_to_advance(self):
         state = {
             "repository": "aws/example",
             "issue": {"number": 31},
@@ -4196,8 +4202,14 @@ class ValidationPolicyTest(unittest.TestCase):
             "require_linked_pull_requests",
         ), patch.object(
             IMPLEMENTATION,
-            "require_default_branch_unchanged",
+            "require_default_branch_designation_unchanged",
         ) as require_default, patch.object(
+            IMPLEMENTATION,
+            "require_default_branch_unchanged",
+            side_effect=AssertionError(
+                "new PR publication must not require the old base SHA"
+            ),
+        ), patch.object(
             IMPLEMENTATION,
             "apply_patch_and_commit",
             return_value=commit_sha,
@@ -4255,7 +4267,7 @@ class ValidationPolicyTest(unittest.TestCase):
             "require_linked_pull_requests",
         ), patch.object(
             IMPLEMENTATION,
-            "require_default_branch_unchanged",
+            "require_default_branch_designation_unchanged",
         ), patch.object(
             IMPLEMENTATION,
             "apply_patch_and_commit",
