@@ -3,6 +3,18 @@ name: Claude PR Review
 on:
   workflow_call:
     inputs:
+      pull-request-number:
+        description: Pull request number to review
+        required: true
+        type: string
+      base-sha:
+        description: Expected pull request base revision
+        required: true
+        type: string
+      head-sha:
+        description: Expected pull request head revision
+        required: true
+        type: string
       prompt-path:
         description: Optional prompt file relative to the caller repository
         required: false
@@ -24,6 +36,13 @@ on:
         required: false
 
 permissions: {}
+
+concurrency:
+  group: >-
+    ai-pr-review-claude-${{ github.repository_id }}-${{
+      inputs['pull-request-number']
+    }}
+  cancel-in-progress: true
 
 jobs:
   generate:
@@ -69,7 +88,7 @@ jobs:
         with:
           fetch-depth: 1
           persist-credentials: false
-          ref: ${{ github.event.pull_request.base.sha }}
+          ref: ${{ inputs['base-sha'] }}
 
       - name: Reserve AI review toolkit path
         run: |
@@ -103,10 +122,10 @@ jobs:
 
       - name: Prepare pull request review context
         env:
-          EXPECTED_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          EXPECTED_BASE_SHA: ${{ inputs['base-sha'] }}
+          EXPECTED_HEAD_SHA: ${{ inputs['head-sha'] }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_NUMBER: ${{ inputs['pull-request-number'] }}
         run: bash .ai-review-toolkit/scripts/prepare_ai_review_context.sh
 
       - name: Prepare review inputs
@@ -247,10 +266,10 @@ jobs:
 
       - name: Post Claude review
         env:
-          EXPECTED_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          EXPECTED_BASE_SHA: ${{ inputs['base-sha'] }}
+          EXPECTED_HEAD_SHA: ${{ inputs['head-sha'] }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_NUMBER: ${{ inputs['pull-request-number'] }}
           REVIEW_FILE: ${{ runner.temp }}/claude-review/claude-review.json
         run: |
           bash .ai-review-toolkit/scripts/post_ai_review.sh \

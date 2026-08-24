@@ -29,6 +29,8 @@ name: AI PR Review
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review]
+  issue_comment:
+    types: [created]
 
 permissions: {}
 
@@ -45,6 +47,30 @@ jobs:
 Replace `<full-commit-sha>` with the 40-character commit SHA to use. Pinning is
 especially important because `secrets: inherit` grants the reusable workflow
 access to secrets available to the caller.
+
+## Request a review
+
+A team member can post `/ai review` as a standalone comment on an open pull
+request to review its current revision. Leading and trailing spaces or tabs are
+ignored, and one or more spaces or tabs may separate `/ai` and `review`. The
+author must currently have `write`, `maintain`, or `admin` repository
+permission and must not be a bot.
+
+Dependabot, draft pull requests, and pull requests from forks do not run an
+automatic AI review. An authorized command starts the enabled generation and
+publication jobs directly for those pull requests. The workflow resolves the
+pull request's current base and head revisions before starting, and publication
+still stops if either revision changes while the review is running.
+
+Concurrency is applied only after resolution. Claude and Codex each use a
+separate group keyed by repository ID and pull request number, so both
+reviewers can run in parallel while a newer command or synchronization event
+replaces only an older run of the same reviewer on the same pull request.
+Ordinary comments that are not authorized review commands never enter those
+groups and cannot cancel an active review.
+
+The caller must declare the `issue_comment` event shown above. A reusable
+workflow does not add its own event triggers to the caller.
 
 ## Select reviewers
 
@@ -104,23 +130,20 @@ limited to changed diff hunks and must include at least one added line.
 
 ## Repository setup
 
-Create these environments in each consuming repository:
-
-- `ai-pr-review`: Add required reviewers. This approval gates reviews for
-  Dependabot, draft pull requests, and pull requests from forks.
-- `ai-pr-review-runtime`: Add the `BEDROCK_ROLE_ARN` secret containing the IAM
-  role that GitHub's OIDC provider can assume. Do not add required reviewers or
-  a wait timer to this environment; every model-generation job uses it, so
-  either rule would require manual approval for every review.
+Create an `ai-pr-review-runtime` environment in each consuming repository. Add
+the `BEDROCK_ROLE_ARN` secret containing the IAM role that GitHub's OIDC
+provider can assume. Do not add required reviewers or a wait timer to this
+environment; every model-generation job uses it, so either rule would require
+manual approval for every review.
 
 Keep `BEDROCK_ROLE_ARN` in `ai-pr-review-runtime`. The caller must still specify
 `secrets: inherit` for GitHub to resolve environment-scoped secrets inside
 cross-repository reusable jobs. The model-generation jobs remain bound to
 `ai-pr-review-runtime`, including its protection rules and branch policies.
 
-Trusted, non-draft branches in the same repository are reviewed automatically.
-The runtime role is restricted to the model APIs by inline session policies in
-the shared workflow.
+Non-draft, non-Dependabot pull requests from branches in the same repository
+are reviewed automatically. The runtime role is restricted to the model APIs
+by inline session policies in the shared workflow.
 
 The shared workflow loads its scripts and prompts from
 `job.workflow_repository` at `job.workflow_sha`, so callers only need the
