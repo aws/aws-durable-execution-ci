@@ -23,6 +23,12 @@ sudo install \
   -g "$implementation_user" \
   "${home_dir}/.codex"
 
+# Standard hosted runners make /home/runner traversable. Keep this exact ACL
+# fallback for images that use a private runner home instead.
+if ! sudo -u "$implementation_user" test -x /home/runner; then
+  sudo setfacl -m "u:${implementation_user}:--x" /home/runner
+fi
+
 # Keep Git metadata read-only while allowing Codex to edit the worktree.
 sudo chown -R "${implementation_user}:${implementation_user}" "$GITHUB_WORKSPACE"
 sudo chown "runner:${implementation_user}" "$GITHUB_WORKSPACE"
