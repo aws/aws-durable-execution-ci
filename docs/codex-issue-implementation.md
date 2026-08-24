@@ -131,7 +131,7 @@ Pass optional inputs from the caller job:
       no-pr-label: automation:no-pr
       max-issues: 5
       model: openai.gpt-5.6-sol
-      reasoning-effort: high
+      reasoning-effort: xhigh
       allow-workflow-changes: false
 ```
 
@@ -139,7 +139,7 @@ Pass optional inputs from the caller job:
 - `max-issues` defaults to 3 and is limited to 10 work items per discovery
   run.
 - `model` defaults to `openai.gpt-5.6-sol`.
-- `reasoning-effort` defaults to `high`.
+- `reasoning-effort` defaults to `xhigh`.
 - `allow-workflow-changes` defaults to `false`. When false, a model result that
   changes `.github/workflows/**` is rejected before publication unless the
   current issue command includes `/ai implement --allow-workflow-changes`.

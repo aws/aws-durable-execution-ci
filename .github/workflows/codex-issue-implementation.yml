@@ -41,7 +41,7 @@ on:
           - high
           - xhigh
           - max
-        default: high
+        default: xhigh
       allow-workflow-changes:
         description: Allow Codex to change files under .github/workflows
         required: false
@@ -73,7 +73,7 @@ on:
         description: Codex reasoning effort
         required: false
         type: string
-        default: high
+        default: xhigh
       allow-workflow-changes:
         description: Allow Codex to change files under .github/workflows
         required: false
@@ -90,7 +90,7 @@ env:
   DEFAULT_NO_PR_LABEL: codex:no-pr
   DEFAULT_MAX_ISSUES: "3"
   DEFAULT_CODEX_MODEL: openai.gpt-5.6-sol
-  DEFAULT_REASONING_EFFORT: high
+  DEFAULT_REASONING_EFFORT: xhigh
 
 jobs:
   resolve:
@@ -198,7 +198,7 @@ jobs:
         ${{ inputs['no-pr-label'] || 'codex:no-pr' }}
       model: ${{ inputs['model'] || 'openai.gpt-5.6-sol' }}
       reasoning-effort: >-
-        ${{ inputs['reasoning-effort'] || 'high' }}
+        ${{ inputs['reasoning-effort'] || 'xhigh' }}
       allow-workflow-changes: >-
         ${{ inputs['allow-workflow-changes'] || false }}
     secrets: inherit

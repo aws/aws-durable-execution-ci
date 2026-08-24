@@ -54,7 +54,7 @@ concurrency:
 env:
   DEFAULT_NO_PR_LABEL: codex:no-pr
   DEFAULT_CODEX_MODEL: openai.gpt-5.6-sol
-  DEFAULT_REASONING_EFFORT: high
+  DEFAULT_REASONING_EFFORT: xhigh
 
 jobs:
   reconcile:
