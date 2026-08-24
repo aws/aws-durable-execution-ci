@@ -80,6 +80,10 @@ must allow the Bedrock Mantle inference actions used by the workflow. If the
 secret is omitted, notification delivery remains enabled but uses the
 deterministic fallback summary.
 
+The model job uses the `ai-pr-review-runtime` GitHub environment by default.
+Callers can select another environment by passing
+`environment-name: ai-runtime` in the `with` block.
+
 ## Security model
 
 Titles and bodies are untrusted model data, not instructions. The summarizer

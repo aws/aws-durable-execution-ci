@@ -308,6 +308,19 @@ class IssueTriagePolicyTest(unittest.TestCase):
 
 
 class IssueTriageWorkflowTest(unittest.TestCase):
+    def test_uses_configurable_runtime_environment(self):
+        self.assertRegex(
+            WORKFLOW,
+            r"(?ms)^      environment-name:\n"
+            r".*?default: ai-pr-review-runtime",
+        )
+        self.assertIn(
+            "environment: >-\n"
+            "      ${{ inputs['environment-name'] || "
+            "'ai-pr-review-runtime' }}",
+            job_block(WORKFLOW, "classify"),
+        )
+
     def test_workflow_defines_default_labels_and_override_input(self):
         self.assertIn("DEFAULT_ISSUE_TRIAGE_LABELS: |-", WORKFLOW)
         issue_labels = (

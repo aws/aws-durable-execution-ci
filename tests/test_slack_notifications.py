@@ -315,6 +315,19 @@ class SlackSummaryTest(unittest.TestCase):
 
 
 class SlackNotificationWorkflowTest(unittest.TestCase):
+    def test_uses_configurable_runtime_environment(self):
+        self.assertRegex(
+            WORKFLOW,
+            r"(?ms)^      environment-name:\n"
+            r".*?default: ai-pr-review-runtime",
+        )
+        self.assertIn(
+            "environment: >-\n"
+            "      ${{ inputs['environment-name'] || "
+            "'ai-pr-review-runtime' }}",
+            job_block(WORKFLOW, "summarize"),
+        )
+
     def test_exposes_model_input_with_default(self):
         self.assertRegex(
             WORKFLOW,

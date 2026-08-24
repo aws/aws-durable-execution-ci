@@ -136,10 +136,17 @@ provider can assume. Do not add required reviewers or a wait timer to this
 environment; every model-generation job uses it, so either rule would require
 manual approval for every review.
 
-Keep `BEDROCK_ROLE_ARN` in `ai-pr-review-runtime`. The caller must still specify
-`secrets: inherit` for GitHub to resolve environment-scoped secrets inside
-cross-repository reusable jobs. The model-generation jobs remain bound to
-`ai-pr-review-runtime`, including its protection rules and branch policies.
+To use a different environment, pass its name to the reusable workflow:
+
+```yaml
+    with:
+      environment-name: ai-runtime
+```
+
+Keep `BEDROCK_ROLE_ARN` in the selected environment. The caller must still
+specify `secrets: inherit` for GitHub to resolve environment-scoped secrets
+inside cross-repository reusable jobs. The model-generation jobs remain bound
+to that environment, including its protection rules and branch policies.
 
 Non-draft, non-Dependabot pull requests from branches in the same repository
 are reviewed automatically. The runtime role is restricted to the model APIs
