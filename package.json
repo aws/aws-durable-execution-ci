@@ -1,0 +1,9 @@
+{
+  "name": "aws-durable-execution-ci",
+  "version": "0.0.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "dependencies": {
+    "@openai/codex": "0.149.1"
+  }
+}

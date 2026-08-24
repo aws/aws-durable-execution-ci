@@ -10,6 +10,13 @@ Shared GitHub Actions workflows for AWS Durable Execution repositories.
 - [Issue triage](docs/issue-triage.md): Uses AI to classify new issues with existing repository labels.
 - [Stale issue closer](docs/stale-issue-closer.md): Closes issues with a `needs-info` label after 14 days without a response. Clears the label if a response was posted within the 14 day window.
 
+## Dependency updates
+
+Dependabot checks the npm runtime dependencies and SHA-pinned GitHub Actions
+each week. Codex CLI is pinned in `package.json` and `package-lock.json`; the
+shared workflows install that locked version through
+`scripts/install_codex_cli.sh`.
+
 ## Security
 
 See [CONTRIBUTING](CONTRIBUTING.md#security-issue-notifications) for more

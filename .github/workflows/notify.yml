@@ -76,6 +76,9 @@ jobs:
           ref: ${{ job.workflow_sha }}
           path: .notification-toolkit
           sparse-checkout: |
+            package.json
+            package-lock.json
+            scripts/install_codex_cli.sh
             scripts/prepare_ai_summary_user.sh
             scripts/summarize_notification.py
           sparse-checkout-cone-mode: false
@@ -101,7 +104,9 @@ jobs:
 
       - name: Install Codex CLI
         if: env.BEDROCK_ROLE_ARN != ''
-        run: npm install -g "@openai/codex@0.149.1"
+        run: >-
+          bash .notification-toolkit/scripts/install_codex_cli.sh
+          .notification-toolkit
 
       - name: Configure AWS credentials for Codex
         if: env.BEDROCK_ROLE_ARN != ''

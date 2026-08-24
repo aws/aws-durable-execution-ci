@@ -115,6 +115,8 @@ jobs:
           ref: ${{ job.workflow_sha }}
           sparse-checkout: |
             .github/prompts
+            package.json
+            package-lock.json
             scripts
             README.md
           persist-credentials: false
@@ -171,7 +173,7 @@ jobs:
           node-version: "24"
 
       - name: Install Codex CLI
-        run: npm install -g "@openai/codex@0.149.1"
+        run: bash scripts/install_codex_cli.sh .
 
       - name: Configure AWS credentials for Codex
         id: aws-credentials
