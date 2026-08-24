@@ -17,6 +17,15 @@ def require_environment(name: str) -> str:
     return value
 
 
+def normalize_expiration(value: str) -> str:
+    """Accept both plain timestamps and JSON-serialized action outputs."""
+    try:
+        decoded = json.loads(value)
+    except json.JSONDecodeError:
+        return value
+    return decoded if isinstance(decoded, str) else value
+
+
 class CredentialHandler(http.server.BaseHTTPRequestHandler):
     server: Any
 
@@ -53,7 +62,9 @@ def main() -> int:
         "AccessKeyId": require_environment("AWS_ACCESS_KEY_ID"),
         "SecretAccessKey": require_environment("AWS_SECRET_ACCESS_KEY"),
         "Token": require_environment("AWS_SESSION_TOKEN"),
-        "Expiration": require_environment("AWS_CREDENTIAL_EXPIRATION"),
+        "Expiration": normalize_expiration(
+            require_environment("AWS_CREDENTIAL_EXPIRATION")
+        ),
     }
     authorization_token = require_environment(
         "CODEX_CREDENTIAL_PROXY_TOKEN"
