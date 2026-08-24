@@ -50,11 +50,26 @@ access to secrets available to the caller.
 
 ## Request a review
 
-A team member can post `/ai review` as a standalone comment on an open pull
-request to review its current revision. Leading and trailing spaces or tabs are
-ignored, and one or more spaces or tabs may separate `/ai` and `review`. The
-author must currently have `write`, `maintain`, or `admin` repository
-permission and must not be a bot.
+A team member can post `/ai review` on an open pull request to review its
+current revision. Leading and trailing spaces or tabs are ignored, and one or
+more spaces or tabs may separate `/ai` and `review`. The author must currently
+have `write`, `maintain`, or `admin` repository permission and must not be a
+bot.
+
+Append optional guidance after the command to tailor that review run:
+
+```text
+/ai review
+
+Focus on public API compatibility and verify the retry and replay tests.
+```
+
+Guidance can start on the command line or a later line, is limited to 10,000
+UTF-8 bytes, and is sent to both enabled reviewers. It can narrow or prioritize
+the review, request additional checks, or provide PR-specific context. It
+cannot override the workflow-owned read-only security policy, diff scope, or
+structured-output requirements. Automatic reviews run without per-review
+guidance.
 
 Dependabot, draft pull requests, and pull requests from forks do not run an
 automatic AI review. An authorized command starts the enabled generation and

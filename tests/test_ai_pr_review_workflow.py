@@ -74,6 +74,12 @@ class AiPrReviewWorkflowTest(unittest.TestCase):
     def test_reviewer_configuration_is_forwarded(self):
         claude = job_block(AI_WORKFLOW, "claude-review")
         self.assertIn(
+            "review-guidance-base64: >-\n"
+            "        ${{ needs.resolve_review.outputs."
+            "review-guidance-base64 }}",
+            claude,
+        )
+        self.assertIn(
             "environment-name: >-\n"
             "        ${{ inputs['environment-name'] || "
             "'ai-pr-review-runtime' }}",
@@ -92,6 +98,12 @@ class AiPrReviewWorkflowTest(unittest.TestCase):
 
         codex = job_block(AI_WORKFLOW, "codex-review")
         self.assertIn(
+            "review-guidance-base64: >-\n"
+            "        ${{ needs.resolve_review.outputs."
+            "review-guidance-base64 }}",
+            codex,
+        )
+        self.assertIn(
             "environment-name: >-\n"
             "        ${{ inputs['environment-name'] || "
             "'ai-pr-review-runtime' }}",
@@ -108,6 +120,11 @@ class AiPrReviewWorkflowTest(unittest.TestCase):
         )
 
     def test_claude_workflow_uses_model_and_reasoning_inputs(self):
+        self.assert_input_default(
+            CLAUDE_WORKFLOW,
+            "review-guidance-base64",
+            '""',
+        )
         self.assert_input_default(
             CLAUDE_WORKFLOW,
             "environment-name",
@@ -154,6 +171,11 @@ class AiPrReviewWorkflowTest(unittest.TestCase):
     def test_codex_workflow_uses_model_and_reasoning_inputs(self):
         self.assert_input_default(
             CODEX_WORKFLOW,
+            "review-guidance-base64",
+            '""',
+        )
+        self.assert_input_default(
+            CODEX_WORKFLOW,
             "environment-name",
             "ai-pr-review-runtime",
         )
@@ -198,6 +220,39 @@ class AiPrReviewWorkflowTest(unittest.TestCase):
         )
         self.assertIn("contents: read", resolve)
         self.assertIn("pull-requests: read", resolve)
+        self.assertIn(
+            "review-guidance-base64: >-\n"
+            "        ${{ steps.resolve.outputs.review-guidance-base64 }}",
+            resolve,
+        )
+
+    def test_authorized_guidance_is_appended_to_both_review_prompts(self):
+        for reviewer, workflow in (
+            ("claude", CLAUDE_WORKFLOW),
+            ("codex", CODEX_WORKFLOW),
+        ):
+            with self.subTest(reviewer=reviewer):
+                generate = job_block(workflow, "generate")
+                self.assertIn(
+                    "REVIEW_GUIDANCE_BASE64: "
+                    "${{ inputs['review-guidance-base64'] }}",
+                    generate,
+                )
+                self.assertIn(
+                    '"$REVIEW_GUIDANCE_BASE64"',
+                    generate,
+                )
+
+    def test_claude_prompt_output_uses_an_unpredictable_delimiter(self):
+        generate = job_block(CLAUDE_WORKFLOW, "generate")
+
+        self.assertIn(
+            'delimiter="AI_REVIEW_PROMPT_'
+            '$(cat /proc/sys/kernel/random/uuid)"',
+            generate,
+        )
+        self.assertIn('echo "prompt<<$delimiter"', generate)
+        self.assertIn('echo "$delimiter"', generate)
 
     def test_only_resolved_reviews_enter_pr_scoped_concurrency(self):
         entry_header = AI_WORKFLOW.split("jobs:", 1)[0]

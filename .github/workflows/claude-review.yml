@@ -15,6 +15,11 @@ on:
         description: Expected pull request head revision
         required: true
         type: string
+      review-guidance-base64:
+        description: Base64-encoded guidance from an authorized review command
+        required: false
+        type: string
+        default: ""
       prompt-path:
         description: Optional prompt file relative to the caller repository
         required: false
@@ -119,10 +124,12 @@ jobs:
         id: review-prompt
         env:
           CUSTOM_PROMPT_PATH: ${{ inputs['prompt-path'] }}
+          REVIEW_GUIDANCE_BASE64: ${{ inputs['review-guidance-base64'] }}
         run: |
           prompt_path="$(
             bash .ai-review-toolkit/scripts/resolve_ai_review_prompt.sh \
-              "$CUSTOM_PROMPT_PATH"
+              "$CUSTOM_PROMPT_PATH" \
+              "$REVIEW_GUIDANCE_BASE64"
           )"
           echo "path=$prompt_path" >> "$GITHUB_OUTPUT"
 
@@ -139,10 +146,11 @@ jobs:
         env:
           REVIEW_PROMPT_PATH: ${{ steps.review-prompt.outputs.path }}
         run: |
+          delimiter="AI_REVIEW_PROMPT_$(cat /proc/sys/kernel/random/uuid)"
           {
-            echo 'prompt<<AI_REVIEW_PROMPT'
+            echo "prompt<<$delimiter"
             cat "$REVIEW_PROMPT_PATH"
-            echo 'AI_REVIEW_PROMPT'
+            echo "$delimiter"
             echo "schema=$(jq -c . .ai-review-toolkit/.github/prompts/ai-pr-review-schema.json)"
           } >> "$GITHUB_OUTPUT"
 
