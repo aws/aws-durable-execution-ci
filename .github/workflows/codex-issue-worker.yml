@@ -80,7 +80,10 @@ jobs:
           sparse-checkout: |
             .github/prompts/codex-issue-implementation.md
             .github/prompts/codex-issue-implementation-schema.json
+            package.json
+            package-lock.json
             scripts/codex_issue_implementation.py
+            scripts/install_codex_cli.sh
             scripts/prepare_codex_implementation_user.sh
             scripts/serve_aws_credentials.py
           sparse-checkout-cone-mode: false
@@ -95,6 +98,8 @@ jobs:
           install -d -m 755 "$TOOLKIT_PATH"
           cp -R \
             .codex-implementation-toolkit/.github \
+            .codex-implementation-toolkit/package.json \
+            .codex-implementation-toolkit/package-lock.json \
             .codex-implementation-toolkit/scripts \
             "$TOOLKIT_PATH/"
           chmod -R a-w "$TOOLKIT_PATH"
@@ -223,7 +228,11 @@ jobs:
 
       - name: Install Codex CLI
         if: steps.prepare.outputs.run_model == 'true'
-        run: npm install -g "@openai/codex@0.149.1"
+        env:
+          TOOLKIT_PATH: ${{ runner.temp }}/codex-implementation-toolkit
+        run: >-
+          bash "$TOOLKIT_PATH/scripts/install_codex_cli.sh"
+          "$TOOLKIT_PATH"
 
       - name: Configure AWS credentials for Codex
         if: steps.prepare.outputs.run_model == 'true'
