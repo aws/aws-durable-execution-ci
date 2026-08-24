@@ -5036,6 +5036,25 @@ class WorkflowPolicyTest(unittest.TestCase):
         )
         self.assertEqual(WORKFLOW.count(expression), 1)
 
+    def test_reasoning_effort_defaults_to_xhigh(self):
+        self.assertEqual(WORKFLOW.count("default: xhigh"), 2)
+        self.assertIn(
+            "DEFAULT_REASONING_EFFORT: xhigh",
+            WORKFLOW,
+        )
+        self.assertIn(
+            "inputs['reasoning-effort'] || 'xhigh'",
+            WORKFLOW,
+        )
+        self.assertIn(
+            "DEFAULT_REASONING_EFFORT: xhigh",
+            WORKER_WORKFLOW,
+        )
+        self.assertNotIn(
+            "DEFAULT_REASONING_EFFORT: high",
+            WORKFLOW + WORKER_WORKFLOW,
+        )
+
     def test_resolver_receives_configured_no_pr_label(self):
         resolve = re.search(
             r"(?ms)^      - name: Resolve work items\n"
