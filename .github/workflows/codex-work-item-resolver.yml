@@ -1,0 +1,137 @@
+name: Codex Work Item Resolver
+
+on:
+  workflow_call:
+    inputs:
+      work-scope:
+        description: Resolve issue implementation or PR review work
+        required: true
+        type: string
+      requested-issue-number:
+        description: Optional issue number to resolve
+        required: false
+        type: string
+        default: ""
+      requested-pull-request-number:
+        description: Optional pull request number to resolve
+        required: false
+        type: string
+        default: ""
+      environment-name:
+        description: GitHub environment used for the model job
+        required: false
+        type: string
+        default: ai-pr-review-runtime
+      no-pr-label:
+        description: Label applied when no pull request is required
+        required: false
+        type: string
+        default: codex:no-pr
+      model:
+        description: Codex model ID to use through Amazon Bedrock
+        required: false
+        type: string
+        default: openai.gpt-5.6-sol
+      reasoning-effort:
+        description: Codex reasoning effort
+        required: false
+        type: string
+        default: xhigh
+      allow-workflow-changes:
+        description: Allow Codex to change files under .github/workflows
+        required: false
+        type: boolean
+        default: false
+      upload-work-items:
+        description: Upload the resolved work as a bounded artifact
+        required: false
+        type: boolean
+        default: false
+    outputs:
+      matrix:
+        description: Normalized issue or pull request work matrix
+        value: ${{ jobs.resolve.outputs.matrix }}
+      count:
+        description: Number of resolved work items
+        value: ${{ jobs.resolve.outputs.count }}
+      publication_actor:
+        description: Automatic token actor used for idempotency markers
+        value: ${{ jobs.resolve.outputs.publication_actor }}
+
+permissions: {}
+
+jobs:
+  resolve:
+    name: Resolve authorized work
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+    outputs:
+      matrix: ${{ steps.resolve.outputs.matrix }}
+      count: ${{ steps.resolve.outputs.count }}
+      publication_actor: ${{ steps.publisher.outputs.publish_actor }}
+
+    steps:
+      - name: Check out Codex implementation toolkit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          sparse-checkout: scripts
+          persist-credentials: false
+
+      - name: Resolve publication actor
+        id: publisher
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          publish_actor="$(
+            gh api graphql \
+              --field query='query { viewer { login } }' \
+              --jq '.data.viewer.login'
+          )"
+          if [[ ! "$publish_actor" =~ ^[A-Za-z0-9-]+(\[bot\])?$ ]]; then
+            echo "::error::Could not resolve the automatic token actor."
+            exit 1
+          fi
+          echo "publish_actor=$publish_actor" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve work items
+        id: resolve
+        env:
+          ALLOW_WORKFLOW_CHANGES: ${{ inputs['allow-workflow-changes'] }}
+          CODEX_ENVIRONMENT_NAME: ${{ inputs['environment-name'] }}
+          CODEX_MODEL: ${{ inputs['model'] }}
+          CODEX_PUBLISH_ACTOR: >-
+            ${{ steps.publisher.outputs.publish_actor }}
+          CODEX_REASONING_EFFORT: ${{ inputs['reasoning-effort'] }}
+          GH_TOKEN: ${{ github.token }}
+          NO_PR_LABEL: ${{ inputs['no-pr-label'] }}
+          REQUESTED_ISSUE_NUMBER: >-
+            ${{ inputs['requested-issue-number'] }}
+          REQUESTED_PULL_REQUEST_NUMBER: >-
+            ${{ inputs['requested-pull-request-number'] }}
+          WORK_ITEMS_PATH: >-
+            ${{ inputs['upload-work-items'] &&
+                format('{0}/codex-work-items.json', runner.temp) || '' }}
+          WORK_SCOPE: ${{ inputs['work-scope'] }}
+        run: >-
+          python3 scripts/codex_issue_implementation.py
+          resolve "$GITHUB_EVENT_PATH"
+
+      - name: Upload authorized work items
+        if: >-
+          steps.resolve.outcome == 'success' &&
+          inputs['upload-work-items']
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: >-
+            codex-${{ inputs['work-scope'] }}-work-items-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/codex-work-items.json
+          if-no-files-found: error
+          retention-days: 1

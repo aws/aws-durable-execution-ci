@@ -75,6 +75,8 @@ jobs:
       pull-request-number: ${{ steps.resolve.outputs.pull-request-number }}
       base-sha: ${{ steps.resolve.outputs.base-sha }}
       head-sha: ${{ steps.resolve.outputs.head-sha }}
+      review-guidance-base64: >-
+        ${{ steps.resolve.outputs.review-guidance-base64 }}
     steps:
       - name: Check out AI review toolkit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -109,6 +111,8 @@ jobs:
         ${{ needs.resolve_review.outputs.pull-request-number }}
       base-sha: ${{ needs.resolve_review.outputs.base-sha }}
       head-sha: ${{ needs.resolve_review.outputs.head-sha }}
+      review-guidance-base64: >-
+        ${{ needs.resolve_review.outputs.review-guidance-base64 }}
       prompt-path: ${{ inputs['prompt-path'] }}
       environment-name: >-
         ${{ inputs['environment-name'] || 'ai-pr-review-runtime' }}
@@ -132,6 +136,8 @@ jobs:
         ${{ needs.resolve_review.outputs.pull-request-number }}
       base-sha: ${{ needs.resolve_review.outputs.base-sha }}
       head-sha: ${{ needs.resolve_review.outputs.head-sha }}
+      review-guidance-base64: >-
+        ${{ needs.resolve_review.outputs.review-guidance-base64 }}
       prompt-path: ${{ inputs['prompt-path'] }}
       environment-name: >-
         ${{ inputs['environment-name'] || 'ai-pr-review-runtime' }}
