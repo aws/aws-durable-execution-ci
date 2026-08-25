@@ -19,6 +19,10 @@ WORKFLOW = (
 PR_ADDRESS_WORKFLOW = (
     REPO_ROOT / ".github/workflows/ai-pr-review-address.yml"
 ).read_text(encoding="utf-8")
+PR_ADDRESS_CONTINUATION_WORKFLOW = (
+    REPO_ROOT
+    / ".github/workflows/ai-pr-review-address-continuation.yml"
+).read_text(encoding="utf-8")
 PR_ADDRESS_DOC = (
     REPO_ROOT / "docs/ai-pr-review-address.md"
 ).read_text(encoding="utf-8")
@@ -5558,6 +5562,10 @@ class WorkflowPolicyTest(unittest.TestCase):
         expected_names = (
             (WORKFLOW, "AI Issue Implementation"),
             (PR_ADDRESS_WORKFLOW, "AI PR Review Address"),
+            (
+                PR_ADDRESS_CONTINUATION_WORKFLOW,
+                "AI PR Review Address Continuation",
+            ),
             (RESOLVER_WORKFLOW, "AI Work Item Resolver"),
         )
         for workflow, expected_name in expected_names:
@@ -5576,25 +5584,27 @@ class WorkflowPolicyTest(unittest.TestCase):
         for trigger in (
             "issue_comment:",
             "pull_request_review_comment:",
-            "workflow_run:",
             "workflow_dispatch:",
             "workflow_call:",
         ):
             with self.subTest(trigger=trigger):
                 self.assertIn(trigger, PR_ADDRESS_WORKFLOW)
+        self.assertNotIn("workflow_run:", PR_ADDRESS_WORKFLOW)
+        self.assertIn(
+            "workflow_run:",
+            PR_ADDRESS_CONTINUATION_WORKFLOW,
+        )
         self.assertNotIn("schedule:", WORKFLOW)
         self.assertNotIn("schedule:", PR_ADDRESS_WORKFLOW)
+        self.assertNotIn(
+            "schedule:",
+            PR_ADDRESS_CONTINUATION_WORKFLOW,
+        )
         self.assertIn("workflow_call:", RESOLVER_WORKFLOW)
         self.assertNotIn("issue_comment:", RESOLVER_WORKFLOW)
         self.assertIn(
             "- AI PR Review Address",
-            PR_ADDRESS_WORKFLOW,
-        )
-        self.assertFalse(
-            (
-                REPO_ROOT
-                / ".github/workflows/ai-pr-review-reconciliation.yml"
-            ).exists()
+            PR_ADDRESS_CONTINUATION_WORKFLOW,
         )
 
     def test_manual_pr_review_dispatch_only_accepts_the_target(self):
@@ -5615,13 +5625,13 @@ class WorkflowPolicyTest(unittest.TestCase):
             with self.subTest(runtime_input=runtime_input):
                 self.assertNotIn(runtime_input, dispatch.group(1))
 
-    def test_pr_review_address_docs_use_one_caller_workflow(self):
+    def test_pr_review_address_docs_use_distinct_continuation_workflow(self):
         self.assertIn(
             "Add `.github/workflows/ai-pr-review-address.yml`",
             PR_ADDRESS_DOC,
         )
-        self.assertNotIn(
-            "Add `.github/workflows/ai-pr-review-reconciliation.yml`",
+        self.assertIn(
+            "Add `.github/workflows/ai-pr-review-address-continuation.yml`",
             PR_ADDRESS_DOC,
         )
         self.assertNotIn(
@@ -5632,9 +5642,9 @@ class WorkflowPolicyTest(unittest.TestCase):
             PR_ADDRESS_DOC.count(
                 ".github/workflows/ai-pr-review-address.yml@"
             ),
-            2,
+            3,
         )
-        self.assertIn("branches-ignore:", PR_ADDRESS_DOC)
+        self.assertNotIn("branches-ignore:", PR_ADDRESS_DOC)
         self.assertIn("github.event_name == 'issue_comment'", PR_ADDRESS_DOC)
         self.assertIn(
             "github.event_name == 'pull_request_review_comment'",
@@ -5646,13 +5656,51 @@ class WorkflowPolicyTest(unittest.TestCase):
             PR_ADDRESS_DOC.count(
                 "format('{0}', github.event.workflow_run.id || '')"
             ),
-            2,
+            1,
         )
         self.assertGreaterEqual(
             PR_ADDRESS_DOC.count(
                 "format('{0}', github.event.workflow_run.run_attempt || '')"
             ),
-            2,
+            1,
+        )
+
+    def test_fork_main_branch_review_reaches_distinct_continuation(self):
+        trigger = re.search(
+            r"(?ms)^on:\n(.*?)(?=^permissions:)",
+            PR_ADDRESS_CONTINUATION_WORKFLOW,
+        )
+        address = re.search(
+            r"(?ms)^  address:\n(.*)\Z",
+            PR_ADDRESS_CONTINUATION_WORKFLOW,
+        )
+        assert trigger is not None and address is not None
+        self.assertIn("workflow_run:", trigger.group(1))
+        self.assertNotIn("branches:", trigger.group(1))
+        self.assertNotIn("branches-ignore:", trigger.group(1))
+        self.assertIn(
+            "github.event.workflow_run.event ==",
+            address.group(1),
+        )
+        self.assertIn(
+            "'pull_request_review_comment'",
+            address.group(1),
+        )
+        self.assertIn(
+            "github.event.workflow_run.conclusion == 'success'",
+            address.group(1),
+        )
+        self.assertIn(
+            "uses: ./.github/workflows/ai-pr-review-address.yml",
+            address.group(1),
+        )
+        self.assertIn(
+            "format('{0}', github.event.workflow_run.id || '')",
+            address.group(1),
+        )
+        self.assertIn(
+            "format('{0}', github.event.workflow_run.run_attempt || '')",
+            address.group(1),
         )
 
     def test_each_work_item_uses_one_workflow_scoped_concurrency_boundary(self):
