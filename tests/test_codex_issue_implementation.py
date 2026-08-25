@@ -14,16 +14,16 @@ from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = (
-    REPO_ROOT / ".github/workflows/codex-issue-implementation.yml"
+    REPO_ROOT / ".github/workflows/ai-issue-implementation.yml"
 ).read_text(encoding="utf-8")
 PR_ADDRESS_WORKFLOW = (
-    REPO_ROOT / ".github/workflows/codex-pr-review-address.yml"
+    REPO_ROOT / ".github/workflows/ai-pr-review-address.yml"
 ).read_text(encoding="utf-8")
 PR_RECONCILIATION_WORKFLOW = (
-    REPO_ROOT / ".github/workflows/codex-pr-review-reconciliation.yml"
+    REPO_ROOT / ".github/workflows/ai-pr-review-reconciliation.yml"
 ).read_text(encoding="utf-8")
 RESOLVER_WORKFLOW = (
-    REPO_ROOT / ".github/workflows/codex-work-item-resolver.yml"
+    REPO_ROOT / ".github/workflows/ai-work-item-resolver.yml"
 ).read_text(encoding="utf-8")
 WORKER_WORKFLOW = (
     REPO_ROOT / ".github/workflows/codex-issue-worker.yml"
@@ -5133,6 +5133,20 @@ class ValidationPolicyTest(unittest.TestCase):
 
 
 class WorkflowPolicyTest(unittest.TestCase):
+    def test_agent_neutral_workflows_use_ai_names(self):
+        expected_names = (
+            (WORKFLOW, "AI Issue Implementation"),
+            (PR_ADDRESS_WORKFLOW, "AI PR Review Address"),
+            (
+                PR_RECONCILIATION_WORKFLOW,
+                "AI PR Review Reconciliation",
+            ),
+            (RESOLVER_WORKFLOW, "AI Work Item Resolver"),
+        )
+        for workflow, expected_name in expected_names:
+            with self.subTest(workflow=expected_name):
+                self.assertTrue(workflow.startswith(f"name: {expected_name}\n"))
+
     def test_all_required_entry_points_are_declared(self):
         for trigger in (
             "issue_comment:",
@@ -5156,7 +5170,7 @@ class WorkflowPolicyTest(unittest.TestCase):
         self.assertNotIn("issue_comment:", RESOLVER_WORKFLOW)
         self.assertIn("workflow_run:", PR_RECONCILIATION_WORKFLOW)
         self.assertIn(
-            "- Codex PR Review Address",
+            "- AI PR Review Address",
             PR_RECONCILIATION_WORKFLOW,
         )
         self.assertIn("workflow_call:", PR_RECONCILIATION_WORKFLOW)
@@ -5283,7 +5297,7 @@ class WorkflowPolicyTest(unittest.TestCase):
         )
         assert resolve is not None
         self.assertIn(
-            "uses: ./.github/workflows/codex-work-item-resolver.yml",
+            "uses: ./.github/workflows/ai-work-item-resolver.yml",
             resolve.group(1),
         )
         self.assertIn("work-scope: implementation", resolve.group(1))
@@ -5446,11 +5460,11 @@ class WorkflowPolicyTest(unittest.TestCase):
 
     def test_both_entry_workflows_use_the_shared_scoped_resolver(self):
         self.assertIn(
-            "uses: ./.github/workflows/codex-work-item-resolver.yml",
+            "uses: ./.github/workflows/ai-work-item-resolver.yml",
             WORKFLOW,
         )
         self.assertIn(
-            "uses: ./.github/workflows/codex-work-item-resolver.yml",
+            "uses: ./.github/workflows/ai-work-item-resolver.yml",
             PR_ADDRESS_WORKFLOW,
         )
         self.assertIn("work-scope: implementation", WORKFLOW)

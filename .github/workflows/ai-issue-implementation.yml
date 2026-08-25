@@ -1,4 +1,4 @@
-name: Codex Issue Implementation
+name: AI Issue Implementation
 
 on:
   issue_comment:
@@ -91,7 +91,7 @@ jobs:
       contents: read
       issues: read
       pull-requests: read
-    uses: ./.github/workflows/codex-work-item-resolver.yml
+    uses: ./.github/workflows/ai-work-item-resolver.yml
     with:
       work-scope: implementation
       requested-issue-number: ${{ inputs['issue-number'] || '' }}

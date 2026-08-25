@@ -1,4 +1,4 @@
-name: Codex PR Review Address
+name: AI PR Review Address
 
 on:
   issue_comment:
@@ -53,7 +53,7 @@ jobs:
       contents: read
       issues: read
       pull-requests: read
-    uses: ./.github/workflows/codex-work-item-resolver.yml
+    uses: ./.github/workflows/ai-work-item-resolver.yml
     with:
       work-scope: review
       requested-pull-request-number: >-

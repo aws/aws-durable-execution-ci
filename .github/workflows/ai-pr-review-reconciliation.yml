@@ -1,9 +1,9 @@
-name: Codex PR Review Reconciliation
+name: AI PR Review Reconciliation
 
 on:
   workflow_run:
     workflows:
-      - Codex PR Review Address
+      - AI PR Review Address
     types: [completed]
   workflow_call:
     inputs:
