@@ -45,13 +45,17 @@ AUTOMATION_TRAILER = "Codex-Automation: issue-implementation"
 ISSUE_SNAPSHOT_TRAILER = "Codex-Issue-Snapshot"
 MAX_CONTEXT_BYTES = 1_000_000
 MAX_AUTOMATION_COMMIT_CHAIN = 100
-MAX_DISCOVERY_CANDIDATES_PER_RUN = 25
-MAX_ISSUES_PER_RUN = 10
 MAX_PATCH_BYTES = 5_000_000
 MAX_REVIEW_COMMENTS = 1_000
 MAX_STAGED_BLOB_BYTES = 5_000_000
 MAX_STAGED_CONTENT_BYTES = 5_000_000
 MAX_TRUSTED_INSTRUCTION_BYTES = 500_000
+MAX_WORK_ITEMS_PER_RUN = 10
+WORK_ITEMS_VERSION = 1
+REASONING_EFFORTS = frozenset(
+    ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+)
+WORK_SCOPES = frozenset(("all", "implementation", "review"))
 TRUSTED_INSTRUCTION_FILENAMES = frozenset(
     ("AGENTS.md", "AGENTS.override.md", "CONTRIBUTING.md")
 )
@@ -1457,6 +1461,286 @@ def work_item(kind: str, number: int) -> dict[str, Any]:
     return {"kind": kind, "number": number}
 
 
+def work_scope() -> str:
+    scope = os.environ.get("WORK_SCOPE", "").strip() or "all"
+    if scope not in WORK_SCOPES:
+        raise ImplementationError(
+            "WORK_SCOPE must be all, implementation, or review"
+        )
+    return scope
+
+
+def work_item_matrix(
+    work_items: list[dict[str, Any]],
+) -> dict[str, Any]:
+    unique_work_items: list[dict[str, Any]] = []
+    seen: set[tuple[str, int]] = set()
+    for item in work_items:
+        if not isinstance(item, dict):
+            raise ImplementationError("work item is invalid")
+        normalized = work_item(item.get("kind"), item.get("number"))
+        item_key = (normalized["kind"], normalized["number"])
+        if item_key in seen:
+            continue
+        seen.add(item_key)
+        unique_work_items.append(normalized)
+    return {
+        "include": [
+            {
+                "issue_number": (
+                    0
+                    if item["kind"] == "pull_request"
+                    else item["number"]
+                ),
+                "pull_request_number": (
+                    item["number"]
+                    if item["kind"] == "pull_request"
+                    else 0
+                ),
+                "address_only": item["kind"] == "pull_request",
+                "work_key": (
+                    f"pr-{item['number']}"
+                    if item["kind"] == "pull_request"
+                    else f"issue-{item['number']}"
+                ),
+            }
+            for item in unique_work_items
+        ]
+    }
+
+
+def validate_work_item_matrix(
+    value: Any,
+    expected_scope: str = "all",
+) -> dict[str, Any]:
+    if expected_scope not in WORK_SCOPES:
+        raise ImplementationError("work item matrix scope is invalid")
+    if not isinstance(value, dict) or set(value) != {"include"}:
+        raise ImplementationError("work item matrix is invalid")
+    include = value["include"]
+    if not isinstance(include, list) or len(include) > MAX_WORK_ITEMS_PER_RUN:
+        raise ImplementationError("work item matrix is invalid")
+
+    validated: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in include:
+        if not isinstance(item, dict) or set(item) != {
+            "issue_number",
+            "pull_request_number",
+            "address_only",
+            "work_key",
+        }:
+            raise ImplementationError("work item matrix is invalid")
+        issue_number = item["issue_number"]
+        pull_request_number = item["pull_request_number"]
+        address_only = item["address_only"]
+        work_key = item["work_key"]
+        if (
+            type(issue_number) is not int
+            or type(pull_request_number) is not int
+            or type(address_only) is not bool
+            or not isinstance(work_key, str)
+        ):
+            raise ImplementationError("work item matrix is invalid")
+        if address_only:
+            valid = (
+                issue_number == 0
+                and pull_request_number > 0
+                and work_key == f"pr-{pull_request_number}"
+            )
+        else:
+            valid = (
+                issue_number > 0
+                and pull_request_number == 0
+                and work_key == f"issue-{issue_number}"
+            )
+        if not valid or work_key in seen:
+            raise ImplementationError("work item matrix is invalid")
+        if (
+            expected_scope == "implementation"
+            and address_only
+        ) or (
+            expected_scope == "review"
+            and not address_only
+        ):
+            raise ImplementationError(
+                "work item matrix does not match its workflow scope"
+            )
+        seen.add(work_key)
+        validated.append(
+            {
+                "issue_number": issue_number,
+                "pull_request_number": pull_request_number,
+                "address_only": address_only,
+                "work_key": work_key,
+            }
+        )
+    return {"include": validated}
+
+
+def validate_reconciliation_configuration(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != {
+        "allow_workflow_changes",
+        "environment_name",
+        "model",
+        "no_pr_label",
+        "reasoning_effort",
+    }:
+        raise ImplementationError("reconciliation configuration is invalid")
+    environment_name = value["environment_name"]
+    model = value["model"]
+    no_pr_label_value = value["no_pr_label"]
+    reasoning_effort = value["reasoning_effort"]
+    allow_workflow_changes = value["allow_workflow_changes"]
+    if (
+        not isinstance(environment_name, str)
+        or not 1 <= len(environment_name) <= 255
+        or any(
+            ord(character) < 0x20
+            or 0x7F <= ord(character) <= 0x9F
+            for character in environment_name
+        )
+        or not isinstance(model, str)
+        or len(model) > 200
+        or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]*", model) is None
+        or not isinstance(no_pr_label_value, str)
+        or not 1 <= len(no_pr_label_value) <= 50
+        or any(
+            ord(character) < 0x20
+            or 0x7F <= ord(character) <= 0x9F
+            for character in no_pr_label_value
+        )
+        or not isinstance(reasoning_effort, str)
+        or reasoning_effort not in REASONING_EFFORTS
+        or type(allow_workflow_changes) is not bool
+    ):
+        raise ImplementationError("reconciliation configuration is invalid")
+    return {
+        "environment_name": environment_name,
+        "no_pr_label": no_pr_label_value,
+        "model": model,
+        "reasoning_effort": reasoning_effort,
+        "allow_workflow_changes": allow_workflow_changes,
+    }
+
+
+def reconciliation_configuration_from_environment() -> dict[str, Any]:
+    return validate_reconciliation_configuration(
+        {
+            "environment_name": (
+                os.environ.get("CODEX_ENVIRONMENT_NAME", "").strip()
+                or "ai-pr-review-runtime"
+            ),
+            "no_pr_label": no_pr_label(),
+            "model": (
+                os.environ.get("CODEX_MODEL", "").strip()
+                or "openai.gpt-5.6-sol"
+            ),
+            "reasoning_effort": (
+                os.environ.get("CODEX_REASONING_EFFORT", "").strip()
+                or "xhigh"
+            ),
+            "allow_workflow_changes": boolean_from_environment(
+                "ALLOW_WORKFLOW_CHANGES"
+            ),
+        }
+    )
+
+
+def work_items_bundle(
+    matrix: dict[str, Any],
+    configuration: dict[str, Any],
+    scope: str,
+) -> dict[str, Any]:
+    if scope not in ("implementation", "review"):
+        raise ImplementationError("work items bundle scope is invalid")
+    return {
+        "version": WORK_ITEMS_VERSION,
+        "work_scope": scope,
+        "source": {
+            "repository": repository_name(),
+            "repository_id": positive_integer(
+                require_environment("GITHUB_REPOSITORY_ID"),
+                "GITHUB_REPOSITORY_ID",
+            ),
+            "run_id": positive_integer(
+                require_environment("GITHUB_RUN_ID"),
+                "GITHUB_RUN_ID",
+            ),
+            "run_attempt": positive_integer(
+                require_environment("GITHUB_RUN_ATTEMPT"),
+                "GITHUB_RUN_ATTEMPT",
+            ),
+        },
+        "matrix": validate_work_item_matrix(matrix, scope),
+        "configuration": validate_reconciliation_configuration(
+            configuration
+        ),
+    }
+
+
+def validate_work_items_bundle(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != {
+        "version",
+        "work_scope",
+        "source",
+        "matrix",
+        "configuration",
+    }:
+        raise ImplementationError("work items bundle is invalid")
+    if value["version"] != WORK_ITEMS_VERSION:
+        raise ImplementationError("work items bundle version is invalid")
+    expected_scope = require_environment("SOURCE_WORK_SCOPE")
+    if (
+        expected_scope not in ("implementation", "review")
+        or value["work_scope"] != expected_scope
+    ):
+        raise ImplementationError("work items bundle scope is invalid")
+    source = value["source"]
+    if not isinstance(source, dict) or set(source) != {
+        "repository",
+        "repository_id",
+        "run_id",
+        "run_attempt",
+    }:
+        raise ImplementationError("work items bundle source is invalid")
+    expected_source = {
+        "repository": repository_name(),
+        "repository_id": positive_integer(
+            require_environment("SOURCE_REPOSITORY_ID"),
+            "SOURCE_REPOSITORY_ID",
+        ),
+        "run_id": positive_integer(
+            require_environment("SOURCE_RUN_ID"),
+            "SOURCE_RUN_ID",
+        ),
+        "run_attempt": positive_integer(
+            require_environment("SOURCE_RUN_ATTEMPT"),
+            "SOURCE_RUN_ATTEMPT",
+        ),
+    }
+    if source != expected_source:
+        raise ImplementationError(
+            "work items bundle does not match the triggering workflow run"
+        )
+    matrix = validate_work_item_matrix(value["matrix"], expected_scope)
+    bundled_configuration = validate_reconciliation_configuration(
+        value["configuration"]
+    )
+    trusted_configuration = reconciliation_configuration_from_environment()
+    if bundled_configuration != trusted_configuration:
+        raise ImplementationError(
+            "work items bundle configuration does not match the trusted "
+            "reconciliation workflow"
+        )
+    return {
+        "version": WORK_ITEMS_VERSION,
+        "work_scope": expected_scope,
+        "source": expected_source,
+        "matrix": matrix,
+    }
+
+
 def issue_state_work_item(
     state: dict[str, Any],
     issue_number: int,
@@ -1470,172 +1754,6 @@ def issue_state_work_item(
     ):
         raise ImplementationError("address state has no pull request")
     return work_item("pull_request", pull_request["number"])
-
-
-def read_discovery_cursor(
-    path: Path,
-    repository: str,
-) -> int:
-    if not path.exists():
-        return 0
-    cursor = read_json(path, "discovery cursor")
-    if (
-        not isinstance(cursor, dict)
-        or cursor.get("version") != 1
-        or cursor.get("repository") != repository
-        or type(cursor.get("after_number")) is not int
-        or cursor["after_number"] < 0
-    ):
-        raise ImplementationError("discovery cursor is invalid")
-    return cursor["after_number"]
-
-
-def write_discovery_cursor(
-    path: Path,
-    repository: str,
-    after_number: int,
-) -> None:
-    if type(after_number) is not int or after_number < 0:
-        raise ImplementationError("discovery cursor is invalid")
-    write_json(
-        path,
-        {
-            "version": 1,
-            "repository": repository,
-            "after_number": after_number,
-        },
-    )
-
-
-def configured_discovery_cursor_path() -> Path:
-    value = require_environment("DISCOVERY_CURSOR_PATH")
-    path = Path(value)
-    if not path.is_absolute():
-        raise ImplementationError(
-            "DISCOVERY_CURSOR_PATH must be an absolute path"
-        )
-    return path
-
-
-def discover_work_items(
-    repository: str,
-    excluded_label: str,
-    maximum: int,
-    actor: str,
-    cursor_path: Path | None = None,
-) -> list[dict[str, Any]]:
-    work_items: list[dict[str, Any]] = []
-    seen: set[tuple[str, int]] = set()
-    after_number = (
-        read_discovery_cursor(cursor_path, repository)
-        if cursor_path is not None
-        else 0
-    )
-    scanned_candidates = 0
-    page = 1
-    while True:
-        response = run_gh_json(
-            [
-                f"repos/{repository}/issues?state=open"
-                f"&sort=created&direction=asc&per_page=100&page={page}"
-            ]
-        )
-        if not isinstance(response, list):
-            raise ImplementationError("GitHub returned an invalid issue list")
-        for candidate in response:
-            if (
-                not isinstance(candidate, dict)
-                or type(candidate.get("number")) is not int
-            ):
-                continue
-            number = candidate["number"]
-            if number <= after_number:
-                continue
-            if (
-                cursor_path is not None
-                and scanned_candidates
-                >= MAX_DISCOVERY_CANDIDATES_PER_RUN
-            ):
-                return work_items
-            scanned_candidates += 1
-            if "pull_request" in candidate:
-                state = prepare_pull_request_state(
-                    repository,
-                    actor,
-                    fetch_pull_request(repository, number),
-                )
-                if state["action"] != "address":
-                    if cursor_path is not None:
-                        write_discovery_cursor(
-                            cursor_path,
-                            repository,
-                            number,
-                        )
-                    continue
-                item = work_item("pull_request", number)
-            else:
-                state = prepare_issue_state(
-                    repository,
-                    excluded_label,
-                    actor,
-                    candidate,
-                )
-                item = issue_state_work_item(state, number)
-            if state["action"] == "skip":
-                if cursor_path is not None:
-                    write_discovery_cursor(
-                        cursor_path,
-                        repository,
-                        number,
-                    )
-                continue
-            notification_marker = state_notification_marker(state)
-            if notification_marker is not None:
-                if item["kind"] != "issue":
-                    raise ImplementationError(
-                        "pull request work has an issue notification"
-                    )
-                if issue_comment_marker_exists(
-                    repository,
-                    number,
-                    notification_marker,
-                    actor,
-                ):
-                    if cursor_path is not None:
-                        write_discovery_cursor(
-                            cursor_path,
-                            repository,
-                            number,
-                        )
-                    continue
-            item_key = (item["kind"], item["number"])
-            if item_key in seen:
-                if cursor_path is not None:
-                    write_discovery_cursor(
-                        cursor_path,
-                        repository,
-                        number,
-                    )
-                continue
-            seen.add(item_key)
-            work_items.append(item)
-            if cursor_path is not None:
-                write_discovery_cursor(
-                    cursor_path,
-                    repository,
-                    number,
-                )
-            if len(work_items) == maximum:
-                return work_items
-        if len(response) < 100:
-            if cursor_path is not None:
-                write_discovery_cursor(
-                    cursor_path,
-                    repository,
-                    0,
-                )
-            return work_items
-        page += 1
 
 
 def resolve_issue_comment_event(
@@ -1712,19 +1830,24 @@ def resolve_work_items(
     event_name: str,
     event: dict[str, Any],
 ) -> list[dict[str, Any]]:
+    scope = work_scope()
     repository = repository_name()
     excluded_label = no_pr_label()
-    maximum = positive_integer(
-        os.environ.get("MAX_ISSUES", "").strip() or "3",
-        "MAX_ISSUES",
-    )
-    if maximum > MAX_ISSUES_PER_RUN:
-        raise ImplementationError(
-            f"MAX_ISSUES must not exceed {MAX_ISSUES_PER_RUN}"
-        )
 
     explicit_issue = os.environ.get("REQUESTED_ISSUE_NUMBER", "").strip()
+    explicit_pull_request = os.environ.get(
+        "REQUESTED_PULL_REQUEST_NUMBER",
+        "",
+    ).strip()
+    if explicit_issue and explicit_pull_request:
+        raise ImplementationError(
+            "only one explicit work item may be requested"
+        )
     if explicit_issue:
+        if scope == "review":
+            raise ImplementationError(
+                "review scope cannot request an issue"
+            )
         issue_number = positive_integer(
             explicit_issue,
             "REQUESTED_ISSUE_NUMBER",
@@ -1735,10 +1858,48 @@ def resolve_work_items(
             publication_actor(),
             fetch_issue(repository, issue_number),
         )
+        if (
+            scope == "implementation"
+            and state["action"] == "address"
+        ):
+            return []
         return [issue_state_work_item(state, issue_number)]
+
+    if explicit_pull_request:
+        if scope == "implementation":
+            raise ImplementationError(
+                "implementation scope cannot request a pull request"
+            )
+        pull_request_number = positive_integer(
+            explicit_pull_request,
+            "REQUESTED_PULL_REQUEST_NUMBER",
+        )
+        state = prepare_pull_request_state(
+            repository,
+            publication_actor(),
+            fetch_pull_request(repository, pull_request_number),
+        )
+        if state["action"] != "address":
+            return []
+        return [work_item("pull_request", pull_request_number)]
+
+    if event_name == "workflow_dispatch":
+        raise ImplementationError(
+            "manual runs must specify an issue or pull request number"
+        )
 
     if event_name == "issue_comment":
         items = resolve_issue_comment_event(repository, event)
+        if (
+            len(items) == 1
+            and scope == "implementation"
+            and items[0]["kind"] == "pull_request"
+        ) or (
+            len(items) == 1
+            and scope == "review"
+            and items[0]["kind"] == "issue"
+        ):
+            return []
         if len(items) == 1 and items[0]["kind"] == "issue":
             issue_number = items[0]["number"]
             state = prepare_issue_state(
@@ -1747,24 +1908,22 @@ def resolve_work_items(
                 publication_actor(),
                 fetch_issue(repository, issue_number),
             )
+            if (
+                scope == "implementation"
+                and state["action"] == "address"
+            ):
+                return []
             return [issue_state_work_item(state, issue_number)]
         return items
 
     if event_name == "pull_request_review_comment":
+        if scope == "implementation":
+            return []
         if event.get("action") != "created":
             return []
         return resolve_review_event(
             repository,
             event,
-        )
-
-    if event_name in ("schedule", "workflow_dispatch", "workflow_call"):
-        return discover_work_items(
-            repository,
-            excluded_label,
-            maximum,
-            publication_actor(),
-            configured_discovery_cursor_path(),
         )
 
     return []
@@ -1775,48 +1934,38 @@ def resolve_command(event_path: Path) -> None:
     if not isinstance(event, dict):
         raise ImplementationError("GitHub event must be an object")
     event_name = require_environment("GITHUB_EVENT_NAME")
+    scope = work_scope()
     work_items = resolve_work_items(
         event_name,
         event,
     )
-    unique_work_items: list[dict[str, Any]] = []
-    seen: set[tuple[str, int]] = set()
-    for item in work_items:
-        if not isinstance(item, dict):
-            raise ImplementationError("work item is invalid")
-        normalized = work_item(item.get("kind"), item.get("number"))
-        item_key = (normalized["kind"], normalized["number"])
-        if item_key in seen:
-            continue
-        seen.add(item_key)
-        unique_work_items.append(normalized)
-    matrix = {
-        "include": [
-            {
-                "issue_number": (
-                    0
-                    if item["kind"] == "pull_request"
-                    else item["number"]
-                ),
-                "pull_request_number": (
-                    item["number"]
-                    if item["kind"] == "pull_request"
-                    else 0
-                ),
-                "address_only": item["kind"] == "pull_request",
-                "work_key": (
-                    f"pr-{item['number']}"
-                    if item["kind"] == "pull_request"
-                    else f"issue-{item['number']}"
-                ),
-            }
-            for item in unique_work_items
-        ]
-    }
+    matrix = work_item_matrix(work_items)
+    configuration = reconciliation_configuration_from_environment()
+    work_items_path = os.environ.get("WORK_ITEMS_PATH", "")
+    if work_items_path:
+        path = Path(work_items_path)
+        if not path.is_absolute():
+            raise ImplementationError("WORK_ITEMS_PATH must be absolute")
+        write_json(
+            path,
+            work_items_bundle(matrix, configuration, scope),
+        )
     encoded_matrix = json.dumps(matrix, separators=(",", ":"))
     write_output("matrix", encoded_matrix)
-    write_output("count", str(len(unique_work_items)))
+    write_output("count", str(len(matrix["include"])))
     print(encoded_matrix)
+
+
+def validate_work_items_command(bundle_path: Path) -> None:
+    bundle = validate_work_items_bundle(
+        read_json(bundle_path, "work items bundle")
+    )
+    matrix = bundle["matrix"]
+    write_output(
+        "matrix",
+        json.dumps(matrix, separators=(",", ":")),
+    )
+    write_output("count", str(len(matrix["include"])))
 
 
 def validate_git_branch(branch: str) -> None:
@@ -3627,6 +3776,9 @@ def parse_arguments() -> argparse.Namespace:
     resolve = subparsers.add_parser("resolve")
     resolve.add_argument("event_path", type=Path)
 
+    validate_work_items = subparsers.add_parser("validate-work-items")
+    validate_work_items.add_argument("bundle_path", type=Path)
+
     prepare = subparsers.add_parser("prepare")
     prepare.add_argument("state_path", type=Path)
     prepare.add_argument("context_path", type=Path)
@@ -3662,6 +3814,8 @@ def main() -> int:
     try:
         if arguments.command == "resolve":
             resolve_command(arguments.event_path)
+        elif arguments.command == "validate-work-items":
+            validate_work_items_command(arguments.bundle_path)
         elif arguments.command == "prepare":
             prepare_command(arguments.state_path, arguments.context_path)
         elif arguments.command == "trusted-instructions":
