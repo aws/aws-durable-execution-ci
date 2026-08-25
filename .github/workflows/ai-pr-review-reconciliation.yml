@@ -7,6 +7,21 @@ on:
     types: [completed]
   workflow_call:
     inputs:
+      pull-request-number:
+        description: Optional pull request number with authorized feedback
+        required: false
+        type: string
+        default: ""
+      source-run-id:
+        description: Optional intake workflow run ID
+        required: false
+        type: string
+        default: ""
+      source-run-attempt:
+        description: Optional intake workflow run attempt
+        required: false
+        type: string
+        default: ""
       environment-name:
         description: GitHub environment used for the model job
         required: false
@@ -42,12 +57,25 @@ on:
 
 permissions: {}
 
-env:
-  DEFAULT_NO_PR_LABEL: codex:no-pr
-  DEFAULT_CODEX_MODEL: openai.gpt-5.6-sol
-  DEFAULT_REASONING_EFFORT: xhigh
-
 jobs:
+  resolve:
+    name: Resolve default-branch PR review feedback
+    if: >-
+      github.event_name == 'issue_comment' ||
+      github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+    uses: ./.github/workflows/ai-work-item-resolver.yml
+    with:
+      work-scope: review
+      requested-pull-request-number: >-
+        ${{ inputs['pull-request-number'] || '' }}
+      no-pr-label: >-
+        ${{ inputs['no-pr-label'] || 'codex:no-pr' }}
+      upload-work-items: false
+
   load:
     name: Validate authorized PR review work
     if: >-
@@ -64,6 +92,27 @@ jobs:
       publication_actor: ${{ steps.publisher.outputs.publish_actor }}
 
     steps:
+      - name: Validate continuation identity
+        env:
+          EXPECTED_RUN_ATTEMPT: >-
+            ${{ github.event.workflow_run.run_attempt }}
+          EXPECTED_RUN_ID: ${{ github.event.workflow_run.id }}
+          REQUESTED_RUN_ATTEMPT: ${{ inputs['source-run-attempt'] }}
+          REQUESTED_RUN_ID: ${{ inputs['source-run-id'] }}
+        run: |
+          set -euo pipefail
+
+          if [[ -n "$REQUESTED_RUN_ID" &&
+                "$REQUESTED_RUN_ID" != "$EXPECTED_RUN_ID" ]]; then
+            echo "::error::Source run ID does not match the workflow_run event."
+            exit 1
+          fi
+          if [[ -n "$REQUESTED_RUN_ATTEMPT" &&
+                "$REQUESTED_RUN_ATTEMPT" != "$EXPECTED_RUN_ATTEMPT" ]]; then
+            echo "::error::Source run attempt does not match the workflow_run event."
+            exit 1
+          fi
+
       - name: Load trusted reconciliation toolkit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -86,18 +135,6 @@ jobs:
       - name: Validate authorized PR review work
         id: validate
         env:
-          ALLOW_WORKFLOW_CHANGES: >-
-            ${{ inputs['allow-workflow-changes'] || false }}
-          CODEX_ENVIRONMENT_NAME: >-
-            ${{ inputs['environment-name'] ||
-                'ai-pr-review-runtime' }}
-          CODEX_MODEL: >-
-            ${{ inputs['model'] || env.DEFAULT_CODEX_MODEL }}
-          CODEX_REASONING_EFFORT: >-
-            ${{ inputs['reasoning-effort'] ||
-                env.DEFAULT_REASONING_EFFORT }}
-          NO_PR_LABEL: >-
-            ${{ inputs['no-pr-label'] || env.DEFAULT_NO_PR_LABEL }}
           SOURCE_REPOSITORY_ID: ${{ github.repository_id }}
           SOURCE_RUN_ATTEMPT: >-
             ${{ github.event.workflow_run.run_attempt }}
@@ -128,13 +165,24 @@ jobs:
 
   address:
     name: Address ${{ matrix.work_key }}
-    needs: load
+    needs: [resolve, load]
     if: >-
-      needs.load.result == 'success' &&
-      needs.load.outputs.count != '0'
+      always() &&
+      (
+        needs.resolve.result == 'success' ||
+        needs.load.result == 'success'
+      ) &&
+      (
+        needs.resolve.outputs.count ||
+        needs.load.outputs.count
+      ) != '0'
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(needs.load.outputs.matrix) }}
+      matrix: >-
+        ${{ fromJSON(
+          needs.resolve.outputs.matrix ||
+          needs.load.outputs.matrix
+        ) }}
     permissions:
       actions: read
       contents: write
@@ -148,7 +196,8 @@ jobs:
       address-only: ${{ matrix.address_only }}
       work-key: ${{ matrix.work_key }}
       publication-actor: >-
-        ${{ needs.load.outputs.publication_actor }}
+        ${{ needs.resolve.outputs.publication_actor ||
+            needs.load.outputs.publication_actor }}
       environment-name: >-
         ${{ inputs['environment-name'] || 'ai-pr-review-runtime' }}
       no-pr-label: >-

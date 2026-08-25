@@ -17,31 +17,11 @@ on:
         required: false
         type: string
         default: ""
-      environment-name:
-        description: GitHub environment used for the model job
-        required: false
-        type: string
-        default: ai-pr-review-runtime
       no-pr-label:
         description: Label applied when no pull request is required
         required: false
         type: string
         default: codex:no-pr
-      model:
-        description: Codex model ID to use through Amazon Bedrock
-        required: false
-        type: string
-        default: openai.gpt-5.6-sol
-      reasoning-effort:
-        description: Codex reasoning effort
-        required: false
-        type: string
-        default: xhigh
-      allow-workflow-changes:
-        description: Allow Codex to change files under .github/workflows
-        required: false
-        type: boolean
-        default: false
       upload-work-items:
         description: Upload the resolved work as a bounded artifact
         required: false
@@ -104,12 +84,8 @@ jobs:
       - name: Resolve work items
         id: resolve
         env:
-          ALLOW_WORKFLOW_CHANGES: ${{ inputs['allow-workflow-changes'] }}
-          CODEX_ENVIRONMENT_NAME: ${{ inputs['environment-name'] }}
-          CODEX_MODEL: ${{ inputs['model'] }}
           CODEX_PUBLISH_ACTOR: >-
             ${{ steps.publisher.outputs.publish_actor }}
-          CODEX_REASONING_EFFORT: ${{ inputs['reasoning-effort'] }}
           GH_TOKEN: ${{ github.token }}
           NO_PR_LABEL: ${{ inputs['no-pr-label'] }}
           REQUESTED_ISSUE_NUMBER: >-

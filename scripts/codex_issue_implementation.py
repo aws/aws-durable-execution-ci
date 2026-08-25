@@ -60,10 +60,8 @@ MAX_STAGED_BLOB_BYTES = 5_000_000
 MAX_STAGED_CONTENT_BYTES = 5_000_000
 MAX_TRUSTED_INSTRUCTION_BYTES = 500_000
 MAX_WORK_ITEMS_PER_RUN = 10
-WORK_ITEMS_VERSION = 1
-REASONING_EFFORTS = frozenset(
-    ("none", "minimal", "low", "medium", "high", "xhigh", "max")
-)
+WORK_ITEMS_VERSION = 2
+SUPPORTED_WORK_ITEMS_VERSIONS = frozenset((1, WORK_ITEMS_VERSION))
 WORK_SCOPES = frozenset(("all", "implementation", "review"))
 TRUSTED_INSTRUCTION_FILENAMES = frozenset(
     ("AGENTS.md", "AGENTS.override.md", "CONTRIBUTING.md")
@@ -1830,78 +1828,8 @@ def validate_work_item_matrix(
     return {"include": validated}
 
 
-def validate_reconciliation_configuration(value: Any) -> dict[str, Any]:
-    if not isinstance(value, dict) or set(value) != {
-        "allow_workflow_changes",
-        "environment_name",
-        "model",
-        "no_pr_label",
-        "reasoning_effort",
-    }:
-        raise ImplementationError("reconciliation configuration is invalid")
-    environment_name = value["environment_name"]
-    model = value["model"]
-    no_pr_label_value = value["no_pr_label"]
-    reasoning_effort = value["reasoning_effort"]
-    allow_workflow_changes = value["allow_workflow_changes"]
-    if (
-        not isinstance(environment_name, str)
-        or not 1 <= len(environment_name) <= 255
-        or any(
-            ord(character) < 0x20
-            or 0x7F <= ord(character) <= 0x9F
-            for character in environment_name
-        )
-        or not isinstance(model, str)
-        or len(model) > 200
-        or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]*", model) is None
-        or not isinstance(no_pr_label_value, str)
-        or not 1 <= len(no_pr_label_value) <= 50
-        or any(
-            ord(character) < 0x20
-            or 0x7F <= ord(character) <= 0x9F
-            for character in no_pr_label_value
-        )
-        or not isinstance(reasoning_effort, str)
-        or reasoning_effort not in REASONING_EFFORTS
-        or type(allow_workflow_changes) is not bool
-    ):
-        raise ImplementationError("reconciliation configuration is invalid")
-    return {
-        "environment_name": environment_name,
-        "no_pr_label": no_pr_label_value,
-        "model": model,
-        "reasoning_effort": reasoning_effort,
-        "allow_workflow_changes": allow_workflow_changes,
-    }
-
-
-def reconciliation_configuration_from_environment() -> dict[str, Any]:
-    return validate_reconciliation_configuration(
-        {
-            "environment_name": (
-                os.environ.get("CODEX_ENVIRONMENT_NAME", "").strip()
-                or "ai-pr-review-runtime"
-            ),
-            "no_pr_label": no_pr_label(),
-            "model": (
-                os.environ.get("CODEX_MODEL", "").strip()
-                or "openai.gpt-5.6-sol"
-            ),
-            "reasoning_effort": (
-                os.environ.get("CODEX_REASONING_EFFORT", "").strip()
-                or "xhigh"
-            ),
-            "allow_workflow_changes": boolean_from_environment(
-                "ALLOW_WORKFLOW_CHANGES"
-            ),
-        }
-    )
-
-
 def work_items_bundle(
     matrix: dict[str, Any],
-    configuration: dict[str, Any],
     scope: str,
 ) -> dict[str, Any]:
     if scope not in ("implementation", "review"):
@@ -1925,23 +1853,27 @@ def work_items_bundle(
             ),
         },
         "matrix": validate_work_item_matrix(matrix, scope),
-        "configuration": validate_reconciliation_configuration(
-            configuration
-        ),
     }
 
 
 def validate_work_items_bundle(value: Any) -> dict[str, Any]:
-    if not isinstance(value, dict) or set(value) != {
+    if not isinstance(value, dict):
+        raise ImplementationError("work items bundle is invalid")
+    version = value.get("version")
+    expected_fields = {
         "version",
         "work_scope",
         "source",
         "matrix",
-        "configuration",
-    }:
+    }
+    if version == 1:
+        expected_fields.add("configuration")
+    if set(value) != expected_fields:
         raise ImplementationError("work items bundle is invalid")
-    if value["version"] != WORK_ITEMS_VERSION:
+    if version not in SUPPORTED_WORK_ITEMS_VERSIONS:
         raise ImplementationError("work items bundle version is invalid")
+    if version == 1 and not isinstance(value["configuration"], dict):
+        raise ImplementationError("work items bundle is invalid")
     expected_scope = require_environment("SOURCE_WORK_SCOPE")
     if (
         expected_scope not in ("implementation", "review")
@@ -1976,17 +1908,8 @@ def validate_work_items_bundle(value: Any) -> dict[str, Any]:
             "work items bundle does not match the triggering workflow run"
         )
     matrix = validate_work_item_matrix(value["matrix"], expected_scope)
-    bundled_configuration = validate_reconciliation_configuration(
-        value["configuration"]
-    )
-    trusted_configuration = reconciliation_configuration_from_environment()
-    if bundled_configuration != trusted_configuration:
-        raise ImplementationError(
-            "work items bundle configuration does not match the trusted "
-            "reconciliation workflow"
-        )
     return {
-        "version": WORK_ITEMS_VERSION,
+        "version": version,
         "work_scope": expected_scope,
         "source": expected_source,
         "matrix": matrix,
@@ -2192,7 +2115,6 @@ def resolve_command(event_path: Path) -> None:
         event,
     )
     matrix = work_item_matrix(work_items)
-    configuration = reconciliation_configuration_from_environment()
     work_items_path = os.environ.get("WORK_ITEMS_PATH", "")
     if work_items_path:
         path = Path(work_items_path)
@@ -2200,7 +2122,7 @@ def resolve_command(event_path: Path) -> None:
             raise ImplementationError("WORK_ITEMS_PATH must be absolute")
         write_json(
             path,
-            work_items_bundle(matrix, configuration, scope),
+            work_items_bundle(matrix, scope),
         )
     encoded_matrix = json.dumps(matrix, separators=(",", ":"))
     write_output("matrix", encoded_matrix)
