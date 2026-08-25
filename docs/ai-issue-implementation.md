@@ -164,13 +164,20 @@ With no linked open pull request, the worker checks out the exact current
 default branch revision. A change is committed to the deterministic
 `implement-issue-<number>` branch and published with an exact
 `--force-with-lease` comparison. The workflow checks again for a linked pull
-request before pushing and before opening one draft pull request whose body
-closes the issue.
+request before pushing and before opening one draft pull request. Its title
+identifies the issue and requested work. Its body closes the issue and records
+the issue title, command guidance, model summary, changed paths, and validation
+performed.
 
 If the default branch advances while the model runs, the validated change may
 still be published from its original revision and opened against the current
-default branch. A later run can recover a workflow-owned branch when the push
-succeeded but pull request creation did not.
+default branch.
+
+A later run can recover a workflow-owned branch when the push succeeded but
+pull request creation did not. Commit trailers bind recovery to the original
+issue and implementation command and preserve bounded description metadata.
+Older automation commits that contain only the issue snapshot remain
+recoverable with the summary available from their commit message.
 
 When an open pull request already closes the issue, this workflow does not
 update it or create another pull request. Use the PR review-address workflow

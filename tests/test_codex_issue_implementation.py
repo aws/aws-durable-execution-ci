@@ -3059,16 +3059,23 @@ class PreparationPolicyTest(unittest.TestCase):
             "c" * 40,
             31,
             IMPLEMENTATION.issue_semantic_digest(state["issue"]),
+            IMPLEMENTATION.stable_digest(
+                state["implementation_command"]
+            ),
         )
 
-    def test_recovery_requires_matching_issue_snapshot_trailer(self):
+    def test_recovery_accepts_legacy_or_matching_command_trailers(self):
         snapshot = IMPLEMENTATION.issue_snapshot(issue())
         digest = IMPLEMENTATION.issue_semantic_digest(snapshot)
+        command_digest = IMPLEMENTATION.stable_digest(
+            implementation_command()
+        )
         matching_message = (
             "Implement #31\n\n"
             "Codex-Automation: issue-implementation\n"
             "Codex-Issue: #31\n"
-            f"Codex-Issue-Snapshot: {digest}"
+            f"Codex-Issue-Snapshot: {digest}\n"
+            f"Codex-Implementation-Command: {command_digest}"
         )
         with patch.object(
             IMPLEMENTATION,
@@ -3081,6 +3088,7 @@ class PreparationPolicyTest(unittest.TestCase):
                     "c" * 40,
                     31,
                     digest,
+                    command_digest,
                 )
             )
             self.assertFalse(
@@ -3089,6 +3097,37 @@ class PreparationPolicyTest(unittest.TestCase):
                     "c" * 40,
                     31,
                     "d" * 64,
+                    command_digest,
+                )
+            )
+            self.assertFalse(
+                IMPLEMENTATION.commit_has_automation_trailers(
+                    "aws/example",
+                    "c" * 40,
+                    31,
+                    digest,
+                    "e" * 64,
+                )
+            )
+
+        legacy_message = (
+            "Implement #31\n\n"
+            "Codex-Automation: issue-implementation\n"
+            "Codex-Issue: #31\n"
+            f"Codex-Issue-Snapshot: {digest}"
+        )
+        with patch.object(
+            IMPLEMENTATION,
+            "run_gh_json",
+            return_value={"message": legacy_message},
+        ):
+            self.assertTrue(
+                IMPLEMENTATION.commit_has_automation_trailers(
+                    "aws/example",
+                    "c" * 40,
+                    31,
+                    digest,
+                    command_digest,
                 )
             )
 
@@ -3197,6 +3236,7 @@ class ValidationPolicyTest(unittest.TestCase):
             state = {
                 "action": "implement",
                 "issue": prepared_issue,
+                "implementation_command": implementation_command(),
                 "target": {"sha": "a" * 40},
             }
             result = {
@@ -3247,11 +3287,431 @@ class ValidationPolicyTest(unittest.TestCase):
                 )
 
         command = run.call_args.args[0]
-        message = command[-1]
+        message = run.call_args.kwargs["input_text"]
         digest = IMPLEMENTATION.issue_semantic_digest(prepared_issue)
         self.assertIn("--cleanup=verbatim", command)
+        self.assertIn("--file=-", command)
+        self.assertNotIn("-m", command)
         self.assertIn(f"Codex-Issue-Snapshot: {digest}", message)
+        command_digest = IMPLEMENTATION.stable_digest(
+            state["implementation_command"]
+        )
+        self.assertIn(
+            f"Codex-Implementation-Command: {command_digest}",
+            message,
+        )
+        prefix = f"{IMPLEMENTATION.PUBLICATION_METADATA_TRAILER}: "
+        encoded = next(
+            line[len(prefix):]
+            for line in message.splitlines()
+            if line.startswith(prefix)
+        )
+        self.assertEqual(
+            IMPLEMENTATION.decode_publication_metadata(encoded),
+            {
+                "version": 2,
+                "result": result,
+                "changed_paths": [".github/workflows/build.yml"],
+                "changed_path_count": 1,
+                "implementation_command": {
+                    "digest": command_digest,
+                    "guidance": "",
+                },
+            },
+        )
         self.assertIn("skip-checks: true", message)
+
+    def test_legacy_commit_metadata_uses_available_summary(self):
+        message = (
+            "Implement #31\n\n"
+            "Added the telemetry design document.\n\n"
+            "Codex-Automation: issue-implementation\n"
+            "Codex-Issue: #31\n"
+            "Codex-Issue-Snapshot: digest"
+        )
+        with patch.object(
+            IMPLEMENTATION,
+            "run_gh_json",
+            return_value={"message": message},
+        ):
+            publication = IMPLEMENTATION.commit_publication_metadata(
+                "aws/example",
+                "b" * 40,
+            )
+
+        self.assertEqual(publication["version"], 0)
+        self.assertEqual(
+            publication["result"]["summary"],
+            "Added the telemetry design document.",
+        )
+        self.assertIn(
+            "not recorded",
+            publication["result"]["validation"][0],
+        )
+        self.assertIsNone(publication["changed_path_count"])
+
+    def test_commit_metadata_ignores_summary_that_looks_like_trailer(self):
+        command = implementation_command()
+        expected = IMPLEMENTATION.publication_metadata(
+            {
+                "outcome": "changed",
+                "summary": "Added the requested implementation.",
+                "validation": [],
+            },
+            ["src/example.py"],
+            command,
+        )
+        encoded = IMPLEMENTATION.encode_publication_metadata(expected)
+        message = (
+            "Implement #31\n\n"
+            "Codex-Publication-Metadata: invalid-summary-text\n\n"
+            "Codex-Automation: issue-implementation\n"
+            "Codex-Issue: #31\n"
+            f"Codex-Implementation-Command: "
+            f"{IMPLEMENTATION.stable_digest(command)}\n"
+            f"Codex-Publication-Metadata: {encoded}"
+        )
+        with patch.object(
+            IMPLEMENTATION,
+            "run_gh_json",
+            return_value={"message": message},
+        ):
+            actual = IMPLEMENTATION.commit_publication_metadata(
+                "aws/example",
+                "b" * 40,
+            )
+
+        self.assertEqual(actual, expected)
+
+    def test_publication_metadata_bounds_persisted_guidance(self):
+        command = implementation_command(
+            guidance="g" * (
+                IMPLEMENTATION.MAX_PUBLICATION_GUIDANCE_CHARACTERS + 1
+            )
+        )
+        publication = IMPLEMENTATION.publication_metadata(
+            {
+                "outcome": "changed",
+                "summary": "Added the requested implementation.",
+                "validation": [],
+            },
+            ["src/example.py"],
+            command,
+        )
+
+        snapshot = publication["implementation_command"]
+        self.assertEqual(
+            len(snapshot["guidance"]),
+            IMPLEMENTATION.MAX_PUBLICATION_GUIDANCE_CHARACTERS,
+        )
+        self.assertTrue(snapshot["guidance"].endswith("..."))
+        self.assertEqual(
+            snapshot["digest"],
+            IMPLEMENTATION.stable_digest(command),
+        )
+
+    def test_publication_metadata_accepts_maximum_multibyte_content(self):
+        result = {
+            "outcome": "changed",
+            "summary": "\U0001f600" * 2_000,
+            "validation": ["\U0001f600" * 500] * 50,
+        }
+        paths = [
+            f"src/{index:02d}-" + "\U0001f600" * 150
+            for index in range(50)
+        ]
+        publication = IMPLEMENTATION.publication_metadata(
+            result,
+            paths,
+            implementation_command(
+                guidance="\U0001f600"
+                * IMPLEMENTATION.MAX_PUBLICATION_GUIDANCE_CHARACTERS
+            ),
+        )
+
+        encoded = IMPLEMENTATION.encode_publication_metadata(publication)
+        padding = "=" * (-len(encoded) % 4)
+        payload = IMPLEMENTATION.base64.urlsafe_b64decode(
+            encoded + padding
+        )
+
+        self.assertGreater(len(payload), 160_000)
+        self.assertEqual(
+            IMPLEMENTATION.decode_publication_metadata(encoded),
+            publication,
+        )
+
+    def test_draft_pull_request_describes_requested_and_completed_work(self):
+        state = {
+            "action": "implement",
+            "repository": "aws/example",
+            "issue": IMPLEMENTATION.issue_snapshot(
+                issue(title="Add durable review telemetry")
+            ),
+            "implementation_command": implementation_command(
+                body=(
+                    "/ai implement\n\n"
+                    "Create only a design document first."
+                ),
+                guidance="Create only a design document first.",
+            ),
+            "branch": "implement-issue-31",
+            "target": {"ref": "main"},
+        }
+        creating_command = state["implementation_command"]
+        publication = IMPLEMENTATION.publication_metadata(
+            {
+                "outcome": "changed",
+                "summary": "Added a design proposal for review telemetry.",
+                "validation": ["python3 -m unittest"],
+            },
+            ["docs/ai-review-telemetry-design.md"],
+            creating_command,
+        )
+        state["implementation_command"] = implementation_command(
+            body="/ai implement\n\nChanged after branch creation.",
+            guidance="Changed after branch creation.",
+        )
+        with patch.object(
+            IMPLEMENTATION,
+            "run_gh_json",
+            return_value={"number": 46},
+        ) as run:
+            IMPLEMENTATION.create_draft_pull_request(state, publication)
+
+        payload = run.call_args.kwargs["input_value"]
+        self.assertEqual(
+            payload["title"],
+            "Implement #31: Add durable review telemetry",
+        )
+        self.assertIn("## Requested Work", payload["body"])
+        self.assertIn(
+            "Create only a design document first.",
+            payload["body"],
+        )
+        self.assertNotIn(
+            "Changed after branch creation.",
+            payload["body"],
+        )
+        self.assertIn("## Summary", payload["body"])
+        self.assertIn(
+            "Added a design proposal for review telemetry.",
+            payload["body"],
+        )
+        self.assertIn("## Changes", payload["body"])
+        self.assertIn(
+            "docs/ai-review-telemetry-design.md",
+            payload["body"],
+        )
+        self.assertIn("## Validation", payload["body"])
+        self.assertIn("python3 -m unittest", payload["body"])
+        self.assertNotIn(
+            "Recovers the implementation branch",
+            payload["body"],
+        )
+
+    def test_draft_pull_request_renders_changed_paths_as_literal_text(self):
+        state = {
+            "action": "implement",
+            "repository": "aws/example",
+            "issue": IMPLEMENTATION.issue_snapshot(issue()),
+            "implementation_command": implementation_command(),
+            "branch": "implement-issue-31",
+            "target": {"ref": "main"},
+        }
+        publication = IMPLEMENTATION.publication_metadata(
+            {
+                "outcome": "changed",
+                "summary": "Added files with unusual names.",
+                "validation": [],
+            },
+            [
+                "[src](https://example.invalid)\n- injected.md",
+                "src/`literal`.py",
+            ],
+            state["implementation_command"],
+        )
+
+        body = IMPLEMENTATION.pull_request_body(state, publication)
+
+        self.assertIn(
+            '- `"[src](https://example.invalid)\\n- injected.md"`',
+            body,
+        )
+        self.assertNotIn("\n- injected.md", body)
+        self.assertIn('- ``"src/`literal`.py"``', body)
+
+    def test_recovery_reuses_commit_publication_metadata(self):
+        state = {
+            "repository": "aws/example",
+            "issue": IMPLEMENTATION.issue_snapshot(issue()),
+            "implementation_command": implementation_command(),
+            "branch": "implement-issue-31",
+            "target": {
+                "ref": "implement-issue-31",
+                "sha": "b" * 40,
+            },
+        }
+        publication = IMPLEMENTATION.publication_metadata(
+            {
+                "outcome": "changed",
+                "summary": "Added the requested implementation.",
+                "validation": ["python3 -m unittest"],
+            },
+            ["src/example.py"],
+            state["implementation_command"],
+        )
+        with patch.object(
+            IMPLEMENTATION,
+            "require_current_issue",
+        ), patch.object(
+            IMPLEMENTATION,
+            "linked_open_pull_requests",
+            return_value=[],
+        ), patch.object(
+            IMPLEMENTATION,
+            "branch_ref",
+            return_value={
+                "ref": "implement-issue-31",
+                "sha": "b" * 40,
+            },
+        ), patch.object(
+            IMPLEMENTATION,
+            "commit_has_automation_trailers",
+            return_value=True,
+        ), patch.object(
+            IMPLEMENTATION,
+            "branch_has_pull_request_history",
+            return_value=False,
+        ), patch.object(
+            IMPLEMENTATION,
+            "commit_publication_metadata",
+            return_value=publication,
+        ) as metadata, patch.object(
+            IMPLEMENTATION,
+            "create_draft_pull_request",
+        ) as create:
+            IMPLEMENTATION.publish_recovery(state)
+
+        metadata.assert_called_once_with("aws/example", "b" * 40)
+        create.assert_called_once_with(state, publication)
+
+    def test_recovery_uses_legacy_commit_publication_metadata(self):
+        state = {
+            "repository": "aws/example",
+            "issue": IMPLEMENTATION.issue_snapshot(issue()),
+            "implementation_command": implementation_command(
+                guidance="Current guidance is unavailable in the old commit."
+            ),
+            "branch": "implement-issue-31",
+            "target": {
+                "ref": "implement-issue-31",
+                "sha": "b" * 40,
+            },
+        }
+        digest = IMPLEMENTATION.issue_semantic_digest(state["issue"])
+        message = (
+            "Implement #31\n\n"
+            "Added the requested implementation.\n\n"
+            "Codex-Automation: issue-implementation\n"
+            "Codex-Issue: #31\n"
+            f"Codex-Issue-Snapshot: {digest}"
+        )
+        with patch.object(
+            IMPLEMENTATION,
+            "require_current_issue",
+        ), patch.object(
+            IMPLEMENTATION,
+            "linked_open_pull_requests",
+            return_value=[],
+        ), patch.object(
+            IMPLEMENTATION,
+            "branch_ref",
+            return_value={
+                "ref": "implement-issue-31",
+                "sha": "b" * 40,
+            },
+        ), patch.object(
+            IMPLEMENTATION,
+            "branch_has_pull_request_history",
+            return_value=False,
+        ), patch.object(
+            IMPLEMENTATION,
+            "commit_message",
+            return_value=message,
+        ), patch.object(
+            IMPLEMENTATION,
+            "create_draft_pull_request",
+        ) as create:
+            IMPLEMENTATION.publish_recovery(state)
+
+        publication = create.call_args.args[1]
+        self.assertEqual(publication["version"], 0)
+        self.assertEqual(
+            publication["result"]["summary"],
+            "Added the requested implementation.",
+        )
+        create.assert_called_once_with(state, publication)
+
+    def test_recovery_rejects_changed_implementation_command(self):
+        state = {
+            "repository": "aws/example",
+            "issue": IMPLEMENTATION.issue_snapshot(issue()),
+            "implementation_command": implementation_command(
+                guidance="Use the new approach."
+            ),
+            "branch": "implement-issue-31",
+            "target": {
+                "ref": "implement-issue-31",
+                "sha": "b" * 40,
+            },
+        }
+        publication = IMPLEMENTATION.publication_metadata(
+            {
+                "outcome": "changed",
+                "summary": "Added the requested implementation.",
+                "validation": [],
+            },
+            ["src/example.py"],
+            implementation_command(guidance="Use the old approach."),
+        )
+        with patch.object(
+            IMPLEMENTATION,
+            "require_current_issue",
+        ), patch.object(
+            IMPLEMENTATION,
+            "linked_open_pull_requests",
+            return_value=[],
+        ), patch.object(
+            IMPLEMENTATION,
+            "branch_ref",
+            return_value={
+                "ref": "implement-issue-31",
+                "sha": "b" * 40,
+            },
+        ), patch.object(
+            IMPLEMENTATION,
+            "commit_has_automation_trailers",
+            return_value=True,
+        ), patch.object(
+            IMPLEMENTATION,
+            "branch_has_pull_request_history",
+            return_value=False,
+        ), patch.object(
+            IMPLEMENTATION,
+            "commit_publication_metadata",
+            return_value=publication,
+        ), patch.object(
+            IMPLEMENTATION,
+            "create_draft_pull_request",
+        ) as create:
+            with self.assertRaisesRegex(
+                IMPLEMENTATION.ImplementationError,
+                "implementation command",
+            ):
+                IMPLEMENTATION.publish_recovery(state)
+
+        create.assert_not_called()
 
     def test_review_commit_records_pull_request_without_issue(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -3310,8 +3770,9 @@ class ValidationPolicyTest(unittest.TestCase):
                 )
 
         command = run.call_args.args[0]
-        message = command[-1]
+        message = run.call_args.kwargs["input_text"]
         self.assertIn("--cleanup=verbatim", command)
+        self.assertIn("--file=-", command)
         self.assertIn("Address review feedback for PR #44", message)
         self.assertIn("Codex-Pull-Request: #44", message)
         self.assertNotIn("Codex-Issue:", message)
@@ -4086,12 +4547,14 @@ class ValidationPolicyTest(unittest.TestCase):
                 IMPLEMENTATION.publish_implementation(
                     state,
                     result,
+                    [],
                     Path("/change.patch"),
                     Path("/workspace"),
                 )
             IMPLEMENTATION.publish_implementation(
                 state,
                 result,
+                [],
                 Path("/change.patch"),
                 Path("/workspace"),
             )
@@ -4163,6 +4626,7 @@ class ValidationPolicyTest(unittest.TestCase):
                 IMPLEMENTATION.publish_implementation(
                     state,
                     result,
+                    [],
                     Path("/change.patch"),
                     Path("/workspace"),
                 )
@@ -4232,6 +4696,7 @@ class ValidationPolicyTest(unittest.TestCase):
                 IMPLEMENTATION.publish_implementation(
                     state,
                     result,
+                    [],
                     Path("/change.patch"),
                     Path("/workspace"),
                 )
@@ -4300,6 +4765,7 @@ class ValidationPolicyTest(unittest.TestCase):
                 IMPLEMENTATION.publish_implementation(
                     state,
                     result,
+                    [],
                     Path("/change.patch"),
                     Path("/workspace"),
                 )
@@ -4338,6 +4804,7 @@ class ValidationPolicyTest(unittest.TestCase):
         state = {
             "repository": "aws/example",
             "issue": {"number": 31},
+            "implementation_command": implementation_command(),
             "branch": "implement-issue-31",
             "target": {
                 "ref": "main",
@@ -4394,6 +4861,7 @@ class ValidationPolicyTest(unittest.TestCase):
             IMPLEMENTATION.publish_implementation(
                 state,
                 result,
+                ["src/example.py"],
                 Path("/change.patch"),
                 Path("/workspace"),
             )
@@ -4443,6 +4911,7 @@ class ValidationPolicyTest(unittest.TestCase):
                 IMPLEMENTATION.publish_implementation(
                     state,
                     result,
+                    ["src/example.py"],
                     Path("/change.patch"),
                     Path("/workspace"),
                 )
