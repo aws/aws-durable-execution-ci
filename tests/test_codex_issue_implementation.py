@@ -5642,6 +5642,18 @@ class WorkflowPolicyTest(unittest.TestCase):
         )
         self.assertIn("source-run-id:", PR_ADDRESS_DOC)
         self.assertIn("source-run-attempt:", PR_ADDRESS_DOC)
+        self.assertGreaterEqual(
+            PR_ADDRESS_DOC.count(
+                "format('{0}', github.event.workflow_run.id || '')"
+            ),
+            2,
+        )
+        self.assertGreaterEqual(
+            PR_ADDRESS_DOC.count(
+                "format('{0}', github.event.workflow_run.run_attempt || '')"
+            ),
+            2,
+        )
 
     def test_each_work_item_uses_one_workflow_scoped_concurrency_boundary(self):
         issue_implement = re.search(

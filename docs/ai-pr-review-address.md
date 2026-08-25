@@ -86,9 +86,10 @@ jobs:
     uses: aws/aws-durable-execution-ci/.github/workflows/ai-pr-review-address.yml@<full-commit-sha>
     with:
       pull-request-number: ${{ inputs['pull-request-number'] || '' }}
-      source-run-id: ${{ github.event.workflow_run.id || '' }}
+      source-run-id: >-
+        ${{ format('{0}', github.event.workflow_run.id || '') }}
       source-run-attempt: >-
-        ${{ github.event.workflow_run.run_attempt || '' }}
+        ${{ format('{0}', github.event.workflow_run.run_attempt || '') }}
     secrets: inherit
 ```
 
@@ -179,9 +180,10 @@ these inputs:
     # ...
     with:
       pull-request-number: ${{ inputs['pull-request-number'] || '' }}
-      source-run-id: ${{ github.event.workflow_run.id || '' }}
+      source-run-id: >-
+        ${{ format('{0}', github.event.workflow_run.id || '') }}
       source-run-attempt: >-
-        ${{ github.event.workflow_run.run_attempt || '' }}
+        ${{ format('{0}', github.event.workflow_run.run_attempt || '') }}
       environment-name: ai-runtime
       no-pr-label: automation:no-pr
       model: openai.gpt-5.6-sol
