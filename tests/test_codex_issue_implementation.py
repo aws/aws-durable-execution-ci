@@ -5161,6 +5161,24 @@ class WorkflowPolicyTest(unittest.TestCase):
         )
         self.assertIn("workflow_call:", PR_RECONCILIATION_WORKFLOW)
 
+    def test_manual_pr_review_dispatch_only_accepts_the_target(self):
+        dispatch = re.search(
+            r"(?ms)^  workflow_dispatch:\n"
+            r"(.*?)(?=^  workflow_call:)",
+            PR_ADDRESS_WORKFLOW,
+        )
+        assert dispatch is not None
+        self.assertIn("pull-request-number:", dispatch.group(1))
+        for runtime_input in (
+            "environment-name:",
+            "no-pr-label:",
+            "model:",
+            "reasoning-effort:",
+            "allow-workflow-changes:",
+        ):
+            with self.subTest(runtime_input=runtime_input):
+                self.assertNotIn(runtime_input, dispatch.group(1))
+
     def test_each_work_item_uses_one_workflow_scoped_concurrency_boundary(self):
         issue_implement = re.search(
             r"(?ms)^  implement:\n(.*)\Z",
@@ -5334,7 +5352,7 @@ class WorkflowPolicyTest(unittest.TestCase):
     def test_runtime_environment_inputs_preserve_the_default(self):
         for workflow, count in (
             (WORKFLOW, 2),
-            (PR_ADDRESS_WORKFLOW, 2),
+            (PR_ADDRESS_WORKFLOW, 1),
             (PR_RECONCILIATION_WORKFLOW, 1),
             (RESOLVER_WORKFLOW, 1),
         ):
@@ -5403,7 +5421,7 @@ class WorkflowPolicyTest(unittest.TestCase):
         )
         self.assertEqual(
             PR_ADDRESS_WORKFLOW.count("default: xhigh"),
-            2,
+            1,
         )
         self.assertEqual(
             PR_RECONCILIATION_WORKFLOW.count("default: xhigh"),

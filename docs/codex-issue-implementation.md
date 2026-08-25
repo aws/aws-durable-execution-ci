@@ -227,6 +227,11 @@ PR review intake also accepts:
 
 - `pull-request-number`, the explicit PR required for a manual run
 
+Direct manual PR review dispatches accept only the pull request number.
+Configure the model runtime through the stable reusable-workflow callers; those
+settings cannot vary per dispatch because reconciliation starts in a separate
+`workflow_run`.
+
 When customizing PR review configuration, pass the same values to both the
 intake and reconciliation callers:
 
@@ -241,7 +246,7 @@ intake and reconciliation callers:
 
 Reconciliation rejects an artifact whose configuration does not match the
 trusted reconciliation inputs. Pass identical configuration to the intake and
-reconciliation callers, including for manual dispatches.
+reconciliation callers.
 
 ## Repository setup
 
