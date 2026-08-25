@@ -9,12 +9,15 @@ The public workflow names describe the capability rather than the current
 provider so additional agents can be supported later. The implementation
 currently runs Codex through Amazon Bedrock.
 
-PR review addressing uses two reusable workflows:
+PR review addressing keeps two permission paths behind one reusable workflow
+and two event-specific callers:
 
-- `AI PR Review Address` performs read-only command intake and uploads a
+- Inline review-thread commands use the read-only intake path and upload a
   bounded work-item artifact.
-- `AI PR Review Reconciliation` runs from the default branch, validates the
-  intake artifact, enters the model environment, and updates the pull request.
+- Top-level pull request comments and manual dispatches from the default branch
+  use the direct reconciliation path.
+- A separately named `workflow_run` caller continues successful inline intake
+  through the reconciliation path from the default branch.
 
 The default-branch continuation allows repositories to protect the model
 environment with a default-branch deployment rule without trusting the pull
@@ -25,12 +28,11 @@ request branch that requested the update.
 Replace every `<full-commit-sha>` below with the same 40-character commit SHA
 from `aws/aws-durable-execution-ci`.
 
-### Review-address intake
+### Review-address intake and direct reconciliation
 
-The caller must keep the exact workflow name `AI PR Review Address`, because
-the reconciliation workflow selects completed intake runs by that name.
-
-Add `.github/workflows/ai-pr-review-address.yml`:
+Add `.github/workflows/ai-pr-review-address.yml` to the consuming repository.
+Keep the exact workflow name `AI PR Review Address`, because the continuation
+workflow selects completed inline-intake runs by that name.
 
 ```yaml
 name: AI PR Review Address
@@ -38,12 +40,14 @@ name: AI PR Review Address
 on:
   issue_comment:
     types: [created]
+
   pull_request_review_comment:
     types: [created]
+
   workflow_dispatch:
     inputs:
       pull-request-number:
-        description: Pull request number with authorized feedback
+        description: Pull request number
         required: true
         type: string
 
@@ -51,27 +55,42 @@ permissions: {}
 
 jobs:
   intake:
+    if: github.event_name == 'pull_request_review_comment'
     permissions:
       contents: read
       issues: read
       pull-requests: read
     uses: aws/aws-durable-execution-ci/.github/workflows/ai-pr-review-address.yml@<full-commit-sha>
+
+  address:
+    if: >-
+      github.event_name == 'issue_comment' ||
+      github.event_name == 'workflow_dispatch'
+    permissions:
+      actions: read
+      contents: write
+      id-token: write
+      issues: write
+      pull-requests: write
+    uses: aws/aws-durable-execution-ci/.github/workflows/ai-pr-review-address.yml@<full-commit-sha>
     with:
       pull-request-number: ${{ inputs['pull-request-number'] || '' }}
+    secrets: inherit
 ```
 
-The intake workflow does not enter the model environment and cannot write
-repository content.
+The intake job is available only to inline review-comment events and has
+read-only repository permissions. Top-level comments and manual dispatches
+from the default branch call reconciliation directly. When manually running
+the workflow, select the default branch. A manual run that selects any other
+branch or a tag fails before work-item resolution or the privileged worker.
 
-### Review-address reconciliation
+### Inline-intake continuation
 
-The reconciliation caller must exist on the consuming repository's default
-branch before review commands can use the protected continuation.
-
-Add `.github/workflows/ai-pr-review-reconciliation.yml`:
+Add `.github/workflows/ai-pr-review-address-continuation.yml` to the consuming
+repository:
 
 ```yaml
-name: AI PR Review Reconciliation
+name: AI PR Review Address Continuation
 
 on:
   workflow_run:
@@ -83,26 +102,42 @@ permissions: {}
 
 jobs:
   address:
-    if: github.event.workflow_run.conclusion == 'success'
+    if: >-
+      github.event.workflow_run.event ==
+        'pull_request_review_comment' &&
+      github.event.workflow_run.conclusion == 'success'
     permissions:
       actions: read
       contents: write
       id-token: write
       issues: write
       pull-requests: write
-    uses: aws/aws-durable-execution-ci/.github/workflows/ai-pr-review-reconciliation.yml@<full-commit-sha>
+    uses: aws/aws-durable-execution-ci/.github/workflows/ai-pr-review-address.yml@<full-commit-sha>
+    with:
+      source-run-id: >-
+        ${{ format('{0}', github.event.workflow_run.id || '') }}
+      source-run-attempt: >-
+        ${{ format('{0}', github.event.workflow_run.run_attempt || '') }}
     secrets: inherit
 ```
 
-GitHub starts the `workflow_run` workflow from the default branch. The trusted
-worker still checks out and updates the exact pull request head SHA selected by
-the validated work item.
+The continuation has a different workflow name, so its completion cannot
+trigger itself. It does not filter completed runs by branch name; a fork pull
+request whose head branch is named like the target repository's default branch
+still reaches reconciliation. The job-level event check ignores completed
+top-level-comment and manual runs.
+
+GitHub starts the `workflow_run` continuation from the default branch. The
+trusted worker still checks out and updates the exact pull request head SHA
+selected by the validated work item.
 
 A reusable workflow does not add event triggers to its caller. Each consuming
 repository must declare the comment, review-comment, manual, and
-`workflow_run` events shown above. There is no scheduled recovery scan. Use
-GitHub's rerun action for missed or failed runs, or manually dispatch the
-intake workflow with a specific pull request number.
+`workflow_run` events shown above. Both callers must exist on the default
+branch before review commands can use the protected continuation. There is no
+scheduled recovery scan. Use GitHub's rerun action for missed or failed runs,
+or manually dispatch the review-address workflow with a specific pull request
+number.
 
 ## Request review addressing
 
@@ -156,7 +191,7 @@ automatically.
 
 ## Configuration
 
-The intake and reconciliation workflows support these common inputs:
+The reusable workflow supports these inputs:
 
 - `environment-name`: GitHub environment for the model job; defaults to
   `ai-pr-review-runtime`.
@@ -166,14 +201,11 @@ The intake and reconciliation workflows support these common inputs:
 - `reasoning-effort`: defaults to `xhigh`.
 - `allow-workflow-changes`: defaults to `false`.
 
-The intake workflow also accepts:
-
-- `pull-request-number`: an explicit pull request for a manual run.
-
-Pass the same configuration values to both reusable-workflow callers:
-
 ```yaml
+  address:
+    # ...
     with:
+      # Keep the event-specific inputs from the caller examples above.
       environment-name: ai-runtime
       no-pr-label: automation:no-pr
       model: openai.gpt-5.6-sol
@@ -181,9 +213,11 @@ Pass the same configuration values to both reusable-workflow callers:
       allow-workflow-changes: false
 ```
 
-Reconciliation rejects an artifact whose configuration does not match its
-trusted inputs. Direct manual intake dispatches accept only the pull request
-number; configure the model runtime through the stable caller workflows.
+To override defaults, add the same runtime values to the `with` block of both
+privileged `address` jobs. Do not add them to the read-only `intake` job.
+The read-only intake artifact does not carry runtime configuration.
+Reconciliation always applies the model, environment, label, and workflow
+change policy from the trusted default-branch caller.
 
 ## Repository setup
 
@@ -205,17 +239,16 @@ The token is available only to the publication checkout for a validated
 workflow change; it is never available to the Codex process. Ordinary
 publication uses `GITHUB_TOKEN`.
 
-The reconciliation caller must use `secrets: inherit` and grant the actions,
-contents, identity-token, issue, and pull request permissions shown above. A
-called workflow cannot elevate permissions that its caller withheld.
+The `address` job must use `secrets: inherit` and grant the actions, contents,
+identity-token, issue, and pull request permissions shown above. A called
+workflow cannot elevate permissions that its caller withheld.
 
 ## Execution and publication
 
 The intake artifact is closed and bounded. It contains only normalized PR work
-items, source repository and run identity, and validated configuration.
-Reconciliation downloads it from the exact successful run, verifies its
-review-only scope, and validates it with the trusted workflow revision before
-starting `codex-issue-worker.yml`.
+items and source repository and run identity. Reconciliation downloads it from
+the exact successful run, verifies its review-only scope, and validates it with
+the trusted workflow revision before starting `codex-issue-worker.yml`.
 
 The worker re-fetches the current command authorization, pull request state,
 and target SHA after acquiring a PR-scoped concurrency group:
@@ -249,8 +282,8 @@ The workflow:
 - performs event intake with read-only repository permissions;
 - transfers only a bounded, normalized work-item artifact to the
   default-branch continuation;
-- validates the source repository, run identity, review-only scope, and
-  configuration before model execution;
+- validates the source repository, run identity, and review-only scope before
+  model execution;
 - checks out the exact pull request head SHA without persisted GitHub
   credentials;
 - runs Codex as an unprivileged user with read-only Git metadata;

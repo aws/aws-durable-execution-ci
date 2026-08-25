@@ -95,15 +95,8 @@ jobs:
     with:
       work-scope: implementation
       requested-issue-number: ${{ inputs['issue-number'] || '' }}
-      environment-name: >-
-        ${{ inputs['environment-name'] || 'ai-pr-review-runtime' }}
       no-pr-label: >-
         ${{ inputs['no-pr-label'] || 'codex:no-pr' }}
-      model: ${{ inputs['model'] || 'openai.gpt-5.6-sol' }}
-      reasoning-effort: >-
-        ${{ inputs['reasoning-effort'] || 'xhigh' }}
-      allow-workflow-changes: >-
-        ${{ inputs['allow-workflow-changes'] || false }}
       upload-work-items: false
 
   implement:
