@@ -2,6 +2,13 @@
 
 Shared GitHub Actions workflows for AWS Durable Execution repositories.
 
+## Developer experience
+
+- [AI-assisted pull request lifecycle](docs/ai-developer-experience.md):
+  Shows how developers create pull requests, request and interpret reviews,
+  address feedback, and finish the review loop after all AI workflows are
+  integrated.
+
 ## Shareable workflows
 
 - [AI pull request review](docs/ai-pr-review.md): Runs independent Claude and Codex reviews through Amazon Bedrock.
