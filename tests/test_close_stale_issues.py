@@ -85,13 +85,16 @@ class FakeGitHub:
         issues: IssueList,
         timelines: TimelineMap,
         patch_failures: set[int] | None = None,
+        add_label_failures: set[int] | None = None,
     ) -> None:
         self.issues: IssueList = issues
         self.timelines: TimelineMap = timelines
         self.patch_failures: set[int] = patch_failures or set()
+        self.add_label_failures: set[int] = add_label_failures or set()
         self.comments: list[tuple[int, JsonObject]] = []
         self.closed_issues: list[tuple[int, JsonObject]] = []
         self.removed_labels: list[tuple[int, str]] = []
+        self.added_labels: list[tuple[int, str]] = []
 
     def __call__(
         self, arguments: list[str], *, input_value: JsonObject | None = None
@@ -103,6 +106,16 @@ class FakeGitHub:
             if method == "POST" and endpoint.endswith("/comments"):
                 assert input_value is not None
                 self.comments.append((number, input_value))
+                return {}
+            if method == "POST" and endpoint.endswith("/labels"):
+                assert input_value is not None
+                if number in self.add_label_failures:
+                    raise CLOSER.StaleIssueError("add label failed")
+                labels = input_value.get("labels")
+                assert isinstance(labels, list)
+                for label in labels:
+                    assert isinstance(label, str)
+                    self.added_labels.append((number, label))
                 return {}
             if method == "DELETE" and endpoint.endswith(
                 f"/labels/{CLOSER.TARGET_LABEL}"
@@ -159,6 +172,7 @@ class StaleClosingTest(unittest.TestCase):
             {"state": "closed", "state_reason": "not_planned"},
         )
         self.assertIn(CLOSER.CLOSE_COMMENT_MARKER, fake.comments[0][1]["body"])
+        self.assertEqual(fake.added_labels, [])
 
     def test_comment_after_label_removes_label(self) -> None:
         fake = run_with(
@@ -168,6 +182,20 @@ class StaleClosingTest(unittest.TestCase):
         self.assertEqual(fake.closed_issues, [])
         self.assertEqual(fake.comments, [])
         self.assertEqual(fake.removed_labels, [(7, "needs-info")])
+        self.assertEqual(fake.added_labels, [(7, "needs-triage")])
+
+    def test_adds_triage_label_before_removing_needs_info(self) -> None:
+        fake = FakeGitHub(
+            [{"number": 7}],
+            {7: [labeled(days_ago=20), commented(days_ago=2)]},
+            add_label_failures={7},
+        )
+
+        with self.assertRaises(CLOSER.StaleIssueError):
+            run_fake(fake)
+
+        self.assertEqual(fake.removed_labels, [])
+        self.assertEqual(fake.added_labels, [])
 
     def test_old_comment_before_label_does_not_reset(self) -> None:
         fake = run_with(
@@ -176,6 +204,7 @@ class StaleClosingTest(unittest.TestCase):
         )
         self.assertEqual([n for n, _ in fake.closed_issues], [7])
         self.assertEqual(fake.removed_labels, [])
+        self.assertEqual(fake.added_labels, [])
 
     def test_within_window_is_skipped(self) -> None:
         fake = run_with(
@@ -184,6 +213,7 @@ class StaleClosingTest(unittest.TestCase):
         )
         self.assertEqual(fake.closed_issues, [])
         self.assertEqual(fake.comments, [])
+        self.assertEqual(fake.added_labels, [])
 
     def test_missing_label_event_is_skipped(self) -> None:
         fake = run_with(
@@ -223,6 +253,7 @@ class StaleClosingTest(unittest.TestCase):
         self.assertEqual(fake.closed_issues, [])
         self.assertEqual(fake.comments, [])
         self.assertEqual(fake.removed_labels, [])
+        self.assertEqual(fake.added_labels, [])
 
     def test_custom_close_reason(self) -> None:
         fake = run_with(
@@ -281,6 +312,7 @@ class StaleClosingTest(unittest.TestCase):
         self.assertEqual(fake.closed_issues, [])
         self.assertEqual(fake.comments, [])
         self.assertEqual(fake.removed_labels, [(7, "needs-info")])
+        self.assertEqual(fake.added_labels, [(7, "needs-triage")])
 
     def test_marked_non_bot_comment_does_not_suppress_close_notice(self) -> None:
         fake = run_with(

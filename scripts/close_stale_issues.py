@@ -9,6 +9,7 @@ from typing import Any
 
 # Only issues with this label are considered by this workflow
 TARGET_LABEL: str = "needs-info"
+TRIAGE_LABEL: str = "needs-triage"
 
 CLOSE_REASONS = frozenset({"completed", "not_planned", "duplicate"})
 GITHUB_PAGE_SIZE = 100
@@ -184,6 +185,19 @@ def gh_remove_label(repo: str, issue_number: int, label: str) -> None:
     )
 
 
+def gh_add_label(repo: str, issue_number: int, label: str) -> None:
+    gh_run_json(
+        [
+            "--method",
+            "POST",
+            f"repos/{repo}/issues/{issue_number}/labels",
+            "--input",
+            "-",
+        ],
+        input_value={"labels": [label]},
+    )
+
+
 def parse_timestamp(value: Any) -> datetime | None:
     if not isinstance(value, str) or not value:
         return None
@@ -288,10 +302,12 @@ def run() -> None:
 
         commented_time = latest_comment_at(events)
         if commented_time is not None and commented_time > label_applied_time:
+            gh_add_label(repo, number, TRIAGE_LABEL)
             gh_remove_label(repo, number, TARGET_LABEL)
             print(
                 f"#{number}: response received after '{TARGET_LABEL}' "
-                "was applied; label removed."
+                f"was applied; '{TARGET_LABEL}' removed and "
+                f"'{TRIAGE_LABEL}' added."
             )
             continue
 
