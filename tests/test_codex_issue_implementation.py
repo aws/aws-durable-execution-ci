@@ -19,9 +19,6 @@ WORKFLOW = (
 PR_ADDRESS_WORKFLOW = (
     REPO_ROOT / ".github/workflows/ai-pr-review-address.yml"
 ).read_text(encoding="utf-8")
-PR_RECONCILIATION_WORKFLOW = (
-    REPO_ROOT / ".github/workflows/ai-pr-review-reconciliation.yml"
-).read_text(encoding="utf-8")
 PR_ADDRESS_DOC = (
     REPO_ROOT / "docs/ai-pr-review-address.md"
 ).read_text(encoding="utf-8")
@@ -831,7 +828,7 @@ class EventSelectionTest(unittest.TestCase):
 
             bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
 
-        self.assertEqual(bundle["version"], 2)
+        self.assertEqual(bundle["version"], 1)
         self.assertEqual(
             set(bundle),
             {"version", "work_scope", "source", "matrix"},
@@ -862,7 +859,7 @@ class EventSelectionTest(unittest.TestCase):
 
     def test_reconciliation_bundle_is_bound_to_source_and_scope(self):
         bundle = {
-            "version": 2,
+            "version": 1,
             "work_scope": "review",
             "source": {
                 "repository": "aws/example",
@@ -966,7 +963,7 @@ class EventSelectionTest(unittest.TestCase):
 
     def test_reconciliation_bundle_rejects_runtime_configuration(self):
         bundle = {
-            "version": 2,
+            "version": 1,
             "work_scope": "review",
             "source": {
                 "repository": "aws/example",
@@ -995,43 +992,9 @@ class EventSelectionTest(unittest.TestCase):
             ):
                 IMPLEMENTATION.validate_work_items_bundle(bundle)
 
-    def test_reconciliation_accepts_legacy_bundle_configuration(self):
-        bundle = {
-            "version": 1,
-            "work_scope": "review",
-            "source": {
-                "repository": "aws/example",
-                "repository_id": 1234,
-                "run_id": 5678,
-                "run_attempt": 1,
-            },
-            "matrix": {"include": []},
-            "configuration": {
-                "environment_name": "legacy-runtime",
-                "no_pr_label": "legacy:no-pr",
-                "model": "legacy-model",
-                "reasoning_effort": "low",
-                "allow_workflow_changes": True,
-            },
-        }
-        with patch.dict(
-            os.environ,
-            environment(
-                SOURCE_REPOSITORY_ID="1234",
-                SOURCE_RUN_ATTEMPT="1",
-                SOURCE_RUN_ID="5678",
-                SOURCE_WORK_SCOPE="review",
-            ),
-            clear=True,
-        ):
-            validated = IMPLEMENTATION.validate_work_items_bundle(bundle)
-
-        self.assertEqual(validated["version"], 1)
-        self.assertNotIn("configuration", validated)
-
     def test_work_items_validation_emits_reconciliation_outputs(self):
         bundle = {
-            "version": 2,
+            "version": 1,
             "work_scope": "review",
             "source": {
                 "repository": "aws/example",
@@ -5595,10 +5558,6 @@ class WorkflowPolicyTest(unittest.TestCase):
         expected_names = (
             (WORKFLOW, "AI Issue Implementation"),
             (PR_ADDRESS_WORKFLOW, "AI PR Review Address"),
-            (
-                PR_RECONCILIATION_WORKFLOW,
-                "AI PR Review Reconciliation",
-            ),
             (RESOLVER_WORKFLOW, "AI Work Item Resolver"),
         )
         for workflow, expected_name in expected_names:
@@ -5617,6 +5576,7 @@ class WorkflowPolicyTest(unittest.TestCase):
         for trigger in (
             "issue_comment:",
             "pull_request_review_comment:",
+            "workflow_run:",
             "workflow_dispatch:",
             "workflow_call:",
         ):
@@ -5626,12 +5586,16 @@ class WorkflowPolicyTest(unittest.TestCase):
         self.assertNotIn("schedule:", PR_ADDRESS_WORKFLOW)
         self.assertIn("workflow_call:", RESOLVER_WORKFLOW)
         self.assertNotIn("issue_comment:", RESOLVER_WORKFLOW)
-        self.assertIn("workflow_run:", PR_RECONCILIATION_WORKFLOW)
         self.assertIn(
             "- AI PR Review Address",
-            PR_RECONCILIATION_WORKFLOW,
+            PR_ADDRESS_WORKFLOW,
         )
-        self.assertIn("workflow_call:", PR_RECONCILIATION_WORKFLOW)
+        self.assertFalse(
+            (
+                REPO_ROOT
+                / ".github/workflows/ai-pr-review-reconciliation.yml"
+            ).exists()
+        )
 
     def test_manual_pr_review_dispatch_only_accepts_the_target(self):
         dispatch = re.search(
@@ -5660,6 +5624,16 @@ class WorkflowPolicyTest(unittest.TestCase):
             "Add `.github/workflows/ai-pr-review-reconciliation.yml`",
             PR_ADDRESS_DOC,
         )
+        self.assertNotIn(
+            ".github/workflows/ai-pr-review-reconciliation.yml@",
+            PR_ADDRESS_DOC,
+        )
+        self.assertGreaterEqual(
+            PR_ADDRESS_DOC.count(
+                ".github/workflows/ai-pr-review-address.yml@"
+            ),
+            2,
+        )
         self.assertIn("branches-ignore:", PR_ADDRESS_DOC)
         self.assertIn("github.event_name == 'issue_comment'", PR_ADDRESS_DOC)
         self.assertIn(
@@ -5676,7 +5650,7 @@ class WorkflowPolicyTest(unittest.TestCase):
         )
         review_address = re.search(
             r"(?ms)^  address:\n(.*)\Z",
-            PR_RECONCILIATION_WORKFLOW,
+            PR_ADDRESS_WORKFLOW,
         )
         reconcile = re.search(
             r"(?ms)^  reconcile:\n(.*?)(?=^  publish:)",
@@ -5789,35 +5763,31 @@ class WorkflowPolicyTest(unittest.TestCase):
         self.assertNotIn("workflow_run:", WORKFLOW)
         self.assertNotIn("validate-work-items", WORKFLOW)
 
-    def test_pr_reconciliation_validates_the_read_only_intake_artifact(self):
-        intake = re.search(
-            r"(?ms)^  resolve:\n(.*)\Z",
-            PR_ADDRESS_WORKFLOW,
-        )
-        direct = re.search(
+    def test_pr_address_merges_intake_and_reconciliation(self):
+        resolve = re.search(
             r"(?ms)^  resolve:\n(.*?)(?=^  load:)",
-            PR_RECONCILIATION_WORKFLOW,
+            PR_ADDRESS_WORKFLOW,
         )
         load = re.search(
             r"(?ms)^  load:\n(.*?)(?=^  address:)",
-            PR_RECONCILIATION_WORKFLOW,
-        )
-        assert intake is not None and direct is not None and load is not None
-        self.assertIn("work-scope: review", intake.group(1))
-        self.assertIn("upload-work-items: true", intake.group(1))
-        self.assertNotIn(
-            "uses: ./.github/workflows/codex-issue-worker.yml",
             PR_ADDRESS_WORKFLOW,
         )
-        self.assertNotIn("contents: write", intake.group(1))
-        self.assertNotIn("id-token: write", intake.group(1))
-        self.assertIn("github.event_name == 'issue_comment'", direct.group(1))
-        self.assertIn(
-            "github.event_name == 'workflow_dispatch'",
-            direct.group(1),
+        address = re.search(
+            r"(?ms)^  address:\n(.*)\Z",
+            PR_ADDRESS_WORKFLOW,
         )
-        self.assertIn("work-scope: review", direct.group(1))
-        self.assertIn("upload-work-items: false", direct.group(1))
+        assert resolve is not None and load is not None and address is not None
+        self.assertIn("work-scope: review", resolve.group(1))
+        self.assertIn(
+            "github.event_name != 'workflow_run'",
+            resolve.group(1),
+        )
+        self.assertIn(
+            "github.event_name == 'pull_request_review_comment'",
+            resolve.group(1),
+        )
+        self.assertNotIn("contents: write", resolve.group(1))
+        self.assertNotIn("id-token: write", resolve.group(1))
         self.assertIn("Upload authorized work items", RESOLVER_WORKFLOW)
         self.assertIn(
             "codex-${{ inputs['work-scope'] }}-work-items",
@@ -5845,12 +5815,12 @@ class WorkflowPolicyTest(unittest.TestCase):
         self.assertNotIn("SOURCE_EVENT:", load.group(1))
         self.assertNotIn(
             "outputs.environment_name",
-            PR_RECONCILIATION_WORKFLOW,
+            PR_ADDRESS_WORKFLOW,
         )
-        self.assertNotIn("outputs.model", PR_RECONCILIATION_WORKFLOW)
+        self.assertNotIn("outputs.model", PR_ADDRESS_WORKFLOW)
         self.assertNotIn(
             "outputs.reasoning_effort",
-            PR_RECONCILIATION_WORKFLOW,
+            PR_ADDRESS_WORKFLOW,
         )
         self.assertIn(
             "repository: ${{ job.workflow_repository }}",
@@ -5860,12 +5830,19 @@ class WorkflowPolicyTest(unittest.TestCase):
             "ref: ${{ job.workflow_sha }}",
             load.group(1),
         )
+        self.assertIn(
+            "github.event_name != 'pull_request_review_comment'",
+            address.group(1),
+        )
+        self.assertIn(
+            "uses: ./.github/workflows/codex-issue-worker.yml",
+            address.group(1),
+        )
 
     def test_runtime_environment_inputs_preserve_the_default(self):
         for workflow, count in (
             (WORKFLOW, 2),
             (PR_ADDRESS_WORKFLOW, 1),
-            (PR_RECONCILIATION_WORKFLOW, 1),
             (RESOLVER_WORKFLOW, 0),
         ):
             with self.subTest(workflow=workflow[:40]):
@@ -5935,10 +5912,6 @@ class WorkflowPolicyTest(unittest.TestCase):
             PR_ADDRESS_WORKFLOW.count("default: xhigh"),
             1,
         )
-        self.assertEqual(
-            PR_RECONCILIATION_WORKFLOW.count("default: xhigh"),
-            1,
-        )
         self.assertIn(
             "DEFAULT_REASONING_EFFORT: xhigh",
             WORKER_WORKFLOW,
@@ -5947,7 +5920,6 @@ class WorkflowPolicyTest(unittest.TestCase):
             "DEFAULT_REASONING_EFFORT: high",
             WORKFLOW
             + PR_ADDRESS_WORKFLOW
-            + PR_RECONCILIATION_WORKFLOW
             + RESOLVER_WORKFLOW
             + WORKER_WORKFLOW,
         )
@@ -5961,15 +5933,11 @@ class WorkflowPolicyTest(unittest.TestCase):
             "uses: ./.github/workflows/ai-work-item-resolver.yml",
             PR_ADDRESS_WORKFLOW,
         )
-        self.assertIn(
-            "uses: ./.github/workflows/ai-work-item-resolver.yml",
-            PR_RECONCILIATION_WORKFLOW,
-        )
         self.assertIn("work-scope: implementation", WORKFLOW)
         self.assertIn("work-scope: review", PR_ADDRESS_WORKFLOW)
         self.assertIn(
-            "upload-work-items: false",
-            PR_RECONCILIATION_WORKFLOW,
+            "github.event_name == 'pull_request_review_comment'",
+            PR_ADDRESS_WORKFLOW,
         )
         resolve = re.search(
             r"(?ms)^      - name: Resolve work items\n"

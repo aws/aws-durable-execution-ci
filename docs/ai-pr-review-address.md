@@ -9,14 +9,15 @@ The public workflow names describe the capability rather than the current
 provider so additional agents can be supported later. The implementation
 currently runs Codex through Amazon Bedrock.
 
-PR review addressing keeps two permission paths behind one caller workflow:
+PR review addressing keeps two permission paths behind one caller and one
+reusable workflow:
 
-- Inline review-thread commands use `AI PR Review Address` for read-only
-  intake and upload a bounded work-item artifact.
+- Inline review-thread commands use the read-only intake path and upload a
+  bounded work-item artifact.
 - Top-level pull request comments and manual dispatches from the default branch
-  call `AI PR Review Reconciliation` directly.
+  use the direct reconciliation path.
 - A self-referential `workflow_run` continues successful inline intake through
-  `AI PR Review Reconciliation` from the default branch.
+  the reconciliation path from the default branch.
 
 The default-branch continuation allows repositories to protect the model
 environment with a default-branch deployment rule without trusting the pull
@@ -82,7 +83,7 @@ jobs:
       id-token: write
       issues: write
       pull-requests: write
-    uses: aws/aws-durable-execution-ci/.github/workflows/ai-pr-review-reconciliation.yml@<full-commit-sha>
+    uses: aws/aws-durable-execution-ci/.github/workflows/ai-pr-review-address.yml@<full-commit-sha>
     with:
       pull-request-number: ${{ inputs['pull-request-number'] || '' }}
       source-run-id: ${{ github.event.workflow_run.id || '' }}
@@ -109,11 +110,6 @@ repository must declare the comment, review-comment, manual, and
 before review commands can use the protected continuation. There is no
 scheduled recovery scan. Use GitHub's rerun action for missed or failed runs,
 or manually dispatch the workflow with a specific pull request number.
-
-Existing two-file callers remain supported. To migrate, replace the intake
-caller with the workflow above and delete
-`.github/workflows/ai-pr-review-reconciliation.yml` from the consuming
-repository.
 
 ## Request review addressing
 
@@ -167,8 +163,8 @@ automatically.
 
 ## Configuration
 
-Configure the privileged `address` job once. The reconciliation workflow
-supports these inputs:
+Configure the privileged `address` job once. The reusable workflow supports
+these inputs:
 
 - `environment-name`: GitHub environment for the model job; defaults to
   `ai-pr-review-runtime`.

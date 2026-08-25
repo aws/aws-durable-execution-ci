@@ -60,8 +60,7 @@ MAX_STAGED_BLOB_BYTES = 5_000_000
 MAX_STAGED_CONTENT_BYTES = 5_000_000
 MAX_TRUSTED_INSTRUCTION_BYTES = 500_000
 MAX_WORK_ITEMS_PER_RUN = 10
-WORK_ITEMS_VERSION = 2
-SUPPORTED_WORK_ITEMS_VERSIONS = frozenset((1, WORK_ITEMS_VERSION))
+WORK_ITEMS_VERSION = 1
 WORK_SCOPES = frozenset(("all", "implementation", "review"))
 TRUSTED_INSTRUCTION_FILENAMES = frozenset(
     ("AGENTS.md", "AGENTS.override.md", "CONTRIBUTING.md")
@@ -1857,23 +1856,15 @@ def work_items_bundle(
 
 
 def validate_work_items_bundle(value: Any) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        raise ImplementationError("work items bundle is invalid")
-    version = value.get("version")
-    expected_fields = {
+    if not isinstance(value, dict) or set(value) != {
         "version",
         "work_scope",
         "source",
         "matrix",
-    }
-    if version == 1:
-        expected_fields.add("configuration")
-    if set(value) != expected_fields:
+    }:
         raise ImplementationError("work items bundle is invalid")
-    if version not in SUPPORTED_WORK_ITEMS_VERSIONS:
+    if value["version"] != WORK_ITEMS_VERSION:
         raise ImplementationError("work items bundle version is invalid")
-    if version == 1 and not isinstance(value["configuration"], dict):
-        raise ImplementationError("work items bundle is invalid")
     expected_scope = require_environment("SOURCE_WORK_SCOPE")
     if (
         expected_scope not in ("implementation", "review")
@@ -1909,7 +1900,7 @@ def validate_work_items_bundle(value: Any) -> dict[str, Any]:
         )
     matrix = validate_work_item_matrix(value["matrix"], expected_scope)
     return {
-        "version": version,
+        "version": WORK_ITEMS_VERSION,
         "work_scope": expected_scope,
         "source": expected_source,
         "matrix": matrix,
