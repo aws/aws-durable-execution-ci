@@ -3389,6 +3389,37 @@ class ValidationPolicyTest(unittest.TestCase):
             IMPLEMENTATION.stable_digest(command),
         )
 
+    def test_publication_metadata_accepts_maximum_multibyte_content(self):
+        result = {
+            "outcome": "changed",
+            "summary": "\U0001f600" * 2_000,
+            "validation": ["\U0001f600" * 500] * 50,
+        }
+        paths = [
+            f"src/{index:02d}-" + "\U0001f600" * 150
+            for index in range(50)
+        ]
+        publication = IMPLEMENTATION.publication_metadata(
+            result,
+            paths,
+            implementation_command(
+                guidance="\U0001f600"
+                * IMPLEMENTATION.MAX_PUBLICATION_GUIDANCE_CHARACTERS
+            ),
+        )
+
+        encoded = IMPLEMENTATION.encode_publication_metadata(publication)
+        padding = "=" * (-len(encoded) % 4)
+        payload = IMPLEMENTATION.base64.urlsafe_b64decode(
+            encoded + padding
+        )
+
+        self.assertGreater(len(payload), 160_000)
+        self.assertEqual(
+            IMPLEMENTATION.decode_publication_metadata(encoded),
+            publication,
+        )
+
     def test_draft_pull_request_describes_requested_and_completed_work(self):
         state = {
             "action": "implement",
@@ -3457,6 +3488,37 @@ class ValidationPolicyTest(unittest.TestCase):
             "Recovers the implementation branch",
             payload["body"],
         )
+
+    def test_draft_pull_request_renders_changed_paths_as_literal_text(self):
+        state = {
+            "action": "implement",
+            "repository": "aws/example",
+            "issue": IMPLEMENTATION.issue_snapshot(issue()),
+            "implementation_command": implementation_command(),
+            "branch": "implement-issue-31",
+            "target": {"ref": "main"},
+        }
+        publication = IMPLEMENTATION.publication_metadata(
+            {
+                "outcome": "changed",
+                "summary": "Added files with unusual names.",
+                "validation": [],
+            },
+            [
+                "[src](https://example.invalid)\n- injected.md",
+                "src/`literal`.py",
+            ],
+            state["implementation_command"],
+        )
+
+        body = IMPLEMENTATION.pull_request_body(state, publication)
+
+        self.assertIn(
+            '- `"[src](https://example.invalid)\\n- injected.md"`',
+            body,
+        )
+        self.assertNotIn("\n- injected.md", body)
+        self.assertIn('- ``"src/`literal`.py"``', body)
 
     def test_recovery_reuses_commit_publication_metadata(self):
         state = {

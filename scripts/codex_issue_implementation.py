@@ -11,6 +11,7 @@ import re
 import subprocess
 import sys
 import urllib.parse
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -51,7 +52,7 @@ MAX_CONTEXT_BYTES = 1_000_000
 MAX_AUTOMATION_COMMIT_CHAIN = 100
 MAX_PATCH_BYTES = 5_000_000
 MAX_PUBLICATION_GUIDANCE_CHARACTERS = 8_000
-MAX_PUBLICATION_METADATA_BYTES = 160_000
+MAX_PUBLICATION_METADATA_BYTES = 256_000
 MAX_PUBLICATION_PATH_CHARACTERS = 8_000
 MAX_PUBLICATION_PATHS = 50
 MAX_REVIEW_COMMENTS = 1_000
@@ -3532,17 +3533,33 @@ def bounded_safe_github_text(value: str, limit: int) -> str:
     return f"{escaped[: max(0, limit - 3)]}..."
 
 
+def markdown_code_span(value: str) -> str:
+    serialized = json.dumps(value, ensure_ascii=False)
+    longest_run = max(
+        (len(match.group(0)) for match in re.finditer(r"`+", serialized)),
+        default=0,
+    )
+    fence = "`" * (longest_run + 1)
+    return f"{fence}{serialized}{fence}"
+
+
 def markdown_list(
     values: list[str],
     empty: str,
     limit: int,
+    renderer: Callable[[str], str] | None = None,
 ) -> str:
     if not values:
         return f"- {empty}"
     lines: list[str] = []
     length = 0
     for value in values:
-        line = f"- {bounded_safe_github_text(value, 2_000)}"
+        rendered = (
+            renderer(value)
+            if renderer is not None
+            else bounded_safe_github_text(value, 2_000)
+        )
+        line = f"- {rendered}"
         if length + len(line) + 1 > limit:
             lines.append("- Additional details omitted.")
             break
@@ -3594,7 +3611,12 @@ def pull_request_body(
     if changed_path_count is None:
         changes = "- Change details are unavailable for this recovered branch."
     else:
-        changes = markdown_list(paths, "No changed paths recorded.", 10_000)
+        changes = markdown_list(
+            paths,
+            "No changed paths recorded.",
+            10_000,
+            markdown_code_span,
+        )
         omitted = changed_path_count - len(paths)
         if omitted > 0:
             changes += f"\n- {omitted} additional changed path(s) omitted."
