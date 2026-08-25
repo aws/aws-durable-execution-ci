@@ -307,11 +307,18 @@ Codex model execution is limited to two hours. The reconcile job has a
 allowance.
 
 For new issue implementation, Codex checks out the exact current default branch
-revision, commits to `implement-issue-<number>`, and opens a draft pull request.
-If the default branch advances while the model runs, the validated change may
-still be published and opened against the current default branch. A later run
-can recover a workflow-owned branch when the push succeeded but pull request
-creation did not.
+revision, commits to `implement-issue-<number>`, and opens a draft pull request
+whose title identifies the issue and requested work. Its body closes the issue
+and records the issue title, command guidance, model summary, changed paths,
+and validation performed. If the default branch advances while the model runs,
+the validated change may still be published and opened against the current
+default branch.
+
+A later run can recover a workflow-owned branch when the push succeeded but
+pull request creation did not. Commit trailers bind recovery to the original
+issue and implementation command and preserve bounded description metadata;
+older automation commits that contain only the issue snapshot remain
+recoverable with the summary available from their commit message.
 
 For review addressing, the pull request head must be in the current repository;
 fork branches are never updated. The worker checks out the exact validated head
