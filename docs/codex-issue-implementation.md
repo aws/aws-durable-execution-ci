@@ -1,28 +1,32 @@
-# Codex issue implementation
+# Codex issue implementation and PR review addressing
 
-The reusable Codex issue implementation workflow reconciles open issues into
-draft pull requests when an authorized maintainer comments:
+The Codex automation exposes two separate workflows:
 
-```text
-/ai implement
-```
+- `Codex Issue Implementation` handles `/ai implement` on issues.
+- `Codex PR Review Address` handles `/ai address` on pull requests.
 
-Independently of issue linkage, it also updates an existing pull request when
-an authorized maintainer posts:
+Both workflows use the same read-only work-item resolver and the same Codex
+worker. Their execution paths differ:
 
-```text
-/ai address
-```
+- Issue implementation resolves an issue and calls the worker directly.
+- PR review addressing uploads a bounded, read-only intake artifact. A
+  `workflow_run` continuation from the default branch validates that artifact
+  before calling the worker.
 
-The immediate event triggers and daily schedule belong in each consuming
-repository. The reusable workflow owns discovery, issue-scoped serialization,
-PR-scoped review serialization, Codex execution through Amazon Bedrock, state
-revalidation, and publication.
+The default-branch continuation is used only for PR review addressing. This
+keeps issue implementation behavior unchanged while allowing a repository to
+protect the model environment with a default-branch deployment rule for review
+updates.
 
-## Caller workflow
+## Caller workflows
 
-Add `.github/workflows/codex-issue-implementation.yml` to the consuming
-repository:
+Add the following caller workflows to the consuming repository. Replace every
+`<full-commit-sha>` with the same 40-character commit SHA from
+`aws/aws-durable-execution-ci`.
+
+### Issue implementation
+
+`.github/workflows/codex-issue-implementation.yml`:
 
 ```yaml
 name: Codex Issue Implementation
@@ -30,17 +34,12 @@ name: Codex Issue Implementation
 on:
   issue_comment:
     types: [created]
-  pull_request_review_comment:
-    types: [created]
-  schedule:
-    - cron: "17 3 * * *"
   workflow_dispatch:
     inputs:
       issue-number:
-        description: Optional authorized issue number to reconcile
-        required: false
+        description: Authorized issue number to implement
+        required: true
         type: string
-        default: ""
 
 permissions: {}
 
@@ -57,29 +56,116 @@ jobs:
     secrets: inherit
 ```
 
-Replace `<full-commit-sha>` with the 40-character commit SHA to use. Pinning
-ensures that the workflow, trusted prompt, schema, and publication policy come
-from one immutable revision.
+This workflow directly enters the configured environment from the triggering
+run. If the environment restricts deployments by branch, its rule must allow
+the refs from which issue implementation is expected to run.
 
-The caller must declare every event it wants to support. A reusable workflow
-does not add its own issue-comment, review-comment, schedule, or manual
-triggers to the caller.
+### PR review intake
 
-## Repository setup
+The caller must keep the exact workflow name `Codex PR Review Address`, because
+the reconciliation workflow selects completed intake runs by that name.
 
-Post `/ai implement` as a standalone comment on an open issue. Leading and
-trailing spaces or tabs are ignored, and one or more spaces or tabs may
-separate `/ai` and `implement`. The author must currently have `write`,
-`maintain`, or `admin` repository permission and must not be a bot. The daily
-schedule recovers missed events, failed runs, and branches pushed before pull
-request creation completed by finding open issues with an authorized command.
-Implementation labels are not inspected; applying `codex:implement` alone does
-not start work. Text after the command is passed to Codex as task-specific
-maintainer guidance and may continue on later lines. Other command names and
-emoji reactions do not start work.
+`.github/workflows/codex-pr-review-address.yml`:
 
-To explicitly authorize changes under `.github/workflows/**` for one
-implementation request, add the option immediately after the command:
+```yaml
+name: Codex PR Review Address
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      pull-request-number:
+        description: Pull request number with authorized feedback
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  intake:
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+    uses: aws/aws-durable-execution-ci/.github/workflows/codex-pr-review-address.yml@<full-commit-sha>
+    with:
+      pull-request-number: ${{ inputs['pull-request-number'] || '' }}
+```
+
+The intake workflow does not enter the model environment and cannot write
+repository content.
+
+### PR review reconciliation
+
+The reconciliation caller must exist on the consuming repository's default
+branch before review commands can use the protected continuation.
+
+`.github/workflows/codex-pr-review-reconciliation.yml`:
+
+```yaml
+name: Codex PR Review Reconciliation
+
+on:
+  workflow_run:
+    workflows:
+      - Codex PR Review Address
+    types: [completed]
+
+permissions: {}
+
+jobs:
+  address:
+    if: github.event.workflow_run.conclusion == 'success'
+    permissions:
+      actions: read
+      contents: write
+      id-token: write
+      issues: write
+      pull-requests: write
+    uses: aws/aws-durable-execution-ci/.github/workflows/codex-pr-review-reconciliation.yml@<full-commit-sha>
+    secrets: inherit
+```
+
+GitHub starts this `workflow_run` workflow from the default branch. The trusted
+worker still checks out and updates the exact pull request head SHA selected by
+the validated work item. Repository checkout state does not determine
+environment eligibility.
+
+A reusable workflow does not add event triggers to its caller. Each consuming
+repository must declare the comment, review-comment, manual, and `workflow_run`
+events shown above.
+
+There is no scheduled recovery scan. Use GitHub's rerun action for missed or
+failed event runs. A manual dispatch must name the specific issue or pull
+request to reconcile.
+
+## Commands
+
+Post this command as a standalone comment on an open issue:
+
+```text
+/ai implement
+```
+
+Post this command on an open pull request:
+
+```text
+/ai address
+```
+
+Leading and trailing spaces or tabs are ignored, and one or more spaces or
+tabs may separate `/ai` from the command. Additional text after the command is
+passed to Codex as maintainer guidance and may continue on later lines.
+
+The command author must currently have `write`, `maintain`, or `admin`
+repository permission and must not be a bot. Other command names and emoji
+reactions do not start work.
+
+To explicitly authorize changes under `.github/workflows/**` for one issue
+implementation request, place the option immediately after the command:
 
 ```text
 /ai implement --allow-workflow-changes
@@ -87,303 +173,155 @@ implementation request, add the option immediately after the command:
 Keep the workflow change narrowly scoped.
 ```
 
-The option is removed from the maintainer guidance before it is sent to Codex.
-Mentioning `--allow-workflow-changes` later in the guidance does not authorize
-workflow changes. The worker re-fetches the current command after acquiring
-its concurrency lock, so editing the command to remove the option also removes
-the authorization.
+The option is removed from the guidance before it is sent to Codex. Mentioning
+`--allow-workflow-changes` later in guidance does not grant permission.
 
-`/ai address` is scoped directly to the pull request containing the command.
-It does not require that pull request to close or reference an issue and never
-creates a new implementation branch or pull request.
+The workflows enforce command scope:
 
-Create an `ai-pr-review-runtime` environment with this secret:
+- Issue implementation emits only issue work items. It ignores `/ai address`
+  comments and does not convert linked-PR review feedback into address work.
+- PR review intake emits only PR address work items. It ignores `/ai implement`
+  comments and never creates an implementation branch or pull request.
 
-- `BEDROCK_ROLE_ARN`: the IAM role that GitHub's OIDC provider can assume.
+No linked issue is required for `/ai address`.
 
-To use a different environment, pass `environment-name: ai-runtime` in the
-caller job's `with` block and store `BEDROCK_ROLE_ARN` in that environment.
+## Review selection
 
-Create a repository or organization Actions secret when workflow changes may
-be authorized:
+Reply with `/ai address` inside an inline review thread to select that complete
+thread. All currently unprocessed explicitly marked threads are reconciled
+together.
 
-- `CODEX_WORKFLOW_PUSH_TOKEN`: a token scoped to the target repository with
-  `Contents: write` and `Workflows: write`. The token is used only by the
-  publication checkout when the validated patch changes
-  `.github/workflows/**`; it is never available to the Codex process.
+Post `/ai address` as a top-level pull request conversation comment to address
+all eligible feedback created at or after GitHub's server-recorded push time
+for the current head:
 
-Allow GitHub Actions to create pull requests in the repository settings. The
-caller must grant the reusable workflow contents, issues, and pull request
-write permissions as shown above; a called workflow cannot elevate permissions
-that the caller withheld.
+- conversation comments
+- submitted review summaries
+- inline review comments
 
-Ordinary publication uses the automatic `GITHUB_TOKEN`. A validated workflow
-change uses `CODEX_WORKFLOW_PUSH_TOKEN` only for the Git push, while pull
-request creation, comments, and labels continue to use `GITHUB_TOKEN`. The
-generated commit includes `skip-checks: true` so the privileged push does not
-execute model-authored workflow code before human review. If the validated
-patch changes `.github/workflows/**` and the secret is unavailable, publication
-fails before checkout with a specific configuration error. Repositories can
-provide a separately reviewed, secretless manual validation workflow for
-generated drafts. Any validation with privileged credentials should require
-human approval.
+Human and bot-authored feedback are both included, so automated review
+findings can be addressed. If the activity record is unavailable, the workflow
+includes all otherwise eligible feedback rather than silently omit findings.
+Multiple pending top-level commands and their appended guidance are processed
+and acknowledged together.
 
-The workflow creates the default `codex:no-pr` label if it needs to mark an
-issue that requires no repository change. Creating it in advance is
-recommended so its color and description follow repository conventions.
-Issues carrying `codex:no-pr` are excluded from scheduled discovery. Remove
-that label before asking Codex to reconsider the issue.
-
-The repository settings must allow the automatic token to create draft pull
-requests. The workflow does not merge or approve pull requests.
+Edits to comments from an older head do not carry those findings into the
+current batch. Publisher-authored acknowledgements and reactions do not start
+or contribute feedback.
 
 ## Configuration
 
-Pass optional inputs from the caller job:
+The reusable workflows support these common inputs:
+
+- `environment-name`, default `ai-pr-review-runtime`
+- `no-pr-label`, default `codex:no-pr`
+- `model`, default `openai.gpt-5.6-sol`
+- `reasoning-effort`, default `xhigh`
+- `allow-workflow-changes`, default `false`
+
+Issue implementation also accepts:
+
+- `issue-number`, the explicit issue required for a manual run
+
+PR review intake also accepts:
+
+- `pull-request-number`, the explicit PR required for a manual run
+
+Direct manual PR review dispatches accept only the pull request number.
+Configure the model runtime through the stable reusable-workflow callers; those
+settings cannot vary per dispatch because reconciliation starts in a separate
+`workflow_run`.
+
+When customizing PR review configuration, pass the same values to both the
+intake and reconciliation callers:
 
 ```yaml
     with:
       no-pr-label: automation:no-pr
-      max-issues: 5
       environment-name: ai-runtime
       model: openai.gpt-5.6-sol
       reasoning-effort: xhigh
       allow-workflow-changes: false
 ```
 
-- `no-pr-label` defaults to `codex:no-pr`.
-- `max-issues` defaults to 3 and is limited to 10 work items per discovery
-  run.
-- `environment-name` defaults to `ai-pr-review-runtime`.
-- `model` defaults to `openai.gpt-5.6-sol`.
-- `reasoning-effort` defaults to `xhigh`.
-- `allow-workflow-changes` defaults to `false`. When false, a model result that
-  changes `.github/workflows/**` is rejected before publication unless the
-  current issue command includes `/ai implement --allow-workflow-changes`.
-  Setting the input to `true` remains a workflow-wide administrative override.
+Reconciliation rejects an artifact whose configuration does not match the
+trusted reconciliation inputs. Pass identical configuration to the intake and
+reconciliation callers.
 
-The configured no-PR label follows GitHub's case-insensitive label behavior.
+## Repository setup
 
-The schedule in the caller controls run frequency. Scheduled and manual
-discovery scans open issues and pull requests in creation order until they find
-up to `max-issues` pending work items. Each run evaluates at most 25 new
-candidates and persists the last evaluated issue number in the Actions cache,
-so the next run resumes later in the list instead of repeatedly spending its
-budget on the oldest inactive issues. Reaching the end resets the cursor for a
-new cycle. This recovers authorized `/ai implement` commands and unprocessed
-`/ai address` commands even when the pull request does not close an eligible
-issue. Across webhook and recovery resolution, address work is always emitted
-as a pull request work item, including when it was found through a linked issue,
-so duplicate issue-scoped and pull-request-scoped workers cannot target the
-same review command. If an issue-scoped worker re-fetches state after waiting
-and the issue has since become address work, it defers that work instead of
-retargeting while holding the issue concurrency key. Blocked or ambiguous
-issues consume a slot until their current state is reported; later discovery
-runs skip the same actor-authored notification marker and continue scanning. A
-manual run can pass `issue-number` to reconcile one issue directly, but the
-worker still requires an authorized implementation command.
+Create the configured environment with this secret:
 
-## Issue and pull request behavior
+- `BEDROCK_ROLE_ARN`: the IAM role that GitHub's OIDC provider can assume.
 
-For every selected issue or pull request review command, the entry workflow
-starts one reusable worker that owns the complete reconcile and publication
-pipeline. The worker re-fetches the applicable issue or pull request state,
-branch SHA, and unprocessed review commands after acquiring one of these
-workflow-level concurrency groups:
+For PR review addressing, the environment may restrict deployments to the
+default branch. The intake run never enters it; the successful intake triggers
+the default-branch reconciliation workflow, and only that continuation enters
+the environment.
+
+Create this repository or organization Actions secret when workflow changes
+may be authorized:
+
+- `CODEX_WORKFLOW_PUSH_TOKEN`: a token scoped to the target repository with
+  `Contents: write` and `Workflows: write`.
+
+The token is used only by the publication checkout when a validated patch
+changes `.github/workflows/**`; it is never available to the Codex process.
+Ordinary publication uses `GITHUB_TOKEN`. If a workflow change is authorized
+but the secret is unavailable, publication fails with a specific configuration
+error.
+
+Allow GitHub Actions to create pull requests in the repository settings. A
+called workflow cannot elevate permissions that its caller withheld, so use
+the caller permissions shown above. The workflow does not merge or approve
+pull requests.
+
+The issue implementation workflow creates the configured no-PR label when it
+needs to report that an issue requires no repository change. Creating the label
+in advance is recommended so its color and description follow repository
+conventions. Remove the label before explicitly asking Codex to reconsider the
+issue.
+
+## Execution and publication
+
+Both paths call the same `codex-issue-worker.yml`. The worker re-fetches the
+current command authorization, issue or pull request state, and target SHA
+after acquiring one workflow-level concurrency group:
 
 ```text
 codex-<repository-id>-issue-<issue-number>
 codex-<repository-id>-pr-<pull-request-number>
 ```
 
-A running pipeline cannot be canceled between model execution and publication
-by a newer event for the same issue. GitHub may replace an older pending worker
-before it starts, since the newer worker will reconcile fresher state. Different
-issue numbers remain independent matrix jobs and can run in parallel.
+Different work items can run in parallel. A running pipeline is not canceled
+between model execution and publication by a newer event for the same work
+item.
+
+The PR intake artifact is closed and bounded. It contains only normalized PR
+work items, source repository and run identity, and validated configuration.
+Reconciliation downloads it from that exact run, checks its review-only scope,
+and validates it with the trusted workflow revision before starting the worker.
 
 Codex model execution is limited to two hours. The reconcile job has a
-140-minute timeout so setup and post-model validation retain the existing
-20-minute allowance.
+140-minute timeout so setup and post-model validation retain a 20-minute
+allowance.
 
-With no linked open pull request, Codex checks out the exact current default
-branch revision. A change is committed to the deterministic
-`implement-issue-<number>` branch and published with an exact
-`--force-with-lease` comparison that requires the remote branch not to exist.
-The workflow checks again for a linked pull request before it pushes and before
-it opens one draft pull request whose title identifies the issue and requested
-work. The body closes the issue and records the issue title, any maintainer
-guidance appended to `/ai implement`, the model summary, changed paths, and
-validation performed.
+For new issue implementation, Codex checks out the exact current default branch
+revision, commits to `implement-issue-<number>`, and opens a draft pull request
+whose title identifies the issue and requested work. Its body closes the issue
+and records the issue title, command guidance, model summary, changed paths,
+and validation performed. If the default branch advances while the model runs,
+the validated change may still be published and opened against the current
+default branch.
 
-If the default branch advances after model execution starts, a changed
-implementation is still published from its validated original revision and
-the draft pull request is opened against the current default branch. A
-`no_change` result still requires the default branch SHA to remain unchanged
-because its decision applies to the repository state that Codex inspected.
+A later run can recover a workflow-owned branch when the push succeeded but
+pull request creation did not. Commit trailers bind recovery to the original
+issue and implementation command and preserve bounded description metadata;
+branches created by older workflow revisions without that metadata are not
+recovered.
 
-If a workflow-owned branch was pushed but pull request creation failed, a
-later run recognizes commit trailers on that branch and retries only pull
-request creation. The trailers include a semantic digest of the issue title,
-body, state, and labels plus bounded publication metadata for the creating
-implementation command, summary, changed paths, and validation, so recovery
-produces the same useful pull request description as the original publication
-attempt. Recovery is blocked when the current issue or implementation command
-no longer matches the work that produced the branch, including branches made
-by older workflow revisions that did not record command metadata. Recovery is
-also refused when any open or closed pull request has already used that branch,
-so closing a generated draft and deleting its branch does not cause a
-replacement or orphan branch. An unrelated branch with the deterministic name
-is not overwritten.
-
-With exactly one linked open pull request, issue-scoped reconciliation requires
-that pull request to close exactly that one open issue.
-Review-command runs are scoped directly to the pull request containing the
-command and do not inspect closing issue references. The pull request snapshot
-is persisted and revalidated before pushes and
-acknowledgements. The head branch must be in the current repository; fork
-branches are never updated. The workflow checks out the exact head SHA, applies
-all currently unprocessed marked feedback in one reconciliation, and pushes
-back to the same branch.
-
-When multiple open pull requests close the issue, the workflow does not choose
-one. It posts a deduplicated issue comment asking a maintainer to remove the
-ambiguity.
-
-## Review marker
-
-Post `/ai address` as a reply in a pull request review thread to address that
-complete thread. Leading and trailing spaces or tabs are ignored, and one or
-more spaces or tabs may separate `/ai` and `address`. All currently unprocessed
-marked threads are reconciled together. Text after the command is passed as
-maintainer guidance for that thread and may continue on later lines.
-
-Post `/ai address` as a top-level pull request conversation comment to address
-all conversation comments, submitted review summaries, and inline review
-comments created at or after GitHub's server-recorded push time for the current
-head. Human and bot-authored feedback are both included so automated review
-findings are addressed. Edits to older comments do not carry findings from a
-previous head into the batch. If that activity record is unavailable, the
-workflow includes all otherwise eligible feedback rather than risk silently
-omitting feedback. Explicitly marked inline threads are included once as
-complete threads rather than duplicated in the batch feedback. Multiple pending
-top-level commands and their appended guidance are reconciled and acknowledged
-together. Other command names, publisher-authored acknowledgements, and
-reactions do not start or contribute feedback. Acknowledgement-shaped text from
-any other author remains feedback.
-
-No linked issue is required. If the pull request closes, moves to an
-unwritable head, or otherwise changes before reconciliation, the address-only
-run skips or aborts instead of starting issue implementation.
-
-The command author must currently have `write`, `maintain`, or `admin`
-permission. Bot users and users without sufficient repository permission are
-ignored. `author_association` is not used as authorization.
-
-Maintainer guidance is authorized task direction but remains untrusted for
-security purposes. It cannot override repository instructions, credential
-isolation, publication controls, sandbox restrictions, or the model output
-contract.
-
-If publication pushes a Codex review commit but new feedback prevents
-acknowledgement, the retry follows consecutive Codex review commits back to
-the preceding non-automation commit. The original server-recorded push time
-remains the feedback baseline, so the intervening feedback is not hidden by
-the automation push.
-
-After a successful update, the workflow replies in each marked review thread
-and posts a pull request conversation acknowledgement for top-level commands.
-Machine-readable markers contain the command kind, command comment IDs, and
-commit SHA, so later runs treat those commands as processed without conflating
-the separate review-comment and issue-comment ID spaces. A no-change result is
-also acknowledged, using the unchanged pull request head SHA. Batch
-acknowledgements also record a feedback high-water mark, so a later top-level
-command on the same head includes only newer or subsequently edited feedback.
-Review threads are not resolved automatically. Conversation bodies, review
-comment bodies, and diff hunks are preserved in full; the run fails instead of
-acknowledging feedback when the complete prepared state exceeds the overall
-context size limit.
-
-## Revalidation and failure behavior
-
-The worker treats every run as reconciliation. It aborts publication when any
-of these change after model execution:
-
-- issue identity, body, state, or labels for issue-scoped work;
-- the selected `/ai implement` comment or its author's current permission;
-- linked pull request count, identity, and issue ownership for issue-scoped
-  work;
-- the exact pull request identity, refs, head SHA, and base SHA for review
-  commands;
-- the default branch designation for new implementation pull requests, and
-  both its designation and SHA for `no_change` decisions;
-- unprocessed authorized review markers, batch commands, and feedback since
-  the prepared head commit;
-- deterministic implementation branch state.
-
-Pushes use an exact `--force-with-lease` expectation anchored by the validated
-remote SHA, or by branch nonexistence for a new implementation. A concurrent
-human or automation update is therefore rejected atomically. Failed validation
-or publication leaves review markers unprocessed for a later retry.
-
-If Codex generates workflow changes without authorization, the model job emits
-a `Workflow changes are not allowed` error annotation instructing the
-maintainer to post a new `/ai implement --allow-workflow-changes` command or
-enable the reusable workflow input before retrying.
-
-Authorized workflow changes require `CODEX_WORKFLOW_PUSH_TOKEN`; the
-publication job reports a configuration error before checkout when the secret
-is missing. Git push failures retain both porcelain output and stderr so token
-permission or repository policy rejections remain actionable.
-
-When Codex determines that a new implementation requires no repository
-change, the workflow applies the non-actionable label and posts a deduplicated
-explanation instead of opening a pull request. It rechecks that the
-deterministic implementation branch is still absent and has no pull request
-history immediately before both the explanation and the label.
-
-## Security model
-
-Issue titles, bodies, labels, comments, pull request data, diffs, and review
-threads are untrusted model input.
-
-The workflow:
-
-- loads its helper, prompt, and output schema from the immutable reusable
-  workflow revision;
-- checks out an exact default-branch or pull-request-head SHA without
-  persisted GitHub credentials;
-- disables writable-checkout project instructions and exec-policy rules, then
-  supplies only `AGENTS.md`, `AGENTS.override.md`, and `CONTRIBUTING.md` files
-  read from the exact default-branch or pull-request-base commit;
-- runs Codex as an unprivileged user with a writable worktree, read-only Git
-  metadata, an exact safe-directory registration, and optional Git locks
-  disabled;
-- serves Bedrock credentials through a runner-owned loopback endpoint,
-  refreshes the role session with a new GitHub OIDC token before expiration,
-  and verifies that network-disabled model tools cannot reach the endpoint;
-  Codex receives only the endpoint URI and a short-lived authorization token;
-- uses `workspace-write` with approval prompts disabled, outbound network and
-  web search disabled, temporary directories excluded, and apps, plugins,
-  hooks, image, browser, computer, and multi-agent tools disabled;
-- removes AWS, GitHub, key, secret, and token variables from spawned shell
-  commands;
-- never places a write-enabled automatic `GITHUB_TOKEN` in the Codex step;
-- transfers only the validated state, artifact, and bounded patch to a separate
-  write-enabled publication job;
-- makes the workflow-capable push token available only to the publication
-  checkout when the validated changed-path list includes
-  `.github/workflows/**`;
-- accepts only a closed JSON result contract, bounds individual and cumulative
-  staged blob content before diff generation, and streams the Git patch under
-  a separate hard size limit;
-- records every initial and refreshed session credential in a runner-private
-  audit file and rejects those credentials in model-authored result text, raw
-  staged blobs, and patch metadata, along with gitlinks, protected workflow
-  renames or edits, stale state, prior pull request history, and changes outside
-  the checked-out repository;
-- re-checks all mutation preconditions in the publication job before either
-  publication credential is used.
-
-The model job has a read-only automatic token. The separate publication job is
-the only job with contents, issues, and pull request write permissions, and it
-does not receive the Bedrock environment or its credentials.
+For review addressing, the pull request head must be in the current repository;
+fork branches are never updated. The worker checks out the exact validated head
+SHA, applies the selected feedback, revalidates the PR state, pushes to the same
+branch, updates the PR description when appropriate, and posts an
+acknowledgement for the addressed commands.

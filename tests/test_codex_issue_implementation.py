@@ -16,6 +16,15 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = (
     REPO_ROOT / ".github/workflows/codex-issue-implementation.yml"
 ).read_text(encoding="utf-8")
+PR_ADDRESS_WORKFLOW = (
+    REPO_ROOT / ".github/workflows/codex-pr-review-address.yml"
+).read_text(encoding="utf-8")
+PR_RECONCILIATION_WORKFLOW = (
+    REPO_ROOT / ".github/workflows/codex-pr-review-reconciliation.yml"
+).read_text(encoding="utf-8")
+RESOLVER_WORKFLOW = (
+    REPO_ROOT / ".github/workflows/codex-work-item-resolver.yml"
+).read_text(encoding="utf-8")
 WORKER_WORKFLOW = (
     REPO_ROOT / ".github/workflows/codex-issue-worker.yml"
 ).read_text(encoding="utf-8")
@@ -184,13 +193,13 @@ def environment(**overrides):
     values = {
         "ADDRESS_ONLY": "false",
         "GITHUB_REPOSITORY": "aws/example",
+        "GITHUB_REPOSITORY_ID": "1234",
+        "GITHUB_RUN_ATTEMPT": "1",
+        "GITHUB_RUN_ID": "5678",
         "NO_PR_LABEL": "codex:no-pr",
         "ISSUE_NUMBER": "31",
         "PULL_REQUEST_NUMBER": "0",
         "CODEX_PUBLISH_ACTOR": "publisher[bot]",
-        "DISCOVERY_CURSOR_PATH": (
-            "/runner-temp/codex-issue-discovery/cursor.json"
-        ),
     }
     values.update(overrides)
     return values
@@ -260,7 +269,7 @@ class EventSelectionTest(unittest.TestCase):
         }
         with patch.dict(
             os.environ,
-            environment(MAX_ISSUES="3"),
+            environment(),
             clear=True,
         ), patch.object(
             IMPLEMENTATION,
@@ -388,7 +397,7 @@ class EventSelectionTest(unittest.TestCase):
         }
         with patch.dict(
             os.environ,
-            environment(MAX_ISSUES="3"),
+            environment(),
             clear=True,
         ), patch.object(
             IMPLEMENTATION,
@@ -418,7 +427,6 @@ class EventSelectionTest(unittest.TestCase):
         with patch.dict(
             os.environ,
             environment(
-                MAX_ISSUES="3",
                 REQUESTED_ISSUE_NUMBER="31",
             ),
             clear=True,
@@ -443,6 +451,128 @@ class EventSelectionTest(unittest.TestCase):
             )
 
         fetch.assert_called_once_with("aws/example", 31)
+
+    def test_implementation_scope_defers_issue_address_work(self):
+        event = {
+            "action": "created",
+            "issue": {"number": 31, "state": "open"},
+            "comment": implementation_comment(),
+        }
+        with patch.dict(
+            os.environ,
+            environment(WORK_SCOPE="implementation"),
+            clear=True,
+        ), patch.object(
+            IMPLEMENTATION,
+            "collaborator_has_write_permission",
+            return_value=True,
+        ), patch.object(
+            IMPLEMENTATION,
+            "fetch_issue",
+            return_value=issue(),
+        ), patch.object(
+            IMPLEMENTATION,
+            "prepare_issue_state",
+            return_value={
+                "action": "address",
+                "pull_request": pull_request(),
+            },
+        ):
+            self.assertEqual(
+                IMPLEMENTATION.resolve_work_items("issue_comment", event),
+                [],
+            )
+
+    def test_each_comment_scope_ignores_the_other_command(self):
+        issue_event = {
+            "action": "created",
+            "issue": {"number": 31, "state": "open"},
+            "comment": implementation_comment(),
+        }
+        pull_request_event = {
+            "action": "created",
+            "issue": {
+                "number": 44,
+                "state": "open",
+                "pull_request": {},
+            },
+            "comment": implementation_comment(body="/ai address"),
+        }
+        with patch.object(
+            IMPLEMENTATION,
+            "collaborator_has_write_permission",
+            return_value=True,
+        ), patch.object(IMPLEMENTATION, "fetch_issue") as fetch_issue:
+            with patch.dict(
+                os.environ,
+                environment(WORK_SCOPE="review"),
+                clear=True,
+            ):
+                self.assertEqual(
+                    IMPLEMENTATION.resolve_work_items(
+                        "issue_comment",
+                        issue_event,
+                    ),
+                    [],
+                )
+            with patch.dict(
+                os.environ,
+                environment(
+                    WORK_SCOPE="implementation",
+                ),
+                clear=True,
+            ):
+                self.assertEqual(
+                    IMPLEMENTATION.resolve_work_items(
+                        "issue_comment",
+                        pull_request_event,
+                    ),
+                    [],
+                )
+
+        fetch_issue.assert_not_called()
+
+    def test_review_scope_can_request_one_pull_request(self):
+        with patch.dict(
+            os.environ,
+            environment(
+                REQUESTED_PULL_REQUEST_NUMBER="44",
+                WORK_SCOPE="review",
+            ),
+            clear=True,
+        ), patch.object(
+            IMPLEMENTATION,
+            "fetch_pull_request",
+            return_value=pull_request(),
+        ) as fetch, patch.object(
+            IMPLEMENTATION,
+            "prepare_pull_request_state",
+            return_value={"action": "address"},
+        ):
+            self.assertEqual(
+                IMPLEMENTATION.resolve_work_items(
+                    "workflow_dispatch",
+                    {},
+                ),
+                [pull_request_item()],
+            )
+
+        fetch.assert_called_once_with("aws/example", 44)
+
+    def test_manual_run_requires_an_explicit_target(self):
+        with patch.dict(
+            os.environ,
+            environment(WORK_SCOPE="implementation"),
+            clear=True,
+        ):
+            with self.assertRaisesRegex(
+                IMPLEMENTATION.ImplementationError,
+                "manual runs must specify",
+            ):
+                IMPLEMENTATION.resolve_work_items(
+                    "workflow_dispatch",
+                    {},
+                )
 
     def test_unauthorized_implementation_comment_is_ignored(self):
         event = {
@@ -623,7 +753,7 @@ class EventSelectionTest(unittest.TestCase):
                 },
             )
 
-    def test_recovery_matrix_preserves_each_work_item_type(self):
+    def test_matrix_preserves_each_work_item_type(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             event_path = root / "event.json"
@@ -632,7 +762,7 @@ class EventSelectionTest(unittest.TestCase):
             with patch.dict(
                 os.environ,
                 environment(
-                    GITHUB_EVENT_NAME="schedule",
+                    GITHUB_EVENT_NAME="workflow_call",
                     GITHUB_OUTPUT=str(output_path),
                 ),
                 clear=True,
@@ -668,6 +798,297 @@ class EventSelectionTest(unittest.TestCase):
                     ]
                 },
             )
+
+    def test_resolver_writes_bounded_reconciliation_bundle(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            event_path = root / "event.json"
+            output_path = root / "output"
+            bundle_path = root / "work-items.json"
+            event_path.write_text("{}", encoding="utf-8")
+            with patch.dict(
+                os.environ,
+                environment(
+                    ALLOW_WORKFLOW_CHANGES="true",
+                    CODEX_ENVIRONMENT_NAME="ai-runtime",
+                    CODEX_MODEL="openai.gpt-5.6-sol",
+                    CODEX_REASONING_EFFORT="high",
+                    GITHUB_EVENT_NAME="workflow_call",
+                    GITHUB_OUTPUT=str(output_path),
+                    NO_PR_LABEL="automation:no-pr",
+                    WORK_SCOPE="review",
+                    WORK_ITEMS_PATH=str(bundle_path),
+                ),
+                clear=True,
+            ), patch.object(
+                IMPLEMENTATION,
+                "resolve_work_items",
+                return_value=[
+                    pull_request_item(),
+                    pull_request_item(),
+                ],
+            ):
+                IMPLEMENTATION.resolve_command(event_path)
+
+            bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(bundle["version"], 1)
+        self.assertEqual(bundle["work_scope"], "review")
+        self.assertEqual(
+            bundle["source"],
+            {
+                "repository": "aws/example",
+                "repository_id": 1234,
+                "run_id": 5678,
+                "run_attempt": 1,
+            },
+        )
+        self.assertEqual(
+            bundle["matrix"],
+            {
+                "include": [
+                    {
+                        "issue_number": 0,
+                        "pull_request_number": 44,
+                        "address_only": True,
+                        "work_key": "pr-44",
+                    },
+                ]
+            },
+        )
+        self.assertEqual(
+            bundle["configuration"],
+            {
+                "environment_name": "ai-runtime",
+                "no_pr_label": "automation:no-pr",
+                "model": "openai.gpt-5.6-sol",
+                "reasoning_effort": "high",
+                "allow_workflow_changes": True,
+            },
+        )
+
+    def test_reconciliation_bundle_is_bound_to_source_and_trusted_config(self):
+        bundle = {
+            "version": 1,
+            "work_scope": "review",
+            "source": {
+                "repository": "aws/example",
+                "repository_id": 1234,
+                "run_id": 5678,
+                "run_attempt": 1,
+            },
+            "matrix": {
+                "include": [
+                    {
+                        "issue_number": 0,
+                        "pull_request_number": 44,
+                        "address_only": True,
+                        "work_key": "pr-44",
+                    }
+                ]
+            },
+            "configuration": {
+                "environment_name": "ai-pr-review-runtime",
+                "no_pr_label": "codex:no-pr",
+                "model": "openai.gpt-5.6-sol",
+                "reasoning_effort": "xhigh",
+                "allow_workflow_changes": False,
+            },
+        }
+        with patch.dict(
+            os.environ,
+            environment(
+                SOURCE_REPOSITORY_ID="1234",
+                SOURCE_RUN_ATTEMPT="1",
+                SOURCE_RUN_ID="5678",
+                SOURCE_WORK_SCOPE="review",
+            ),
+            clear=True,
+        ):
+            validated = IMPLEMENTATION.validate_work_items_bundle(bundle)
+
+        self.assertEqual(
+            validated,
+            {
+                "version": bundle["version"],
+                "work_scope": bundle["work_scope"],
+                "source": bundle["source"],
+                "matrix": bundle["matrix"],
+            },
+        )
+
+        changed_source = json.loads(json.dumps(bundle))
+        changed_source["source"]["run_id"] = 9999
+        with patch.dict(
+            os.environ,
+            environment(
+                SOURCE_REPOSITORY_ID="1234",
+                SOURCE_RUN_ATTEMPT="1",
+                SOURCE_RUN_ID="5678",
+                SOURCE_WORK_SCOPE="review",
+            ),
+            clear=True,
+        ):
+            with self.assertRaisesRegex(
+                IMPLEMENTATION.ImplementationError,
+                "triggering workflow run",
+            ):
+                IMPLEMENTATION.validate_work_items_bundle(changed_source)
+
+        changed_config = json.loads(json.dumps(bundle))
+        changed_config["configuration"]["environment_name"] = (
+            "more-privileged-environment"
+        )
+        with patch.dict(
+            os.environ,
+            environment(
+                SOURCE_REPOSITORY_ID="1234",
+                SOURCE_RUN_ATTEMPT="1",
+                SOURCE_RUN_ID="5678",
+                SOURCE_WORK_SCOPE="review",
+            ),
+            clear=True,
+        ):
+            with self.assertRaisesRegex(
+                IMPLEMENTATION.ImplementationError,
+                "trusted reconciliation workflow",
+            ):
+                IMPLEMENTATION.validate_work_items_bundle(changed_config)
+
+        invalid_matrix = json.loads(json.dumps(bundle))
+        invalid_matrix["matrix"]["include"][0]["issue_number"] = False
+        with patch.dict(
+            os.environ,
+            environment(
+                SOURCE_REPOSITORY_ID="1234",
+                SOURCE_RUN_ATTEMPT="1",
+                SOURCE_RUN_ID="5678",
+                SOURCE_WORK_SCOPE="review",
+            ),
+            clear=True,
+        ):
+            with self.assertRaisesRegex(
+                IMPLEMENTATION.ImplementationError,
+                "work item matrix",
+            ):
+                IMPLEMENTATION.validate_work_items_bundle(invalid_matrix)
+
+        wrong_scope = json.loads(json.dumps(bundle))
+        wrong_scope["matrix"]["include"] = [
+            {
+                "issue_number": 31,
+                "pull_request_number": 0,
+                "address_only": False,
+                "work_key": "issue-31",
+            }
+        ]
+        with patch.dict(
+            os.environ,
+            environment(
+                SOURCE_REPOSITORY_ID="1234",
+                SOURCE_RUN_ATTEMPT="1",
+                SOURCE_RUN_ID="5678",
+                SOURCE_WORK_SCOPE="review",
+            ),
+            clear=True,
+        ):
+            with self.assertRaisesRegex(
+                IMPLEMENTATION.ImplementationError,
+                "workflow scope",
+            ):
+                IMPLEMENTATION.validate_work_items_bundle(wrong_scope)
+
+    def test_manual_run_must_match_trusted_runtime_configuration(self):
+        bundle = {
+            "version": 1,
+            "work_scope": "review",
+            "source": {
+                "repository": "aws/example",
+                "repository_id": 1234,
+                "run_id": 5678,
+                "run_attempt": 1,
+            },
+            "matrix": {"include": []},
+            "configuration": {
+                "environment_name": "manual-ai-runtime",
+                "no_pr_label": "manual:no-pr",
+                "model": "openai.gpt-5.6-sol",
+                "reasoning_effort": "high",
+                "allow_workflow_changes": True,
+            },
+        }
+        with patch.dict(
+            os.environ,
+            environment(
+                SOURCE_REPOSITORY_ID="1234",
+                SOURCE_RUN_ATTEMPT="1",
+                SOURCE_RUN_ID="5678",
+                SOURCE_WORK_SCOPE="review",
+            ),
+            clear=True,
+        ):
+            with self.assertRaisesRegex(
+                IMPLEMENTATION.ImplementationError,
+                "trusted reconciliation workflow",
+            ):
+                IMPLEMENTATION.validate_work_items_bundle(bundle)
+
+    def test_work_items_validation_emits_reconciliation_outputs(self):
+        bundle = {
+            "version": 1,
+            "work_scope": "review",
+            "source": {
+                "repository": "aws/example",
+                "repository_id": 1234,
+                "run_id": 5678,
+                "run_attempt": 1,
+            },
+            "matrix": {
+                "include": [
+                    {
+                        "issue_number": 0,
+                        "pull_request_number": 44,
+                        "address_only": True,
+                        "work_key": "pr-44",
+                    }
+                ]
+            },
+            "configuration": {
+                "environment_name": "ai-pr-review-runtime",
+                "no_pr_label": "codex:no-pr",
+                "model": "openai.gpt-5.6-sol",
+                "reasoning_effort": "xhigh",
+                "allow_workflow_changes": False,
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            bundle_path = root / "work-items.json"
+            output_path = root / "output"
+            IMPLEMENTATION.write_json(bundle_path, bundle)
+            with patch.dict(
+                os.environ,
+                environment(
+                    GITHUB_OUTPUT=str(output_path),
+                    SOURCE_REPOSITORY_ID="1234",
+                    SOURCE_RUN_ATTEMPT="1",
+                    SOURCE_RUN_ID="5678",
+                    SOURCE_WORK_SCOPE="review",
+                ),
+                clear=True,
+            ):
+                IMPLEMENTATION.validate_work_items_command(bundle_path)
+
+            outputs = dict(
+                line.split("=", 1)
+                for line in output_path.read_text(
+                    encoding="utf-8"
+                ).splitlines()
+            )
+
+        self.assertEqual(json.loads(outputs["matrix"]), bundle["matrix"])
+        self.assertEqual(outputs["count"], "1")
+        self.assertEqual(set(outputs), {"matrix", "count"})
 
     def test_issue_eligibility_honors_exclusion_case_insensitively(self):
         candidate = issue()
@@ -908,325 +1329,6 @@ class EventSelectionTest(unittest.TestCase):
                 IMPLEMENTATION.no_pr_label(),
                 "automation,no-pr",
             )
-
-    def test_discovery_is_bounded_by_configuration(self):
-        with patch.dict(
-            os.environ,
-            environment(MAX_ISSUES="2"),
-            clear=True,
-        ), patch.object(
-            IMPLEMENTATION,
-            "discover_work_items",
-            return_value=[issue_item(3), pull_request_item(5)],
-        ) as discover:
-            self.assertEqual(
-                IMPLEMENTATION.resolve_work_items("schedule", {}),
-                [issue_item(3), pull_request_item(5)],
-            )
-
-        discover.assert_called_once_with(
-            "aws/example",
-            "codex:no-pr",
-            2,
-            "publisher[bot]",
-            Path("/runner-temp/codex-issue-discovery/cursor.json"),
-        )
-
-    def test_discovery_recovers_pending_pr_without_a_linked_issue(self):
-        candidate = issue(number=44)
-        candidate["pull_request"] = {}
-        with patch.object(
-            IMPLEMENTATION,
-            "run_gh_json",
-            return_value=[candidate],
-        ), patch.object(
-            IMPLEMENTATION,
-            "fetch_pull_request",
-            return_value=pull_request(),
-        ) as fetch, patch.object(
-            IMPLEMENTATION,
-            "prepare_pull_request_state",
-            return_value={"action": "address"},
-        ) as prepare, patch.object(
-            IMPLEMENTATION,
-            "prepare_issue_state",
-        ) as prepare_issue:
-            self.assertEqual(
-                IMPLEMENTATION.discover_work_items(
-                    "aws/example",
-                    "codex:no-pr",
-                    3,
-                    "publisher[bot]",
-                ),
-                [pull_request_item()],
-            )
-
-        fetch.assert_called_once_with("aws/example", 44)
-        prepare.assert_called_once_with(
-            "aws/example",
-            "publisher[bot]",
-            pull_request(),
-        )
-        prepare_issue.assert_not_called()
-
-    def test_issue_address_recovery_uses_pr_scope_without_duplicates(self):
-        candidate = issue(number=44)
-        candidate["pull_request"] = {}
-        with patch.object(
-            IMPLEMENTATION,
-            "run_gh_json",
-            return_value=[issue(), candidate],
-        ), patch.object(
-            IMPLEMENTATION,
-            "prepare_issue_state",
-            return_value={
-                "action": "address",
-                "pull_request": pull_request(),
-            },
-        ), patch.object(
-            IMPLEMENTATION,
-            "fetch_pull_request",
-            return_value=pull_request(),
-        ), patch.object(
-            IMPLEMENTATION,
-            "prepare_pull_request_state",
-            return_value={"action": "address"},
-        ):
-            self.assertEqual(
-                IMPLEMENTATION.discover_work_items(
-                    "aws/example",
-                    "codex:no-pr",
-                    3,
-                    "publisher[bot]",
-                ),
-                [pull_request_item()],
-            )
-
-    def test_discovery_skips_non_actionable_issues(self):
-        response = [
-            issue(number=31),
-            issue(
-                number=32,
-                labels=[{"name": "CODEX:NO-PR"}],
-            ),
-        ]
-        with patch.object(
-            IMPLEMENTATION,
-            "run_gh_json",
-            return_value=response,
-        ), patch.object(
-            IMPLEMENTATION,
-            "prepare_issue_state",
-            side_effect=[
-                {"action": "implement"},
-                {"action": "skip"},
-            ],
-        ):
-            self.assertEqual(
-                IMPLEMENTATION.discover_work_items(
-                    "aws/example",
-                    "codex:no-pr",
-                    3,
-                    "publisher[bot]",
-                ),
-                [issue_item()],
-            )
-
-    def test_discovery_continues_past_excluded_first_page(self):
-        excluded = [
-            issue(
-                number=number,
-                labels=[{"name": "codex:no-pr"}],
-            )
-            for number in range(1, 101)
-        ]
-        with patch.object(
-            IMPLEMENTATION,
-            "run_gh_json",
-            side_effect=[
-                excluded,
-                [issue(number=101), issue(number=102)],
-            ],
-        ) as run, patch.object(
-            IMPLEMENTATION,
-            "prepare_issue_state",
-            side_effect=[
-                *({"action": "skip"} for _ in excluded),
-                {"action": "implement"},
-                {"action": "implement"},
-            ],
-        ):
-            self.assertEqual(
-                IMPLEMENTATION.discover_work_items(
-                    "aws/example",
-                    "codex:no-pr",
-                    2,
-                    "publisher[bot]",
-                ),
-                [issue_item(101), issue_item(102)],
-            )
-
-        self.assertIn("per_page=100&page=1", run.call_args_list[0].args[0][0])
-        self.assertIn("per_page=100&page=2", run.call_args_list[1].args[0][0])
-
-    def test_discovery_continues_past_issues_without_pending_work(self):
-        inactive = [
-            issue(number=number)
-            for number in range(1, 101)
-        ]
-        with patch.object(
-            IMPLEMENTATION,
-            "run_gh_json",
-            side_effect=[
-                inactive,
-                [issue(number=101)],
-            ],
-        ) as run, patch.object(
-            IMPLEMENTATION,
-            "prepare_issue_state",
-            side_effect=[
-                *({"action": "skip"} for _ in inactive),
-                {"action": "recover"},
-            ],
-        ) as prepare:
-            self.assertEqual(
-                IMPLEMENTATION.discover_work_items(
-                    "aws/example",
-                    "codex:no-pr",
-                    1,
-                    "publisher[bot]",
-                ),
-                [issue_item(101)],
-            )
-
-        self.assertEqual(prepare.call_count, 101)
-        self.assertIn("per_page=100&page=2", run.call_args_list[1].args[0][0])
-
-    def test_discovery_cursor_resumes_after_candidate_budget(self):
-        candidates = [
-            issue(number=1),
-            issue(number=2),
-            issue(number=3),
-        ]
-        with tempfile.TemporaryDirectory() as directory:
-            cursor_path = Path(directory) / "cursor.json"
-            with patch.object(
-                IMPLEMENTATION,
-                "MAX_DISCOVERY_CANDIDATES_PER_RUN",
-                2,
-            ), patch.object(
-                IMPLEMENTATION,
-                "run_gh_json",
-                return_value=candidates,
-            ), patch.object(
-                IMPLEMENTATION,
-                "prepare_issue_state",
-                side_effect=[
-                    {"action": "skip"},
-                    {"action": "skip"},
-                ],
-            ) as first_prepare:
-                self.assertEqual(
-                    IMPLEMENTATION.discover_work_items(
-                        "aws/example",
-                        "codex:no-pr",
-                        1,
-                        "publisher[bot]",
-                        cursor_path,
-                    ),
-                    [],
-                )
-
-            self.assertEqual(first_prepare.call_count, 2)
-            self.assertEqual(
-                IMPLEMENTATION.read_discovery_cursor(
-                    cursor_path,
-                    "aws/example",
-                ),
-                2,
-            )
-
-            with patch.object(
-                IMPLEMENTATION,
-                "MAX_DISCOVERY_CANDIDATES_PER_RUN",
-                2,
-            ), patch.object(
-                IMPLEMENTATION,
-                "run_gh_json",
-                return_value=candidates,
-            ), patch.object(
-                IMPLEMENTATION,
-                "prepare_issue_state",
-                return_value={"action": "implement"},
-            ) as second_prepare:
-                self.assertEqual(
-                    IMPLEMENTATION.discover_work_items(
-                        "aws/example",
-                        "codex:no-pr",
-                        1,
-                        "publisher[bot]",
-                        cursor_path,
-                    ),
-                    [issue_item(3)],
-                )
-
-            second_prepare.assert_called_once()
-            self.assertEqual(
-                IMPLEMENTATION.read_discovery_cursor(
-                    cursor_path,
-                    "aws/example",
-                ),
-                3,
-            )
-
-    def test_discovery_skips_already_notified_blocked_issues(self):
-        blocked = [issue(number=number) for number in range(1, 101)]
-        blocked_states = [
-            {
-                "action": "blocked",
-                "issue": {"number": value["number"]},
-                "reason": "The issue is blocked.",
-                "linked_pull_requests": [],
-            }
-            for value in blocked
-        ]
-        with patch.object(
-            IMPLEMENTATION,
-            "run_gh_json",
-            side_effect=[
-                blocked,
-                [issue(number=101)],
-            ],
-        ) as run, patch.object(
-            IMPLEMENTATION,
-            "prepare_issue_state",
-            side_effect=[
-                *blocked_states,
-                {"action": "recover", "issue": {"number": 101}},
-            ],
-        ), patch.object(
-            IMPLEMENTATION,
-            "issue_comment_marker_exists",
-            return_value=True,
-        ) as marker_exists:
-            self.assertEqual(
-                IMPLEMENTATION.discover_work_items(
-                    "aws/example",
-                    "codex:no-pr",
-                    1,
-                    "publisher[bot]",
-                ),
-                [issue_item(101)],
-            )
-
-        self.assertEqual(marker_exists.call_count, 100)
-        self.assertTrue(
-            all(
-                call.args[3] == "publisher[bot]"
-                for call in marker_exists.call_args_list
-            )
-        )
-        self.assertIn("per_page=100&page=2", run.call_args_list[1].args[0][0])
 
     def test_ambiguous_state_has_a_stable_notification_marker(self):
         state = {
@@ -5363,18 +5465,57 @@ class WorkflowPolicyTest(unittest.TestCase):
     def test_all_required_entry_points_are_declared(self):
         for trigger in (
             "issue_comment:",
-            "pull_request_review_comment:",
-            "schedule:",
             "workflow_dispatch:",
             "workflow_call:",
         ):
             with self.subTest(trigger=trigger):
                 self.assertIn(trigger, WORKFLOW)
+        self.assertNotIn("pull_request_review_comment:", WORKFLOW)
+        for trigger in (
+            "issue_comment:",
+            "pull_request_review_comment:",
+            "workflow_dispatch:",
+            "workflow_call:",
+        ):
+            with self.subTest(trigger=trigger):
+                self.assertIn(trigger, PR_ADDRESS_WORKFLOW)
+        self.assertNotIn("schedule:", WORKFLOW)
+        self.assertNotIn("schedule:", PR_ADDRESS_WORKFLOW)
+        self.assertIn("workflow_call:", RESOLVER_WORKFLOW)
+        self.assertNotIn("issue_comment:", RESOLVER_WORKFLOW)
+        self.assertIn("workflow_run:", PR_RECONCILIATION_WORKFLOW)
+        self.assertIn(
+            "- Codex PR Review Address",
+            PR_RECONCILIATION_WORKFLOW,
+        )
+        self.assertIn("workflow_call:", PR_RECONCILIATION_WORKFLOW)
+
+    def test_manual_pr_review_dispatch_only_accepts_the_target(self):
+        dispatch = re.search(
+            r"(?ms)^  workflow_dispatch:\n"
+            r"(.*?)(?=^  workflow_call:)",
+            PR_ADDRESS_WORKFLOW,
+        )
+        assert dispatch is not None
+        self.assertIn("pull-request-number:", dispatch.group(1))
+        for runtime_input in (
+            "environment-name:",
+            "no-pr-label:",
+            "model:",
+            "reasoning-effort:",
+            "allow-workflow-changes:",
+        ):
+            with self.subTest(runtime_input=runtime_input):
+                self.assertNotIn(runtime_input, dispatch.group(1))
 
     def test_each_work_item_uses_one_workflow_scoped_concurrency_boundary(self):
-        implement = re.search(
+        issue_implement = re.search(
             r"(?ms)^  implement:\n(.*)\Z",
             WORKFLOW,
+        )
+        review_address = re.search(
+            r"(?ms)^  address:\n(.*)\Z",
+            PR_RECONCILIATION_WORKFLOW,
         )
         reconcile = re.search(
             r"(?ms)^  reconcile:\n(.*?)(?=^  publish:)",
@@ -5385,7 +5526,8 @@ class WorkflowPolicyTest(unittest.TestCase):
             WORKER_WORKFLOW,
         )
         assert (
-            implement is not None
+            issue_implement is not None
+            and review_address is not None
             and reconcile is not None
             and publish is not None
         )
@@ -5399,35 +5541,44 @@ class WorkflowPolicyTest(unittest.TestCase):
             WORKER_WORKFLOW.count("cancel-in-progress: false"),
             1,
         )
+        for block in (issue_implement.group(1), review_address.group(1)):
+            self.assertIn(
+                "uses: ./.github/workflows/codex-issue-worker.yml",
+                block,
+            )
+            self.assertIn(
+                "issue-number: ${{ matrix.issue_number }}",
+                block,
+            )
+            self.assertIn(
+                "pull-request-number: ${{ matrix.pull_request_number }}",
+                block,
+            )
+            self.assertIn(
+                "address-only: ${{ matrix.address_only }}",
+                block,
+            )
+            self.assertIn(
+                "work-key: ${{ matrix.work_key }}",
+                block,
+            )
         self.assertIn(
             "matrix: ${{ fromJSON(needs.resolve.outputs.matrix) }}",
-            implement.group(1),
+            issue_implement.group(1),
         )
         self.assertIn(
-            "uses: ./.github/workflows/codex-issue-worker.yml",
-            implement.group(1),
-        )
-        self.assertIn(
-            "issue-number: ${{ matrix.issue_number }}",
-            implement.group(1),
-        )
-        self.assertIn(
-            "pull-request-number: ${{ matrix.pull_request_number }}",
-            implement.group(1),
+            "matrix: ${{ fromJSON(needs.load.outputs.matrix) }}",
+            review_address.group(1),
         )
         self.assertIn(
             "environment-name: >-\n"
             "        ${{ inputs['environment-name'] || "
             "'ai-pr-review-runtime' }}",
-            implement.group(1),
+            review_address.group(1),
         )
-        self.assertIn(
-            "address-only: ${{ matrix.address_only }}",
-            implement.group(1),
-        )
-        self.assertIn(
-            "work-key: ${{ matrix.work_key }}",
-            implement.group(1),
+        self.assertNotIn(
+            "needs.load.outputs.environment_name",
+            review_address.group(1),
         )
         self.assertIn(
             "ADDRESS_ONLY: ${{ inputs['address-only'] }}",
@@ -5442,12 +5593,8 @@ class WorkflowPolicyTest(unittest.TestCase):
             "steps.prepare.outputs.command_allows_workflow_changes",
             reconcile.group(1),
         )
-        resolve = re.search(
-            r"(?ms)^  resolve:\n(.*?)(?=^  implement:)",
-            WORKFLOW,
-        )
-        assert resolve is not None
-        self.assertNotIn("environment:", resolve.group(1))
+        self.assertNotIn("environment:", RESOLVER_WORKFLOW)
+        self.assertNotIn("environment:", PR_ADDRESS_WORKFLOW)
         self.assertIn(
             "environment: >-\n"
             "      ${{ inputs['environment-name'] || "
@@ -5458,17 +5605,97 @@ class WorkflowPolicyTest(unittest.TestCase):
         self.assertNotIn("concurrency:", reconcile.group(1))
         self.assertNotIn("concurrency:", publish.group(1))
 
-    def test_runtime_environment_inputs_preserve_the_default(self):
-        self.assertEqual(
-            len(
-                re.findall(
-                    r"(?ms)^      environment-name:\n"
-                    r".*?default: ai-pr-review-runtime",
-                    WORKFLOW,
-                )
-            ),
-            2,
+    def test_issue_implementation_stays_on_the_direct_worker_path(self):
+        resolve = re.search(
+            r"(?ms)^  resolve:\n(.*)\Z",
+            WORKFLOW,
         )
+        assert resolve is not None
+        self.assertIn(
+            "uses: ./.github/workflows/codex-work-item-resolver.yml",
+            resolve.group(1),
+        )
+        self.assertIn("work-scope: implementation", resolve.group(1))
+        self.assertIn("upload-work-items: false", resolve.group(1))
+        self.assertIn(
+            "uses: ./.github/workflows/codex-issue-worker.yml",
+            WORKFLOW,
+        )
+        self.assertNotIn("workflow_run:", WORKFLOW)
+        self.assertNotIn("validate-work-items", WORKFLOW)
+
+    def test_pr_reconciliation_validates_the_read_only_intake_artifact(self):
+        resolve = re.search(
+            r"(?ms)^  resolve:\n(.*)\Z",
+            PR_ADDRESS_WORKFLOW,
+        )
+        load = re.search(
+            r"(?ms)^  load:\n(.*?)(?=^  address:)",
+            PR_RECONCILIATION_WORKFLOW,
+        )
+        assert resolve is not None and load is not None
+        self.assertIn("work-scope: review", resolve.group(1))
+        self.assertIn("upload-work-items: true", resolve.group(1))
+        self.assertNotIn(
+            "uses: ./.github/workflows/codex-issue-worker.yml",
+            PR_ADDRESS_WORKFLOW,
+        )
+        self.assertNotIn("contents: write", resolve.group(1))
+        self.assertNotIn("id-token: write", resolve.group(1))
+        self.assertIn("Upload authorized work items", RESOLVER_WORKFLOW)
+        self.assertIn(
+            "codex-${{ inputs['work-scope'] }}-work-items",
+            RESOLVER_WORKFLOW,
+        )
+        self.assertIn(
+            "github.event.workflow_run.conclusion == 'success'",
+            load.group(1),
+        )
+        self.assertIn("actions: read", load.group(1))
+        self.assertIn("Download authorized PR review work", load.group(1))
+        self.assertIn(
+            "run-id: ${{ github.event.workflow_run.id }}",
+            load.group(1),
+        )
+        self.assertIn("validate-work-items", load.group(1))
+        self.assertIn("SOURCE_WORK_SCOPE: review", load.group(1))
+        self.assertNotIn("SOURCE_EVENT:", load.group(1))
+        self.assertNotIn(
+            "outputs.environment_name",
+            PR_RECONCILIATION_WORKFLOW,
+        )
+        self.assertNotIn("outputs.model", PR_RECONCILIATION_WORKFLOW)
+        self.assertNotIn(
+            "outputs.reasoning_effort",
+            PR_RECONCILIATION_WORKFLOW,
+        )
+        self.assertIn(
+            "repository: ${{ job.workflow_repository }}",
+            load.group(1),
+        )
+        self.assertIn(
+            "ref: ${{ job.workflow_sha }}",
+            load.group(1),
+        )
+
+    def test_runtime_environment_inputs_preserve_the_default(self):
+        for workflow, count in (
+            (WORKFLOW, 2),
+            (PR_ADDRESS_WORKFLOW, 1),
+            (PR_RECONCILIATION_WORKFLOW, 1),
+            (RESOLVER_WORKFLOW, 1),
+        ):
+            with self.subTest(workflow=workflow[:40]):
+                self.assertEqual(
+                    len(
+                        re.findall(
+                            r"(?ms)^      environment-name:\n"
+                            r".*?default: ai-pr-review-runtime",
+                            workflow,
+                        )
+                    ),
+                    count,
+                )
         self.assertRegex(
             WORKER_WORKFLOW,
             r"(?ms)^      environment-name:\n"
@@ -5515,22 +5742,23 @@ class WorkflowPolicyTest(unittest.TestCase):
         self.assertIn("sparse-checkout-cone-mode: false", checkout.group(1))
         self.assertIn("scripts/serve_aws_credentials.py", checkout.group(1))
 
-    def test_numeric_max_issues_preserves_zero_for_validation(self):
-        expression = (
-            "${{ format('{0}', inputs['max-issues']) ||\n"
-            "                env.DEFAULT_MAX_ISSUES }}"
-        )
-        self.assertEqual(WORKFLOW.count(expression), 1)
-
     def test_reasoning_effort_defaults_to_xhigh(self):
         self.assertEqual(WORKFLOW.count("default: xhigh"), 2)
         self.assertIn(
-            "DEFAULT_REASONING_EFFORT: xhigh",
+            "inputs['reasoning-effort'] ||",
             WORKFLOW,
         )
+        self.assertEqual(
+            PR_ADDRESS_WORKFLOW.count("default: xhigh"),
+            1,
+        )
+        self.assertEqual(
+            PR_RECONCILIATION_WORKFLOW.count("default: xhigh"),
+            1,
+        )
         self.assertIn(
-            "inputs['reasoning-effort'] || 'xhigh'",
-            WORKFLOW,
+            "DEFAULT_REASONING_EFFORT: xhigh",
+            PR_RECONCILIATION_WORKFLOW,
         )
         self.assertIn(
             "DEFAULT_REASONING_EFFORT: xhigh",
@@ -5538,44 +5766,49 @@ class WorkflowPolicyTest(unittest.TestCase):
         )
         self.assertNotIn(
             "DEFAULT_REASONING_EFFORT: high",
-            WORKFLOW + WORKER_WORKFLOW,
+            WORKFLOW
+            + PR_ADDRESS_WORKFLOW
+            + PR_RECONCILIATION_WORKFLOW
+            + RESOLVER_WORKFLOW
+            + WORKER_WORKFLOW,
         )
 
-    def test_resolver_receives_configured_no_pr_label(self):
+    def test_both_entry_workflows_use_the_shared_scoped_resolver(self):
+        self.assertIn(
+            "uses: ./.github/workflows/codex-work-item-resolver.yml",
+            WORKFLOW,
+        )
+        self.assertIn(
+            "uses: ./.github/workflows/codex-work-item-resolver.yml",
+            PR_ADDRESS_WORKFLOW,
+        )
+        self.assertIn("work-scope: implementation", WORKFLOW)
+        self.assertIn("work-scope: review", PR_ADDRESS_WORKFLOW)
         resolve = re.search(
             r"(?ms)^      - name: Resolve work items\n"
             r"(.*?)(?=^      - name:|\Z)",
-            WORKFLOW,
+            RESOLVER_WORKFLOW,
         )
         assert resolve is not None
         self.assertIn(
-            "NO_PR_LABEL: >-\n"
-            "            ${{ inputs['no-pr-label'] || "
-            "env.DEFAULT_NO_PR_LABEL }}",
+            "NO_PR_LABEL: ${{ inputs['no-pr-label'] }}",
             resolve.group(1),
         )
+        self.assertIn(
+            "WORK_SCOPE: ${{ inputs['work-scope'] }}",
+            resolve.group(1),
+        )
+        self.assertIn("REQUESTED_ISSUE_NUMBER:", resolve.group(1))
+        self.assertIn("REQUESTED_PULL_REQUEST_NUMBER:", resolve.group(1))
 
-    def test_scheduled_discovery_restores_and_saves_cursor(self):
-        self.assertIn(
-            "uses: actions/cache/restore@"
-            "55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
-            WORKFLOW,
-        )
-        self.assertIn(
-            "uses: actions/cache/save@"
-            "55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
-            WORKFLOW,
-        )
-        self.assertIn(
-            "DISCOVERY_CURSOR_PATH: >-\n"
-            "            ${{ runner.temp }}/"
-            "codex-issue-discovery/cursor.json",
-            WORKFLOW,
-        )
-        self.assertIn(
-            "codex-issue-discovery-${{ github.repository_id }}-",
-            WORKFLOW,
-        )
+    def test_resolver_has_no_scheduled_scan_path(self):
+        combined = WORKFLOW + PR_ADDRESS_WORKFLOW + RESOLVER_WORKFLOW
+        self.assertNotIn("schedule:", combined)
+        self.assertNotIn("actions/cache/restore@", combined)
+        self.assertNotIn("actions/cache/save@", combined)
+        self.assertNotIn("DISCOVERY_CURSOR_PATH", combined)
+        self.assertNotIn("MAX_ISSUES", combined)
+        self.assertNotIn("max-items", combined)
 
     def test_implementation_label_is_not_part_of_the_workflow_contract(self):
         self.assertNotIn("implementation-label", WORKFLOW)
@@ -5712,7 +5945,7 @@ class WorkflowPolicyTest(unittest.TestCase):
         publisher = re.search(
             r"(?ms)^      - name: Resolve publication actor\n"
             r"(.*?)(?=^      - name:|\Z)",
-            WORKFLOW,
+            RESOLVER_WORKFLOW,
         )
         assert (
             reconcile is not None
