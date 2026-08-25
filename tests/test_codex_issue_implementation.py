@@ -3064,7 +3064,7 @@ class PreparationPolicyTest(unittest.TestCase):
             ),
         )
 
-    def test_recovery_requires_matching_issue_and_command_trailers(self):
+    def test_recovery_accepts_legacy_or_matching_command_trailers(self):
         snapshot = IMPLEMENTATION.issue_snapshot(issue())
         digest = IMPLEMENTATION.issue_semantic_digest(snapshot)
         command_digest = IMPLEMENTATION.stable_digest(
@@ -3107,6 +3107,27 @@ class PreparationPolicyTest(unittest.TestCase):
                     31,
                     digest,
                     "e" * 64,
+                )
+            )
+
+        legacy_message = (
+            "Implement #31\n\n"
+            "Codex-Automation: issue-implementation\n"
+            "Codex-Issue: #31\n"
+            f"Codex-Issue-Snapshot: {digest}"
+        )
+        with patch.object(
+            IMPLEMENTATION,
+            "run_gh_json",
+            return_value={"message": legacy_message},
+        ):
+            self.assertTrue(
+                IMPLEMENTATION.commit_has_automation_trailers(
+                    "aws/example",
+                    "c" * 40,
+                    31,
+                    digest,
+                    command_digest,
                 )
             )
 
@@ -3573,6 +3594,63 @@ class ValidationPolicyTest(unittest.TestCase):
             IMPLEMENTATION.publish_recovery(state)
 
         metadata.assert_called_once_with("aws/example", "b" * 40)
+        create.assert_called_once_with(state, publication)
+
+    def test_recovery_uses_legacy_commit_publication_metadata(self):
+        state = {
+            "repository": "aws/example",
+            "issue": IMPLEMENTATION.issue_snapshot(issue()),
+            "implementation_command": implementation_command(
+                guidance="Current guidance is unavailable in the old commit."
+            ),
+            "branch": "implement-issue-31",
+            "target": {
+                "ref": "implement-issue-31",
+                "sha": "b" * 40,
+            },
+        }
+        digest = IMPLEMENTATION.issue_semantic_digest(state["issue"])
+        message = (
+            "Implement #31\n\n"
+            "Added the requested implementation.\n\n"
+            "Codex-Automation: issue-implementation\n"
+            "Codex-Issue: #31\n"
+            f"Codex-Issue-Snapshot: {digest}"
+        )
+        with patch.object(
+            IMPLEMENTATION,
+            "require_current_issue",
+        ), patch.object(
+            IMPLEMENTATION,
+            "linked_open_pull_requests",
+            return_value=[],
+        ), patch.object(
+            IMPLEMENTATION,
+            "branch_ref",
+            return_value={
+                "ref": "implement-issue-31",
+                "sha": "b" * 40,
+            },
+        ), patch.object(
+            IMPLEMENTATION,
+            "branch_has_pull_request_history",
+            return_value=False,
+        ), patch.object(
+            IMPLEMENTATION,
+            "commit_message",
+            return_value=message,
+        ), patch.object(
+            IMPLEMENTATION,
+            "create_draft_pull_request",
+        ) as create:
+            IMPLEMENTATION.publish_recovery(state)
+
+        publication = create.call_args.args[1]
+        self.assertEqual(publication["version"], 0)
+        self.assertEqual(
+            publication["result"]["summary"],
+            "Added the requested implementation.",
+        )
         create.assert_called_once_with(state, publication)
 
     def test_recovery_rejects_changed_implementation_command(self):

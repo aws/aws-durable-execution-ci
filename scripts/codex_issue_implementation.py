@@ -1640,6 +1640,16 @@ def commit_has_automation_trailers(
         if isinstance(message, str)
         else None
     )
+    command_prefix = f"{IMPLEMENTATION_COMMAND_TRAILER}: "
+    command_trailers = (
+        [
+            line
+            for line in lines
+            if line.startswith(command_prefix)
+        ]
+        if lines is not None
+        else []
+    )
     return (
         lines is not None
         and f"Codex-Issue: #{issue_number}" in lines
@@ -1648,8 +1658,9 @@ def commit_has_automation_trailers(
             in lines
         )
         and (
-            f"{IMPLEMENTATION_COMMAND_TRAILER}: {command_digest}"
-            in lines
+            not command_trailers
+            or command_trailers
+            == [f"{IMPLEMENTATION_COMMAND_TRAILER}: {command_digest}"]
         )
     )
 
@@ -3937,9 +3948,12 @@ def publish_recovery(state: dict[str, Any]) -> None:
     )
     command = publication.get("implementation_command")
     if (
-        not isinstance(command, dict)
-        or command.get("digest")
-        != stable_digest(state["implementation_command"])
+        command is not None
+        and (
+            not isinstance(command, dict)
+            or command.get("digest")
+            != stable_digest(state["implementation_command"])
+        )
     ):
         raise ImplementationError(
             "recovery branch does not match the implementation command"

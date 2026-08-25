@@ -317,8 +317,8 @@ default branch.
 A later run can recover a workflow-owned branch when the push succeeded but
 pull request creation did not. Commit trailers bind recovery to the original
 issue and implementation command and preserve bounded description metadata;
-branches created by older workflow revisions without that metadata are not
-recovered.
+older automation commits that contain only the issue snapshot remain
+recoverable with the summary available from their commit message.
 
 For review addressing, the pull request head must be in the current repository;
 fork branches are never updated. The worker checks out the exact validated head
