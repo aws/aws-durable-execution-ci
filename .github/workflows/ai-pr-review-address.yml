@@ -64,9 +64,35 @@ on:
 permissions: {}
 
 jobs:
+  validate-dispatch:
+    name: Validate manual dispatch ref
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Require the default branch
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          DISPATCH_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$DISPATCH_REF" != "refs/heads/$DEFAULT_BRANCH" ]]; then
+            echo "::error::Manual PR review reconciliation must run from the default branch '$DEFAULT_BRANCH'; selected ref was '$DISPATCH_REF'."
+            exit 1
+          fi
+
   resolve:
     name: Resolve PR review feedback
-    if: github.event_name != 'workflow_run'
+    needs: validate-dispatch
+    if: >-
+      always() &&
+      github.event_name != 'workflow_run' &&
+      (
+        github.event_name != 'workflow_dispatch' ||
+        needs.validate-dispatch.result == 'success'
+      )
     permissions:
       contents: read
       issues: read

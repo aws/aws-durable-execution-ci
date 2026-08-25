@@ -81,7 +81,8 @@ jobs:
 The intake job is available only to inline review-comment events and has
 read-only repository permissions. Top-level comments and manual dispatches
 from the default branch call reconciliation directly. When manually running
-the workflow, select the default branch.
+the workflow, select the default branch. A manual run that selects any other
+branch or a tag fails before work-item resolution or the privileged worker.
 
 ### Inline-intake continuation
 

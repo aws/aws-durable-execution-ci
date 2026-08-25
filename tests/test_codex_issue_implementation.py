@@ -5625,6 +5625,47 @@ class WorkflowPolicyTest(unittest.TestCase):
             with self.subTest(runtime_input=runtime_input):
                 self.assertNotIn(runtime_input, dispatch.group(1))
 
+    def test_manual_pr_review_dispatch_requires_the_default_branch(self):
+        validate = re.search(
+            r"(?ms)^  validate-dispatch:\n"
+            r"(.*?)(?=^  resolve:)",
+            PR_ADDRESS_WORKFLOW,
+        )
+        resolve = re.search(
+            r"(?ms)^  resolve:\n"
+            r"(.*?)(?=^  load:)",
+            PR_ADDRESS_WORKFLOW,
+        )
+        assert validate is not None and resolve is not None
+        self.assertIn(
+            "if: github.event_name == 'workflow_dispatch'",
+            validate.group(1),
+        )
+        self.assertIn(
+            "DEFAULT_BRANCH: "
+            "${{ github.event.repository.default_branch }}",
+            validate.group(1),
+        )
+        self.assertIn(
+            "DISPATCH_REF: ${{ github.ref }}",
+            validate.group(1),
+        )
+        self.assertIn(
+            'if [[ "$DISPATCH_REF" != '
+            '"refs/heads/$DEFAULT_BRANCH" ]]; then',
+            validate.group(1),
+        )
+        self.assertIn(
+            "::error::Manual PR review reconciliation must run from "
+            "the default branch",
+            validate.group(1),
+        )
+        self.assertIn("needs: validate-dispatch", resolve.group(1))
+        self.assertIn(
+            "needs.validate-dispatch.result == 'success'",
+            resolve.group(1),
+        )
+
     def test_pr_review_address_docs_use_distinct_continuation_workflow(self):
         self.assertIn(
             "Add `.github/workflows/ai-pr-review-address.yml`",
