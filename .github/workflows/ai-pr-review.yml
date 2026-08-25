@@ -3,6 +3,10 @@ name: AI PR Review
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review]
+  pull_request_review:
+    types: [submitted, edited, dismissed]
+  pull_request_review_comment:
+    types: [created, edited, deleted]
   issue_comment:
     types: [created]
   workflow_call:
@@ -55,6 +59,36 @@ on:
 permissions: {}
 
 jobs:
+  record_activity:
+    name: Record AI review activity
+    if: >-
+      github.event_name == 'pull_request_target' ||
+      github.event_name == 'pull_request_review' ||
+      github.event_name == 'pull_request_review_comment' ||
+      (
+        github.event_name == 'issue_comment' &&
+        github.event.issue.pull_request
+      )
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Check out AI review telemetry toolkit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .ai-review-toolkit
+          sparse-checkout: scripts
+          persist-credentials: false
+
+      - name: Record review activity and verdicts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY_ID: ${{ github.repository_id }}
+        run: python3 .ai-review-toolkit/scripts/record_ai_review_activity.py
+
   resolve_review:
     name: Resolve AI PR review
     if: >-
@@ -77,6 +111,8 @@ jobs:
       head-sha: ${{ steps.resolve.outputs.head-sha }}
       review-guidance-base64: >-
         ${{ steps.resolve.outputs.review-guidance-base64 }}
+      trigger-metadata-base64: >-
+        ${{ steps.resolve.outputs.trigger-metadata-base64 }}
     steps:
       - name: Check out AI review toolkit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -91,6 +127,7 @@ jobs:
         id: resolve
         env:
           GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY_ID: ${{ github.repository_id }}
         run: python3 .ai-review-toolkit/scripts/resolve_ai_review.py
 
   # Direct event runs have no workflow_call inputs. Formatting distinguishes a
@@ -102,7 +139,7 @@ jobs:
       needs.resolve_review.outputs.review-requested == 'true' &&
       format('{0}', inputs['run-claude']) != 'false'
     permissions:
-      contents: read
+      contents: write
       id-token: write
       pull-requests: write
     uses: ./.github/workflows/claude-review.yml
@@ -113,6 +150,8 @@ jobs:
       head-sha: ${{ needs.resolve_review.outputs.head-sha }}
       review-guidance-base64: >-
         ${{ needs.resolve_review.outputs.review-guidance-base64 }}
+      trigger-metadata-base64: >-
+        ${{ needs.resolve_review.outputs.trigger-metadata-base64 }}
       prompt-path: ${{ inputs['prompt-path'] }}
       environment-name: >-
         ${{ inputs['environment-name'] || 'ai-pr-review-runtime' }}
@@ -127,7 +166,7 @@ jobs:
       needs.resolve_review.outputs.review-requested == 'true' &&
       format('{0}', inputs['run-codex']) != 'false'
     permissions:
-      contents: read
+      contents: write
       id-token: write
       pull-requests: write
     uses: ./.github/workflows/codex-review.yml
@@ -138,6 +177,8 @@ jobs:
       head-sha: ${{ needs.resolve_review.outputs.head-sha }}
       review-guidance-base64: >-
         ${{ needs.resolve_review.outputs.review-guidance-base64 }}
+      trigger-metadata-base64: >-
+        ${{ needs.resolve_review.outputs.trigger-metadata-base64 }}
       prompt-path: ${{ inputs['prompt-path'] }}
       environment-name: >-
         ${{ inputs['environment-name'] || 'ai-pr-review-runtime' }}

@@ -38,6 +38,8 @@ PR_FILES = [
 
 def finding(**overrides):
     value = {
+        "finding_key": "src/example.py::value::incorrect-value",
+        "prior_finding_id": "",
         "path": "src/example.py",
         "start_line": 11,
         "line": 11,
@@ -66,12 +68,14 @@ class PrepareAiReviewCommentsTest(unittest.TestCase):
             [
                 finding(),
                 finding(
+                    finding_key="src/example.py::block::replace-together",
                     start_line=10,
                     line=12,
                     body="Replace this block together.",
                     suggestion="context = False\n```\nextra_value = 4",
                 ),
                 finding(
+                    finding_key="src/example.py::guard::missing-guard",
                     start_line=12,
                     line=12,
                     body="This also needs a guard.",
@@ -83,21 +87,28 @@ class PrepareAiReviewCommentsTest(unittest.TestCase):
 
         self.assertEqual(prepared["summary"], "One actionable finding.")
         single, multiline, plain = prepared["comments"]
-        self.assertEqual(
-            single,
-            {
-                "body": (
-                    "[ai-pr-review-inline-claude-123-2-published]: #\n"
-                    "**Claude AI review**\n\n"
-                    "This changes the value incorrectly. Use the expected value.\n\n"
-                    "```suggestion\nnew_value = 1\n```"
-                ),
-                "commit_id": HEAD_SHA,
-                "path": "src/example.py",
-                "line": 11,
-                "side": "RIGHT",
-            },
+        self.assertEqual(single["commit_id"], HEAD_SHA)
+        self.assertEqual(single["path"], "src/example.py")
+        self.assertEqual(single["line"], 11)
+        self.assertEqual(single["side"], "RIGHT")
+        self.assertNotIn("start_line", single)
+        self.assertRegex(
+            single["body"],
+            (
+                r"^\[ai-pr-review-inline-claude-123-2-published\]: #\n"
+                r"<!-- ai-pr-review:finding:claude:arf_v1_[a-z2-7]{26} -->\n"
+                r"<!-- ai-pr-review:observation:aro_v1_[a-z2-7]{26} -->\n"
+            ),
         )
+        self.assertIn(
+            "\n**Claude AI review · Finding `arf_v1_",
+            single["body"],
+        )
+        self.assertIn(
+            "This changes the value incorrectly. Use the expected value.",
+            single["body"],
+        )
+        self.assertIn("```suggestion\nnew_value = 1\n```", single["body"])
         self.assertEqual(multiline["start_line"], 10)
         self.assertEqual(multiline["line"], 12)
         self.assertEqual(multiline["start_side"], "RIGHT")
@@ -114,7 +125,7 @@ class PrepareAiReviewCommentsTest(unittest.TestCase):
         ):
             with self.subTest(reviewer=reviewer):
                 body = prepare([finding()], reviewer)["comments"][0]["body"]
-                self.assertIn(f"\n**{title}**\n\n", body)
+                self.assertIn(f"\n**{title} · Finding `arf_v1_", body)
 
     def test_allows_empty_replacement_for_deletion(self):
         prepared = prepare([finding(suggestion="")])
@@ -137,6 +148,13 @@ class PrepareAiReviewCommentsTest(unittest.TestCase):
                 suggestion="",
             ),
             "wrong line type": finding(start_line=True),
+            "invalid finding key": finding(finding_key="Has Spaces"),
+            "reserved body metadata": finding(
+                body="Do this. <!-- ai-pr-review:forged -->"
+            ),
+            "untrusted prior finding": finding(
+                prior_finding_id="arf_v1_" + "a" * 26
+            ),
         }
 
         for label, comment in invalid_comments.items():
@@ -164,6 +182,41 @@ class PrepareAiReviewCommentsTest(unittest.TestCase):
                 "1",
                 HEAD_SHA,
             )
+
+    def test_reuses_a_trusted_prior_finding_id(self):
+        initial = prepare([finding()])
+        initial_finding = initial["telemetry"]["findings"][0]
+        prior = {
+            "finding_id": initial_finding["finding_id"],
+            "finding_key": initial_finding["identity_key"],
+            "path": "src/example.py",
+            "body": "Earlier wording.",
+            "reviewed_head_sha": "b" * 40,
+            "observed_at": "2026-08-25T11:00:00Z",
+        }
+
+        prepared = prepare_review(
+            {
+                "summary": "Repeated finding.",
+                "comments": [
+                    finding(
+                        finding_key="src/example.py::value::moved-invariant",
+                        prior_finding_id=prior["finding_id"],
+                    )
+                ],
+            },
+            PR_FILES,
+            "claude",
+            "124",
+            "1",
+            HEAD_SHA,
+            prior_findings=[prior],
+        )
+
+        repeated = prepared["telemetry"]["findings"][0]
+        self.assertEqual(repeated["finding_id"], prior["finding_id"])
+        self.assertEqual(repeated["identity_key"], prior["finding_key"])
+        self.assertNotEqual(repeated["finding_key"], repeated["identity_key"])
 
     def test_rejects_reserved_summary_metadata(self):
         with self.assertRaisesRegex(ReviewValidationError, "reserved metadata"):

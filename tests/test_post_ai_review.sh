@@ -15,6 +15,58 @@ gh() {
   local joined="$*"
   local argument
 
+  if [[ "$joined" == *"git/ref/heads/ai-review-telemetry-v1"* ]]; then
+    if [[ -r "$TELEMETRY_REF_FILE" ]]; then
+      printf '%s\n' \
+        '{"object":{"sha":"6666666666666666666666666666666666666666"}}'
+      return
+    fi
+    echo "gh: Not Found (HTTP 404)" >&2
+    return 1
+  fi
+
+  if [[ "$joined" == *"git/trees/"*"?recursive=1"* ]]; then
+    printf '%s\n' '{"truncated":false,"tree":[]}'
+    return
+  fi
+
+  if [[ "$joined" == *"git/commits/6666666666666666666666666666666666666666"* ]]; then
+    printf '%s\n' \
+      '{"tree":{"sha":"5555555555555555555555555555555555555555"}}'
+    return
+  fi
+
+  if [[ "$joined" == *"--method POST"*"git/blobs"* ]]; then
+    cat > /dev/null
+    printf '%s\n' '{"sha":"4444444444444444444444444444444444444444"}'
+    return
+  fi
+
+  if [[ "$joined" == *"--method POST"*"git/trees"* ]]; then
+    cat > /dev/null
+    printf '%s\n' '{"sha":"5555555555555555555555555555555555555555"}'
+    return
+  fi
+
+  if [[ "$joined" == *"--method POST"*"git/commits"* ]]; then
+    cat > /dev/null
+    printf '%s\n' '{"sha":"6666666666666666666666666666666666666666"}'
+    return
+  fi
+
+  if [[ "$joined" == *"--method POST"*"git/refs"* ]]; then
+    cat > /dev/null
+    touch "$TELEMETRY_REF_FILE"
+    printf '%s\n' '{}'
+    return
+  fi
+
+  if [[ "$joined" == *"--method PATCH"*"git/refs/heads/ai-review-telemetry-v1"* ]]; then
+    cat > /dev/null
+    printf '%s\n' '{}'
+    return
+  fi
+
   if [[ "$joined" == *"repos/example/repository/pulls/42/files?per_page=100"* ]]; then
     printf '%s\n' \
       '[{"filename":"src/example.py","patch":"@@ -1 +1,2 @@\n-old_value = 1\n+new_value = 2\n+extra_value = 3\n"}]'
@@ -33,10 +85,12 @@ gh() {
       if [[ "$count" -eq 2 ]]; then
         return 1
       fi
-      printf 'PRRC_partial_%s\n' "$count"
+      printf '{"node_id":"PRRC_partial_%s","created_at":"2026-08-25T12:00:0%sZ"}\n' \
+        "$count" "$count"
     else
       cat > "$GH_INLINE_PAYLOAD_LOG"
-      printf '%s\n' "PRRC_new"
+      printf '%s\n' \
+        '{"node_id":"PRRC_new","created_at":"2026-08-25T12:00:01Z"}'
     fi
     return
   fi
@@ -64,7 +118,8 @@ gh() {
         printf '%s' "${argument#body=}" > "$GH_SUMMARY_BODY_LOG"
       fi
     done
-    printf '%s\n' "IC_new_summary"
+    printf '%s\n' \
+      '{"node_id":"IC_new_summary","created_at":"2026-08-25T12:00:10Z"}'
     return
   fi
 
@@ -92,11 +147,16 @@ export GH_MINIMIZED_LOG="$test_dir/minimized-comments"
 export GH_SUMMARY_BODY_LOG="$test_dir/summary-body.md"
 export GH_TOKEN="test-token"
 export GITHUB_REPOSITORY="example/repository"
+export GITHUB_REPOSITORY_ID="123"
 export GITHUB_RUN_ATTEMPT="2"
 export GITHUB_RUN_ID="123"
 export GITHUB_SERVER_URL="https://github.example"
+export GITHUB_WORKFLOW_SHA="3333333333333333333333333333333333333333"
 export PR_NUMBER="42"
+export REVIEW_MODEL="test-model"
+export REVIEW_REASONING_EFFORT="high"
 export RUNNER_TEMP="$test_dir"
+export TELEMETRY_REF_FILE="$test_dir/telemetry-ref"
 export PYTHONDONTWRITEBYTECODE="1"
 
 review_file="$test_dir/review.json"
@@ -104,6 +164,8 @@ cat > "$review_file" <<'JSON'
 {
   "summary": "One actionable finding.",
   "comments": [{
+    "finding_key": "src/example.py::value::behavior-change",
+    "prior_finding_id": "",
     "path": "src/example.py",
     "start_line": 1,
     "line": 1,
@@ -129,7 +191,8 @@ jq -e \
     .side == "RIGHT" and
     (has("start_line") | not) and
     (.body | startswith("[ai-pr-review-inline-claude-123-2-published]: #\n")) and
-    (.body | contains("\n**Claude AI review**\n\n")) and
+    (.body | contains("<!-- ai-pr-review:finding:claude:arf_v1_")) and
+    (.body | contains("\n**Claude AI review · Finding `arf_v1_")) and
     (.body | contains("```suggestion\nnew_value = 1\n```"))
   ' \
   "$GH_INLINE_PAYLOAD_LOG" > /dev/null ||
@@ -149,6 +212,8 @@ cat > "$failed_review_file" <<'JSON'
 {
   "summary": "Two actionable findings.",
   "comments": [{
+    "finding_key": "src/example.py::first::incorrect-value",
+    "prior_finding_id": "",
     "path": "src/example.py",
     "start_line": 1,
     "line": 1,
@@ -156,6 +221,8 @@ cat > "$failed_review_file" <<'JSON'
     "has_suggestion": false,
     "suggestion": ""
   }, {
+    "finding_key": "src/example.py::second::incorrect-value",
+    "prior_finding_id": "",
     "path": "src/example.py",
     "start_line": 2,
     "line": 2,

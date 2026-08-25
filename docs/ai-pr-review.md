@@ -16,7 +16,14 @@ pull request revision, validate every requested path and right-side line range
 against GitHub's diff, and then publish inline comments. Small, unambiguous
 fixes include GitHub `suggestion` blocks so a maintainer can apply them
 directly. Each inline comment identifies whether it came from Claude or Codex;
-the AI reviewers never edit the branch.
+the AI reviewers never edit the branch. Every finding also has a stable ID
+that can be reused across reruns and later pull request revisions.
+
+Trusted jobs retain review, finding, verdict, revision, and human-review
+metadata on the repository's orphan `ai-review-telemetry-v1` branch. Model
+jobs cannot write this branch. The telemetry contains versioned JSON rather
+than credentials, prompts, model transcripts, unpublished source, or
+human-authored comment bodies.
 
 ## Usage
 
@@ -29,6 +36,10 @@ name: AI PR Review
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review]
+  pull_request_review:
+    types: [submitted, edited, dismissed]
+  pull_request_review_comment:
+    types: [created, edited, deleted]
   issue_comment:
     types: [created]
 
@@ -37,7 +48,7 @@ permissions: {}
 jobs:
   ai-pr-review:
     permissions:
-      contents: read
+      contents: write
       id-token: write
       pull-requests: write
     uses: aws/aws-durable-execution-ci/.github/workflows/ai-pr-review.yml@<full-commit-sha>
@@ -85,7 +96,98 @@ Ordinary comments that are not authorized review commands never enter those
 groups and cannot cancel an active review.
 
 The caller must declare the `issue_comment` event shown above. A reusable
-workflow does not add its own event triggers to the caller.
+workflow does not add its own event triggers to the caller. The
+`pull_request_review` and `pull_request_review_comment` events retain human
+review workload and allow inline verdict replies. `contents: write` is the
+caller-level ceiling needed by trusted telemetry jobs; model jobs explicitly
+retain only `contents: read`.
+
+## Finding identity
+
+Each model finding includes a stable semantic key based on the component,
+nearest symbol or construct, and violated invariant. It excludes line numbers,
+commit IDs, severity, and rendered prose. The trusted publisher hashes that
+key with the repository, pull request, and reviewer identity to create an
+`arf_v1_...` finding ID.
+
+The model also receives a bounded catalog of durable prior findings from the
+same reviewer. When a later review identifies the same root cause, it can
+return the trusted prior ID. The publisher validates that reference before
+reusing it. Path and line remain evidence for an observation rather than the
+finding's identity.
+
+Published comments contain hidden machine metadata and a visible finding ID:
+
+```text
+Codex AI review · Finding `arf_v1_...`
+```
+
+Each reviewer execution and each finding observation also receive separate
+stable IDs. This distinguishes repeated observations from genuinely new
+findings.
+
+## Record a finding verdict
+
+A maintainer with current `write`, `maintain`, or `admin` permission can reply
+to an AI inline comment:
+
+```text
+/ai verdict accepted
+```
+
+The conversation-level form includes the finding ID:
+
+```text
+/ai verdict arf_v1_... false-positive
+```
+
+The allowed outcomes are:
+
+- `accepted`
+- `deferred`
+- `false-positive`
+- `out-of-scope`
+- `already-fixed`
+
+The workflow verifies the root AI comment or durable finding record, captures
+the maintainer identity, reviewed base and head SHA, current head SHA, command
+timestamp, and comment ID, then acknowledges the verdict. It stores
+superseding commands as new immutable events rather than editing history.
+
+## Measurement telemetry
+
+The workflow records:
+
+- `opened`, `synchronize`, `reopened`, and `ready_for_review` event timestamps
+  and event revisions.
+- The resolved base and head SHA reviewed by each model.
+- Planned, published, and failed review executions.
+- Stable findings, repeated observations, and published GitHub comment IDs.
+- Structured maintainer verdicts.
+- Human reviews, approvals, inline comments, replies, and conversation
+  response timestamps without their bodies.
+- Exact suggestion adoption when a later revision uniquely matches the
+  published replacement and surrounding context.
+
+Data is stored as immutable JSON files under `events/` on the orphan
+`ai-review-telemetry-v1` branch. Stable finding and suggestion metadata live
+under `findings/` and `suggestions/`. The writer uses optimistic,
+non-force branch updates and treats an attempt to rewrite an existing record
+with different bytes as an error.
+
+Export the durable event stream as canonical newline-delimited JSON:
+
+```bash
+GH_TOKEN=... python3 scripts/export_ai_review_telemetry.py \
+  --repository owner/repository \
+  --output ai-review-telemetry.jsonl
+```
+
+The export is ordered by event and record timestamp and does not parse
+natural-language comment bodies. It supports review latency, revision response
+time, finding-to-corrective-revision time, suggestion adoption, applicable
+finding precision, repeated findings, human feedback rounds, author response,
+and time from first human review to approval.
 
 ## Select reviewers
 

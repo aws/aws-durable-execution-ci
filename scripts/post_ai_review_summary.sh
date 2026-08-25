@@ -99,16 +99,27 @@ printf -v body '%s\n%s## %s\n\n%s\n\nReviewed commit `%s`. [Workflow run](%s)' \
   "$expected_head_sha" \
   "$run_url"
 
-new_comment_id="$(
+new_comment_response="$(
   gh api \
     --method POST \
     "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
-    --raw-field body="$body" \
-    --jq .node_id
+    --raw-field body="$body"
 )"
+new_comment_id="$(jq -er .node_id <<< "$new_comment_response")"
+new_comment_created_at="$(jq -er .created_at <<< "$new_comment_response")"
 if [[ -z "$new_comment_id" ]]; then
   echo "::error::GitHub did not return the new AI review comment ID."
   exit 1
+fi
+
+if [[ -n "${SUMMARY_COMMENT_RESULT_FILE:-}" ]]; then
+  jq -nc \
+    --arg comment_node_id "$new_comment_id" \
+    --arg created_at "$new_comment_created_at" \
+    '{
+      comment_node_id: $comment_node_id,
+      created_at: $created_at
+    }' > "$SUMMARY_COMMENT_RESULT_FILE"
 fi
 
 owner="${GITHUB_REPOSITORY%%/*}"

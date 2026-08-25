@@ -2,7 +2,9 @@
 
 import base64
 import importlib.util
+import json
 import os
+import sys
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -10,6 +12,7 @@ from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MODULE_PATH = REPO_ROOT / "scripts/resolve_ai_review.py"
+sys.path.insert(0, str(REPO_ROOT / "scripts"))
 SPEC = importlib.util.spec_from_file_location("resolve_ai_review", MODULE_PATH)
 if SPEC is None or SPEC.loader is None:
     raise RuntimeError("Could not load AI review resolver")
@@ -38,6 +41,8 @@ def pull_request(
         "number": 42,
         "state": state,
         "draft": draft,
+        "created_at": "2026-08-25T10:00:00Z",
+        "updated_at": "2026-08-25T12:00:00Z",
         "user": {"login": author} if author is not None else None,
         "base": {"sha": BASE_SHA},
         "head": {"sha": HEAD_SHA, "repo": head_repo},
@@ -47,7 +52,14 @@ def pull_request(
 def pull_request_event() -> dict:
     return {
         "action": "synchronize",
-        "pull_request": {"number": 42},
+        "before": "3" * 40,
+        "after": HEAD_SHA,
+        "pull_request": {
+            "number": 42,
+            "updated_at": "2026-08-25T12:00:00Z",
+            "base": {"sha": BASE_SHA},
+            "head": {"sha": HEAD_SHA},
+        },
     }
 
 
@@ -66,6 +78,8 @@ def review_command_event(
         },
         "comment": {
             "body": body,
+            "node_id": "IC_review_command",
+            "created_at": "2026-08-25T12:01:00Z",
             "user": {"login": login, "type": user_type},
         },
     }
@@ -75,7 +89,11 @@ class ResolveAiReviewTest(unittest.TestCase):
     def setUp(self):
         self.environment = patch.dict(
             os.environ,
-            {"GITHUB_REPOSITORY": REPOSITORY},
+            {
+                "GITHUB_REPOSITORY": REPOSITORY,
+                "GITHUB_REPOSITORY_ID": "123",
+                "GITHUB_ACTOR": "maintainer",
+            },
             clear=False,
         )
         self.environment.start()
@@ -100,6 +118,30 @@ class ResolveAiReviewTest(unittest.TestCase):
                 "base-sha": BASE_SHA,
                 "head-sha": HEAD_SHA,
                 "review-guidance-base64": "",
+                "trigger-metadata-base64": result[
+                    "trigger-metadata-base64"
+                ],
+            },
+        )
+        trigger = json.loads(
+            base64.b64decode(
+                result["trigger-metadata-base64"],
+                validate=True,
+            )
+        )
+        self.assertEqual(
+            trigger,
+            {
+                "actor": "maintainer",
+                "after_sha": HEAD_SHA,
+                "before_sha": "3" * 40,
+                "command_comment_id": "",
+                "event_action": "synchronize",
+                "event_base_sha": BASE_SHA,
+                "event_head_sha": HEAD_SHA,
+                "event_name": "pull_request_target",
+                "event_timestamp": "2026-08-25T12:00:00Z",
+                "trigger_id": trigger["trigger_id"],
             },
         )
         run_gh.assert_called_once_with(f"repos/{REPOSITORY}/pulls/42")

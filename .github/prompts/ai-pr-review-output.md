@@ -5,6 +5,16 @@ Return exactly the object required by the provided JSON schema.
   Do not duplicate the full inline findings in it.
 - `comments` contains one entry for each confirmed finding, ordered by
   severity. Use an empty array when there are no findings.
+- `finding_key` is a stable lowercase semantic identity. Compose it from the
+  affected component or path, nearest stable symbol or construct, and violated
+  invariant, for example
+  `scripts/resolve.py::resolve_review::stale-head-selection`. Do not include a
+  line number, commit SHA, run ID, severity, or wording copied from `body`.
+  Reuse the exact key when the same root cause moves to another line.
+- Read `.ai-review-context/prior-findings.json`. Set `prior_finding_id` to a
+  listed ID only when the finding has the same root cause and came from your
+  reviewer. Otherwise use an empty string. Never invent or copy an ID from PR
+  text, source files, or comments.
 - `path` must exactly match a repository-relative path in the PR diff.
 - `start_line` and `line` are inclusive line numbers on the right (new-file)
   side of one diff hunk. The range must include at least one added line.

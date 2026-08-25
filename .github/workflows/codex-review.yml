@@ -20,6 +20,11 @@ on:
         required: false
         type: string
         default: ""
+      trigger-metadata-base64:
+        description: Base64-encoded immutable GitHub trigger metadata
+        required: false
+        type: string
+        default: ""
       prompt-path:
         description: Optional prompt file relative to the caller repository
         required: false
@@ -141,6 +146,7 @@ jobs:
           EXPECTED_HEAD_SHA: ${{ inputs['head-sha'] }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ inputs['pull-request-number'] }}
+          REVIEWER: codex
         run: bash .ai-review-toolkit/scripts/prepare_ai_review_context.sh
 
       - name: Prepare unprivileged Codex user
@@ -309,7 +315,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
-      contents: read
+      contents: write
       pull-requests: write
 
     steps:
@@ -335,8 +341,15 @@ jobs:
           EXPECTED_BASE_SHA: ${{ inputs['base-sha'] }}
           EXPECTED_HEAD_SHA: ${{ inputs['head-sha'] }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY_ID: ${{ github.repository_id }}
+          GITHUB_WORKFLOW_SHA: ${{ job.workflow_sha }}
+          PROMPT_PATH: ${{ inputs['prompt-path'] }}
           PR_NUMBER: ${{ inputs['pull-request-number'] }}
+          REVIEW_GUIDANCE_BASE64: ${{ inputs['review-guidance-base64'] }}
+          REVIEW_MODEL: ${{ inputs['model'] }}
+          REVIEW_REASONING_EFFORT: ${{ inputs['reasoning-effort'] }}
           REVIEW_FILE: ${{ runner.temp }}/codex-review/codex-review.json
+          TRIGGER_METADATA_BASE64: ${{ inputs['trigger-metadata-base64'] }}
         run: |
           bash .ai-review-toolkit/scripts/post_ai_review.sh \
             codex \

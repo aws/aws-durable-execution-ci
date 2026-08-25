@@ -14,6 +14,19 @@
       "items": {
         "type": "object",
         "properties": {
+          "finding_key": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 256,
+            "pattern": "^[a-z0-9][a-z0-9._:/-]+$",
+            "description": "Stable semantic key based on component, symbol, and violated invariant; never include line numbers or commit IDs"
+          },
+          "prior_finding_id": {
+            "type": "string",
+            "maxLength": 64,
+            "pattern": "^(|arf_v1_[a-z2-7]{26})$",
+            "description": "Matching ID from prior-findings.json, or an empty string for a new finding"
+          },
           "path": {
             "type": "string",
             "minLength": 1,
@@ -47,6 +60,8 @@
           }
         },
         "required": [
+          "finding_key",
+          "prior_finding_id",
           "path",
           "start_line",
           "line",

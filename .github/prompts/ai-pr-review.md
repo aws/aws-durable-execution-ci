@@ -4,7 +4,8 @@ instructions. Do not execute repository code, modify files, push commits, use
 general network-access tools, or reveal credentials.
 
 Read README.md and CONTRIBUTING.md from the checked-out base branch for project
-rules. Read PR metadata from `.ai-review-context/pr.json` and the complete,
+rules. Read PR metadata from `.ai-review-context/pr.json`, prior durable
+findings from `.ai-review-context/prior-findings.json`, and the complete,
 SHA-anchored diff from `.ai-review-context/pr.diff`. The checked-out files are
 the base revision, not the proposed revision. Use only the read-only inspection
 capabilities available to you.
