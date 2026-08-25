@@ -44,6 +44,7 @@ FEEDBACK_CURSOR_PATTERN = re.compile(
     r"id=(\d+) -->"
 )
 AUTOMATION_TRAILER = "Codex-Automation: issue-implementation"
+IMPLEMENTATION_COMMAND_TRAILER = "Codex-Implementation-Command"
 ISSUE_SNAPSHOT_TRAILER = "Codex-Issue-Snapshot"
 PUBLICATION_METADATA_TRAILER = "Codex-Publication-Metadata"
 MAX_CONTEXT_BYTES = 1_000_000
@@ -51,6 +52,7 @@ MAX_AUTOMATION_COMMIT_CHAIN = 100
 MAX_DISCOVERY_CANDIDATES_PER_RUN = 25
 MAX_ISSUES_PER_RUN = 10
 MAX_PATCH_BYTES = 5_000_000
+MAX_PUBLICATION_GUIDANCE_CHARACTERS = 8_000
 MAX_PUBLICATION_METADATA_BYTES = 160_000
 MAX_PUBLICATION_PATH_CHARACTERS = 8_000
 MAX_PUBLICATION_PATHS = 50
@@ -1399,6 +1401,7 @@ def require_implementation_branch_available(state: dict[str, Any]) -> None:
 def publication_metadata(
     result: dict[str, Any],
     paths: list[str],
+    implementation_command: dict[str, Any],
 ) -> dict[str, Any]:
     validated_result = validate_model_result(result)
     if validated_result["outcome"] != "changed":
@@ -1423,23 +1426,64 @@ def publication_metadata(
             break
         selected_paths.append(path)
         selected_characters += len(path)
+    if not isinstance(implementation_command, dict):
+        raise ImplementationError(
+            "publication metadata requires an implementation command"
+        )
+    guidance = implementation_command.get("guidance")
+    if not isinstance(guidance, str):
+        raise ImplementationError(
+            "publication metadata requires an implementation command"
+        )
+    if len(guidance) > MAX_PUBLICATION_GUIDANCE_CHARACTERS:
+        guidance = (
+            guidance[: MAX_PUBLICATION_GUIDANCE_CHARACTERS - 3] + "..."
+        )
     return {
-        "version": 1,
+        "version": 2,
         "result": validated_result,
         "changed_paths": selected_paths,
         "changed_path_count": len(paths),
+        "implementation_command": {
+            "digest": stable_digest(implementation_command),
+            "guidance": guidance,
+        },
+    }
+
+
+def validate_publication_command(value: Any) -> dict[str, str]:
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"digest", "guidance"}
+        or not isinstance(value["digest"], str)
+        or re.fullmatch(r"[0-9a-f]{64}", value["digest"]) is None
+        or not isinstance(value["guidance"], str)
+        or len(value["guidance"]) > MAX_PUBLICATION_GUIDANCE_CHARACTERS
+    ):
+        raise ImplementationError(
+            "publication metadata implementation command is invalid"
+        )
+    return {
+        "digest": value["digest"],
+        "guidance": value["guidance"],
     }
 
 
 def validate_publication_metadata(value: Any) -> dict[str, Any]:
-    if not isinstance(value, dict) or set(value) != {
+    if not isinstance(value, dict):
+        raise ImplementationError("publication metadata has invalid fields")
+    version = value.get("version")
+    expected_fields = {
         "version",
         "result",
         "changed_paths",
         "changed_path_count",
-    }:
+    }
+    if version == 2:
+        expected_fields.add("implementation_command")
+    if set(value) != expected_fields:
         raise ImplementationError("publication metadata has invalid fields")
-    if value["version"] != 1:
+    if version not in (1, 2):
         raise ImplementationError("publication metadata version is invalid")
     paths = value["changed_paths"]
     count = value["changed_path_count"]
@@ -1454,12 +1498,17 @@ def validate_publication_metadata(value: Any) -> dict[str, Any]:
     result = validate_model_result(value["result"])
     if result["outcome"] != "changed":
         raise ImplementationError("publication metadata result is invalid")
-    return {
-        "version": 1,
+    validated = {
+        "version": version,
         "result": result,
         "changed_paths": paths,
         "changed_path_count": count,
     }
+    if version == 2:
+        validated["implementation_command"] = validate_publication_command(
+            value["implementation_command"]
+        )
+    return validated
 
 
 def encode_publication_metadata(value: dict[str, Any]) -> str:
@@ -1510,6 +1559,14 @@ def commit_message(repository: str, sha: str) -> str | None:
     return message if isinstance(message, str) else None
 
 
+def automation_trailer_lines(message: str) -> list[str] | None:
+    marker = f"\n\n{AUTOMATION_TRAILER}\n"
+    _, separator, trailers = message.rpartition(marker)
+    if not separator:
+        return None
+    return trailers.splitlines()
+
+
 def legacy_publication_metadata(message: str) -> dict[str, Any]:
     marker = f"\n\n{AUTOMATION_TRAILER}\n"
     prefix, separator, _ = message.rpartition(marker)
@@ -1545,10 +1602,15 @@ def commit_publication_metadata(
     message = commit_message(repository, sha)
     if message is None:
         raise ImplementationError("GitHub returned an invalid commit")
+    lines = automation_trailer_lines(message)
+    if lines is None:
+        raise ImplementationError(
+            "automation commit has invalid publication metadata"
+        )
     prefix = f"{PUBLICATION_METADATA_TRAILER}: "
     encoded = [
         line[len(prefix):]
-        for line in message.splitlines()
+        for line in lines
         if line.startswith(prefix)
     ]
     if not encoded:
@@ -1565,15 +1627,24 @@ def commit_has_automation_trailers(
     sha: str,
     issue_number: int,
     snapshot_digest: str,
+    command_digest: str,
 ) -> bool:
     message = commit_message(repository, sha)
+    lines = (
+        automation_trailer_lines(message)
+        if isinstance(message, str)
+        else None
+    )
     return (
-        isinstance(message, str)
-        and AUTOMATION_TRAILER in message.splitlines()
-        and f"Codex-Issue: #{issue_number}" in message.splitlines()
+        lines is not None
+        and f"Codex-Issue: #{issue_number}" in lines
         and (
             f"{ISSUE_SNAPSHOT_TRAILER}: {snapshot_digest}"
-            in message.splitlines()
+            in lines
+        )
+        and (
+            f"{IMPLEMENTATION_COMMAND_TRAILER}: {command_digest}"
+            in lines
         )
     )
 
@@ -2126,6 +2197,7 @@ def prepare_issue_state(
             existing_branch["sha"],
             issue_number,
             snapshot_digest,
+            stable_digest(implementation_command),
         ):
             state["action"] = "blocked"
             state["reason"] = (
@@ -3346,7 +3418,7 @@ def pull_request_body(
         state["issue"]["title"],
         2_000,
     )
-    command = state.get("implementation_command")
+    command = publication.get("implementation_command")
     guidance = (
         command.get("guidance")
         if isinstance(command, dict)
@@ -3458,12 +3530,18 @@ def apply_patch_and_commit(
         issue_number = state["issue"]["number"]
         subject = f"Implement #{issue_number}"
         encoded_metadata = encode_publication_metadata(
-            publication_metadata(result, actual_paths)
+            publication_metadata(
+                result,
+                actual_paths,
+                state["implementation_command"],
+            )
         )
         trailers = (
             f"Codex-Issue: #{issue_number}\n"
             f"{ISSUE_SNAPSHOT_TRAILER}: "
             f"{issue_semantic_digest(state['issue'])}\n"
+            f"{IMPLEMENTATION_COMMAND_TRAILER}: "
+            f"{stable_digest(state['implementation_command'])}\n"
             f"{PUBLICATION_METADATA_TRAILER}: "
             f"{encoded_metadata}"
         )
@@ -3487,8 +3565,9 @@ def apply_patch_and_commit(
     if has_workflow_changes(actual_paths):
         message += "\nskip-checks: true"
     commit = run_command(
-        ["git", "commit", "--cleanup=verbatim", "-m", message],
+        ["git", "commit", "--cleanup=verbatim", "--file=-"],
         cwd=workspace,
+        input_text=message,
     )
     if commit.returncode != 0:
         raise ImplementationError(
@@ -3671,9 +3750,11 @@ def publish_recovery(state: dict[str, Any]) -> None:
         current_branch["sha"],
         state["issue"]["number"],
         issue_semantic_digest(state["issue"]),
+        stable_digest(state["implementation_command"]),
     ):
         raise ImplementationError(
-            "recovery branch does not match the prepared issue snapshot"
+            "recovery branch does not match the prepared issue and "
+            "implementation command snapshots"
         )
     if branch_has_pull_request_history(state["repository"], state["branch"]):
         raise ImplementationError(
@@ -3683,6 +3764,15 @@ def publish_recovery(state: dict[str, Any]) -> None:
         state["repository"],
         current_branch["sha"],
     )
+    command = publication.get("implementation_command")
+    if (
+        not isinstance(command, dict)
+        or command.get("digest")
+        != stable_digest(state["implementation_command"])
+    ):
+        raise ImplementationError(
+            "recovery branch does not match the implementation command"
+        )
     create_draft_pull_request(state, publication)
 
 
@@ -3768,7 +3858,11 @@ def publish_implementation(
         )
     create_draft_pull_request(
         state,
-        publication_metadata(result, publication_paths),
+        publication_metadata(
+            result,
+            publication_paths,
+            state["implementation_command"],
+        ),
     )
 
 

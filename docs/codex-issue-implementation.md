@@ -224,15 +224,16 @@ because its decision applies to the repository state that Codex inspected.
 If a workflow-owned branch was pushed but pull request creation failed, a
 later run recognizes commit trailers on that branch and retries only pull
 request creation. The trailers include a semantic digest of the issue title,
-body, state, and labels plus bounded publication metadata for the summary,
-changed paths, and validation, so recovery produces the same useful pull
-request description as the original publication attempt. Branches created by
-older workflow revisions recover the summary available in their commit and
-identify unavailable details. Recovery is blocked when the current issue no
-longer matches the work that produced the branch. Recovery is also refused
-when any open or closed pull request has already used that branch, so closing a
-generated draft and deleting its branch does not cause a replacement or orphan
-branch. An unrelated branch with the deterministic name is not overwritten.
+body, state, and labels plus bounded publication metadata for the creating
+implementation command, summary, changed paths, and validation, so recovery
+produces the same useful pull request description as the original publication
+attempt. Recovery is blocked when the current issue or implementation command
+no longer matches the work that produced the branch, including branches made
+by older workflow revisions that did not record command metadata. Recovery is
+also refused when any open or closed pull request has already used that branch,
+so closing a generated draft and deleting its branch does not cause a
+replacement or orphan branch. An unrelated branch with the deterministic name
+is not overwritten.
 
 With exactly one linked open pull request, issue-scoped reconciliation requires
 that pull request to close exactly that one open issue.
