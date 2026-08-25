@@ -180,7 +180,8 @@ gh() {
         printf '%s' "${argument#body=}" > "$GH_POST_BODY_LOG"
       fi
     done
-    printf '%s\n' "IC_new_summary"
+    printf '%s\n' \
+      '{"node_id":"IC_new_summary","created_at":"2026-08-25T12:00:10Z"}'
     return
   fi
 

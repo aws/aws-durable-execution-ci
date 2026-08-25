@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import json
 import re
 import unittest
 from pathlib import Path
@@ -15,6 +16,14 @@ CLAUDE_WORKFLOW = (REPO_ROOT / ".github/workflows/claude-review.yml").read_text(
 CODEX_WORKFLOW = (REPO_ROOT / ".github/workflows/codex-review.yml").read_text(
     encoding="utf-8"
 )
+REVIEW_SCHEMA = json.loads(
+    (REPO_ROOT / ".github/prompts/ai-pr-review-schema.json").read_text(
+        encoding="utf-8"
+    )
+)
+REVIEW_OUTPUT = (
+    REPO_ROOT / ".github/prompts/ai-pr-review-output.md"
+).read_text(encoding="utf-8")
 
 
 def job_block(workflow: str, job_name: str) -> str:
@@ -80,6 +89,12 @@ class AiPrReviewWorkflowTest(unittest.TestCase):
             claude,
         )
         self.assertIn(
+            "trigger-metadata-base64: >-\n"
+            "        ${{ needs.resolve_review.outputs."
+            "trigger-metadata-base64 }}",
+            claude,
+        )
+        self.assertIn(
             "environment-name: >-\n"
             "        ${{ inputs['environment-name'] || "
             "'ai-pr-review-runtime' }}",
@@ -104,6 +119,12 @@ class AiPrReviewWorkflowTest(unittest.TestCase):
             codex,
         )
         self.assertIn(
+            "trigger-metadata-base64: >-\n"
+            "        ${{ needs.resolve_review.outputs."
+            "trigger-metadata-base64 }}",
+            codex,
+        )
+        self.assertIn(
             "environment-name: >-\n"
             "        ${{ inputs['environment-name'] || "
             "'ai-pr-review-runtime' }}",
@@ -123,6 +144,11 @@ class AiPrReviewWorkflowTest(unittest.TestCase):
         self.assert_input_default(
             CLAUDE_WORKFLOW,
             "review-guidance-base64",
+            '""',
+        )
+        self.assert_input_default(
+            CLAUDE_WORKFLOW,
+            "trigger-metadata-base64",
             '""',
         )
         self.assert_input_default(
@@ -176,6 +202,11 @@ class AiPrReviewWorkflowTest(unittest.TestCase):
         )
         self.assert_input_default(
             CODEX_WORKFLOW,
+            "trigger-metadata-base64",
+            '""',
+        )
+        self.assert_input_default(
+            CODEX_WORKFLOW,
             "environment-name",
             "ai-pr-review-runtime",
         )
@@ -223,6 +254,11 @@ class AiPrReviewWorkflowTest(unittest.TestCase):
         self.assertIn(
             "review-guidance-base64: >-\n"
             "        ${{ steps.resolve.outputs.review-guidance-base64 }}",
+            resolve,
+        )
+        self.assertIn(
+            "trigger-metadata-base64: >-\n"
+            "        ${{ steps.resolve.outputs.trigger-metadata-base64 }}",
             resolve,
         )
 
@@ -329,6 +365,58 @@ class AiPrReviewWorkflowTest(unittest.TestCase):
         self.assertIn(
             enabled_guard("run-codex"),
             job_block(AI_WORKFLOW, "codex-review"),
+        )
+
+    def test_activity_job_records_human_feedback_and_verdict_events(self):
+        activity = job_block(AI_WORKFLOW, "record_activity")
+
+        self.assertIn("pull_request_review:", AI_WORKFLOW)
+        self.assertIn("pull_request_review_comment:", AI_WORKFLOW)
+        self.assertIn("contents: write", activity)
+        self.assertIn("pull-requests: write", activity)
+        self.assertIn(
+            "python3 .ai-review-toolkit/scripts/record_ai_review_activity.py",
+            activity,
+        )
+        self.assertNotIn("id-token: write", activity)
+
+    def test_only_trusted_non_model_jobs_write_telemetry(self):
+        for workflow in (CLAUDE_WORKFLOW, CODEX_WORKFLOW):
+            with self.subTest(workflow=workflow.splitlines()[0]):
+                generate = job_block(workflow, "generate")
+                post = job_block(workflow, "post")
+
+                self.assertIn("contents: read", generate)
+                self.assertNotIn("contents: write", generate)
+                self.assertIn("id-token: write", generate)
+                self.assertIn("contents: write", post)
+                self.assertNotIn("id-token: write", post)
+                self.assertIn(
+                    "TRIGGER_METADATA_BASE64: "
+                    "${{ inputs['trigger-metadata-base64'] }}",
+                    post,
+                )
+
+    def test_review_contract_requires_stable_finding_correlation(self):
+        finding_schema = REVIEW_SCHEMA["properties"]["comments"]["items"]
+
+        self.assertIn("finding_key", finding_schema["required"])
+        self.assertIn("prior_finding_id", finding_schema["required"])
+        self.assertEqual(
+            finding_schema["properties"]["prior_finding_id"]["pattern"],
+            "^(|arf_v1_[a-z2-7]{26})$",
+        )
+        self.assertIn(
+            ".ai-review-context/prior-findings.json",
+            REVIEW_OUTPUT,
+        )
+        self.assertIn(
+            "Do not include a",
+            REVIEW_OUTPUT,
+        )
+        self.assertIn(
+            "line number, commit SHA, run ID, severity",
+            REVIEW_OUTPUT,
         )
 
 

@@ -2,6 +2,8 @@
 
 set -euo pipefail
 
+: "${REVIEWER:?REVIEWER must be set}"
+
 context_dir="${GITHUB_WORKSPACE}/.ai-review-context"
 if [[ -e "$context_dir" ]]; then
   echo "::error::The trusted base contains the reserved review context path."
@@ -59,4 +61,12 @@ if [[ "$diff_file_count" != "$expected_file_count" ]]; then
 fi
 
 verify_current_head
+
+python3 \
+  "${GITHUB_WORKSPACE}/.ai-review-toolkit/scripts/load_ai_review_findings.py" \
+  --repository "$GITHUB_REPOSITORY" \
+  --pull-request-number "$PR_NUMBER" \
+  --reviewer "$REVIEWER" \
+  --output "$context_dir/prior-findings.json"
+
 rm "$context_dir/pr.raw.json"

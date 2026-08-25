@@ -10,6 +10,13 @@ import urllib.parse
 from pathlib import Path
 from typing import Any
 
+from ai_review_telemetry import (
+    TelemetryError,
+    require_repository_id,
+    require_timestamp,
+    stable_identifier,
+)
+
 
 REVIEW_COMMAND = "/ai review"
 REVIEW_COMMAND_PATTERN = re.compile(
@@ -153,6 +160,98 @@ def require_sha(value: Any, description: str) -> str:
     return sha
 
 
+def trigger_metadata(
+    event_name: str,
+    event: dict[str, Any],
+    pull_request: dict[str, Any],
+    *,
+    number: int,
+    base_sha: str,
+    head_sha: str,
+) -> dict[str, str]:
+    action = event.get("action")
+    if not isinstance(action, str) or not action:
+        raise ReviewResolutionError("GitHub event has no action")
+
+    metadata = {
+        "event_name": event_name,
+        "event_action": action,
+        "event_timestamp": "",
+        "event_base_sha": base_sha,
+        "event_head_sha": head_sha,
+        "before_sha": "",
+        "after_sha": "",
+        "actor": require_environment("GITHUB_ACTOR"),
+        "command_comment_id": "",
+    }
+    if event_name == "pull_request_target":
+        event_pull_request = event.get("pull_request")
+        if not isinstance(event_pull_request, dict):
+            raise ReviewResolutionError(
+                "pull_request_target event has no pull request"
+            )
+        event_base = event_pull_request.get("base")
+        event_head = event_pull_request.get("head")
+        if isinstance(event_base, dict) and event_base.get("sha") is not None:
+            metadata["event_base_sha"] = require_sha(
+                event_base.get("sha"),
+                "event base SHA",
+            )
+        if isinstance(event_head, dict) and event_head.get("sha") is not None:
+            metadata["event_head_sha"] = require_sha(
+                event_head.get("sha"),
+                "event head SHA",
+            )
+        timestamp = (
+            event_pull_request.get("created_at")
+            if action == "opened"
+            else event_pull_request.get("updated_at")
+        )
+        if timestamp is None:
+            timestamp = (
+                pull_request.get("created_at")
+                if action == "opened"
+                else pull_request.get("updated_at")
+            )
+        before = event.get("before")
+        after = event.get("after")
+        if before is not None:
+            metadata["before_sha"] = require_sha(before, "before SHA")
+        if after is not None:
+            metadata["after_sha"] = require_sha(after, "after SHA")
+    else:
+        comment = event.get("comment")
+        if not isinstance(comment, dict):
+            raise ReviewResolutionError("review command has no comment")
+        timestamp = comment.get("created_at")
+        comment_id = comment.get("node_id", comment.get("id"))
+        if isinstance(comment_id, int):
+            comment_id = str(comment_id)
+        if not isinstance(comment_id, str) or not comment_id:
+            raise ReviewResolutionError("review command has no comment ID")
+        metadata["command_comment_id"] = comment_id
+
+    try:
+        metadata["event_timestamp"] = require_timestamp(
+            timestamp,
+            "event timestamp",
+        )
+        repository_id = require_repository_id(
+            require_environment("GITHUB_REPOSITORY_ID")
+        )
+    except TelemetryError as error:
+        raise ReviewResolutionError(str(error)) from error
+    trigger_id, _digest = stable_identifier(
+        "art",
+        {
+            "repository_id": repository_id,
+            "pull_request_number": number,
+            **metadata,
+        },
+    )
+    return {"trigger_id": trigger_id, **metadata}
+
+
 def resolve_review(
     event_name: str,
     event: dict[str, Any],
@@ -222,6 +321,21 @@ def resolve_review(
         "review-guidance-base64": base64.b64encode(
             review_guidance.encode("utf-8")
         ).decode("ascii"),
+        "trigger-metadata-base64": base64.b64encode(
+            json.dumps(
+                trigger_metadata(
+                    event_name,
+                    event,
+                    pull_request,
+                    number=number,
+                    base_sha=base_sha,
+                    head_sha=head_sha,
+                ),
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        ).decode("ascii"),
     }
 
 
@@ -233,6 +347,7 @@ def write_outputs(outputs: dict[str, str] | None) -> None:
         "base-sha": "",
         "head-sha": "",
         "review-guidance-base64": "",
+        "trigger-metadata-base64": "",
     }
     with output_path.open("a", encoding="utf-8") as output_file:
         for name, value in resolved.items():
