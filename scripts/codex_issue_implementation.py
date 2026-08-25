@@ -1728,16 +1728,7 @@ def validate_work_items_bundle(value: Any) -> dict[str, Any]:
         value["configuration"]
     )
     trusted_configuration = reconciliation_configuration_from_environment()
-    source_event = require_environment("SOURCE_EVENT")
-    configuration = (
-        bundled_configuration
-        if source_event == "workflow_dispatch"
-        else trusted_configuration
-    )
-    if (
-        source_event != "workflow_dispatch"
-        and bundled_configuration != trusted_configuration
-    ):
+    if bundled_configuration != trusted_configuration:
         raise ImplementationError(
             "work items bundle configuration does not match the trusted "
             "reconciliation workflow"
@@ -1747,7 +1738,6 @@ def validate_work_items_bundle(value: Any) -> dict[str, Any]:
         "work_scope": expected_scope,
         "source": expected_source,
         "matrix": matrix,
-        "configuration": configuration,
     }
 
 
@@ -1970,21 +1960,12 @@ def validate_work_items_command(bundle_path: Path) -> None:
     bundle = validate_work_items_bundle(
         read_json(bundle_path, "work items bundle")
     )
-    configuration = bundle["configuration"]
     matrix = bundle["matrix"]
     write_output(
         "matrix",
         json.dumps(matrix, separators=(",", ":")),
     )
     write_output("count", str(len(matrix["include"])))
-    write_output("environment_name", configuration["environment_name"])
-    write_output("no_pr_label", configuration["no_pr_label"])
-    write_output("model", configuration["model"])
-    write_output("reasoning_effort", configuration["reasoning_effort"])
-    write_output(
-        "allow_workflow_changes",
-        str(configuration["allow_workflow_changes"]).lower(),
-    )
 
 
 def validate_git_branch(branch: str) -> None:

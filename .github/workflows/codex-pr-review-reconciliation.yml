@@ -59,15 +59,9 @@ jobs:
       actions: read
       contents: read
     outputs:
-      allow_workflow_changes: >-
-        ${{ steps.validate.outputs.allow_workflow_changes }}
       count: ${{ steps.validate.outputs.count }}
-      environment_name: ${{ steps.validate.outputs.environment_name }}
       matrix: ${{ steps.validate.outputs.matrix }}
-      model: ${{ steps.validate.outputs.model }}
-      no_pr_label: ${{ steps.validate.outputs.no_pr_label }}
       publication_actor: ${{ steps.publisher.outputs.publish_actor }}
-      reasoning_effort: ${{ steps.validate.outputs.reasoning_effort }}
 
     steps:
       - name: Load trusted reconciliation toolkit
@@ -104,7 +98,6 @@ jobs:
                 env.DEFAULT_REASONING_EFFORT }}
           NO_PR_LABEL: >-
             ${{ inputs['no-pr-label'] || env.DEFAULT_NO_PR_LABEL }}
-          SOURCE_EVENT: ${{ github.event.workflow_run.event }}
           SOURCE_REPOSITORY_ID: ${{ github.repository_id }}
           SOURCE_RUN_ATTEMPT: >-
             ${{ github.event.workflow_run.run_attempt }}
@@ -156,10 +149,13 @@ jobs:
       work-key: ${{ matrix.work_key }}
       publication-actor: >-
         ${{ needs.load.outputs.publication_actor }}
-      environment-name: ${{ needs.load.outputs.environment_name }}
-      no-pr-label: ${{ needs.load.outputs.no_pr_label }}
-      model: ${{ needs.load.outputs.model }}
-      reasoning-effort: ${{ needs.load.outputs.reasoning_effort }}
+      environment-name: >-
+        ${{ inputs['environment-name'] || 'ai-pr-review-runtime' }}
+      no-pr-label: >-
+        ${{ inputs['no-pr-label'] || 'codex:no-pr' }}
+      model: ${{ inputs['model'] || 'openai.gpt-5.6-sol' }}
+      reasoning-effort: >-
+        ${{ inputs['reasoning-effort'] || 'xhigh' }}
       allow-workflow-changes: >-
-        ${{ needs.load.outputs.allow_workflow_changes == 'true' }}
+        ${{ inputs['allow-workflow-changes'] || false }}
     secrets: inherit

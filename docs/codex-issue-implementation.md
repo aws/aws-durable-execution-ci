@@ -239,10 +239,9 @@ intake and reconciliation callers:
       allow-workflow-changes: false
 ```
 
-For non-manual events, reconciliation rejects an artifact whose configuration
-does not match the trusted reconciliation inputs. A manual
-`workflow_dispatch` may preserve its validated intake configuration because
-starting that event already requires Actions write access.
+Reconciliation rejects an artifact whose configuration does not match the
+trusted reconciliation inputs. Pass identical configuration to the intake and
+reconciliation callers, including for manual dispatches.
 
 ## Repository setup
 

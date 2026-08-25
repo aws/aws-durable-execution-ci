@@ -898,7 +898,6 @@ class EventSelectionTest(unittest.TestCase):
         with patch.dict(
             os.environ,
             environment(
-                SOURCE_EVENT="pull_request_review_comment",
                 SOURCE_REPOSITORY_ID="1234",
                 SOURCE_RUN_ATTEMPT="1",
                 SOURCE_RUN_ID="5678",
@@ -908,14 +907,21 @@ class EventSelectionTest(unittest.TestCase):
         ):
             validated = IMPLEMENTATION.validate_work_items_bundle(bundle)
 
-        self.assertEqual(validated, bundle)
+        self.assertEqual(
+            validated,
+            {
+                "version": bundle["version"],
+                "work_scope": bundle["work_scope"],
+                "source": bundle["source"],
+                "matrix": bundle["matrix"],
+            },
+        )
 
         changed_source = json.loads(json.dumps(bundle))
         changed_source["source"]["run_id"] = 9999
         with patch.dict(
             os.environ,
             environment(
-                SOURCE_EVENT="pull_request_review_comment",
                 SOURCE_REPOSITORY_ID="1234",
                 SOURCE_RUN_ATTEMPT="1",
                 SOURCE_RUN_ID="5678",
@@ -936,7 +942,6 @@ class EventSelectionTest(unittest.TestCase):
         with patch.dict(
             os.environ,
             environment(
-                SOURCE_EVENT="pull_request_review_comment",
                 SOURCE_REPOSITORY_ID="1234",
                 SOURCE_RUN_ATTEMPT="1",
                 SOURCE_RUN_ID="5678",
@@ -955,7 +960,6 @@ class EventSelectionTest(unittest.TestCase):
         with patch.dict(
             os.environ,
             environment(
-                SOURCE_EVENT="pull_request_review_comment",
                 SOURCE_REPOSITORY_ID="1234",
                 SOURCE_RUN_ATTEMPT="1",
                 SOURCE_RUN_ID="5678",
@@ -981,7 +985,6 @@ class EventSelectionTest(unittest.TestCase):
         with patch.dict(
             os.environ,
             environment(
-                SOURCE_EVENT="pull_request_review_comment",
                 SOURCE_REPOSITORY_ID="1234",
                 SOURCE_RUN_ATTEMPT="1",
                 SOURCE_RUN_ID="5678",
@@ -995,7 +998,7 @@ class EventSelectionTest(unittest.TestCase):
             ):
                 IMPLEMENTATION.validate_work_items_bundle(wrong_scope)
 
-    def test_manual_run_can_preserve_validated_runtime_configuration(self):
+    def test_manual_run_must_match_trusted_runtime_configuration(self):
         bundle = {
             "version": 1,
             "work_scope": "review",
@@ -1017,7 +1020,6 @@ class EventSelectionTest(unittest.TestCase):
         with patch.dict(
             os.environ,
             environment(
-                SOURCE_EVENT="workflow_dispatch",
                 SOURCE_REPOSITORY_ID="1234",
                 SOURCE_RUN_ATTEMPT="1",
                 SOURCE_RUN_ID="5678",
@@ -1025,9 +1027,11 @@ class EventSelectionTest(unittest.TestCase):
             ),
             clear=True,
         ):
-            validated = IMPLEMENTATION.validate_work_items_bundle(bundle)
-
-        self.assertEqual(validated["configuration"], bundle["configuration"])
+            with self.assertRaisesRegex(
+                IMPLEMENTATION.ImplementationError,
+                "trusted reconciliation workflow",
+            ):
+                IMPLEMENTATION.validate_work_items_bundle(bundle)
 
     def test_work_items_validation_emits_reconciliation_outputs(self):
         bundle = {
@@ -1066,7 +1070,6 @@ class EventSelectionTest(unittest.TestCase):
                 os.environ,
                 environment(
                     GITHUB_OUTPUT=str(output_path),
-                    SOURCE_EVENT="pull_request_review_comment",
                     SOURCE_REPOSITORY_ID="1234",
                     SOURCE_RUN_ATTEMPT="1",
                     SOURCE_RUN_ID="5678",
@@ -1085,14 +1088,7 @@ class EventSelectionTest(unittest.TestCase):
 
         self.assertEqual(json.loads(outputs["matrix"]), bundle["matrix"])
         self.assertEqual(outputs["count"], "1")
-        self.assertEqual(
-            outputs["environment_name"],
-            "ai-pr-review-runtime",
-        )
-        self.assertEqual(outputs["no_pr_label"], "codex:no-pr")
-        self.assertEqual(outputs["model"], "openai.gpt-5.6-sol")
-        self.assertEqual(outputs["reasoning_effort"], "xhigh")
-        self.assertEqual(outputs["allow_workflow_changes"], "false")
+        self.assertEqual(set(outputs), {"matrix", "count"})
 
     def test_issue_eligibility_honors_exclusion_case_insensitively(self):
         candidate = issue()
@@ -5228,8 +5224,13 @@ class WorkflowPolicyTest(unittest.TestCase):
             review_address.group(1),
         )
         self.assertIn(
-            "environment-name: "
-            "${{ needs.load.outputs.environment_name }}",
+            "environment-name: >-\n"
+            "        ${{ inputs['environment-name'] || "
+            "'ai-pr-review-runtime' }}",
+            review_address.group(1),
+        )
+        self.assertNotIn(
+            "needs.load.outputs.environment_name",
             review_address.group(1),
         )
         self.assertIn(
@@ -5311,9 +5312,15 @@ class WorkflowPolicyTest(unittest.TestCase):
         )
         self.assertIn("validate-work-items", load.group(1))
         self.assertIn("SOURCE_WORK_SCOPE: review", load.group(1))
-        self.assertIn(
-            "SOURCE_EVENT: ${{ github.event.workflow_run.event }}",
-            load.group(1),
+        self.assertNotIn("SOURCE_EVENT:", load.group(1))
+        self.assertNotIn(
+            "outputs.environment_name",
+            PR_RECONCILIATION_WORKFLOW,
+        )
+        self.assertNotIn("outputs.model", PR_RECONCILIATION_WORKFLOW)
+        self.assertNotIn(
+            "outputs.reasoning_effort",
+            PR_RECONCILIATION_WORKFLOW,
         )
         self.assertIn(
             "repository: ${{ job.workflow_repository }}",
