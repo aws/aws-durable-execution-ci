@@ -172,8 +172,9 @@ still be published from its original revision and opened against the current
 default branch. A later run can recover a workflow-owned branch when the push
 succeeded but pull request creation did not.
 
-When exactly one linked pull request closes the issue, the workflow can update
-that pull request instead of creating another. Fork branches are never
+When an open pull request already closes the issue, this workflow does not
+update it or create another pull request. Use the PR review-address workflow
+for explicit review feedback on that pull request. Fork branches are never
 updated. When multiple open pull requests close the issue, the workflow posts
 a deduplicated issue comment rather than choosing one.
 
