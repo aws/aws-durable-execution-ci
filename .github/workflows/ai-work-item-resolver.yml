@@ -1,4 +1,4 @@
-name: Codex Work Item Resolver
+name: AI Work Item Resolver
 
 on:
   workflow_call:
