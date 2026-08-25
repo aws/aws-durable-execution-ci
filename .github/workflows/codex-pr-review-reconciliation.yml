@@ -1,0 +1,165 @@
+name: Codex PR Review Reconciliation
+
+on:
+  workflow_run:
+    workflows:
+      - Codex PR Review Address
+    types: [completed]
+  workflow_call:
+    inputs:
+      environment-name:
+        description: GitHub environment used for the model job
+        required: false
+        type: string
+        default: ai-pr-review-runtime
+      no-pr-label:
+        description: Label used by the shared Codex worker
+        required: false
+        type: string
+        default: codex:no-pr
+      model:
+        description: Codex model ID to use through Amazon Bedrock
+        required: false
+        type: string
+        default: openai.gpt-5.6-sol
+      reasoning-effort:
+        description: Codex reasoning effort
+        required: false
+        type: string
+        default: xhigh
+      allow-workflow-changes:
+        description: Allow Codex to change files under .github/workflows
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      BEDROCK_ROLE_ARN:
+        description: IAM role used to invoke Codex on Amazon Bedrock
+        required: false
+      CODEX_WORKFLOW_PUSH_TOKEN:
+        description: Token allowed to push changes under .github/workflows
+        required: false
+
+permissions: {}
+
+env:
+  DEFAULT_NO_PR_LABEL: codex:no-pr
+  DEFAULT_CODEX_MODEL: openai.gpt-5.6-sol
+  DEFAULT_REASONING_EFFORT: xhigh
+
+jobs:
+  load:
+    name: Validate authorized PR review work
+    if: >-
+      github.event_name == 'workflow_run' &&
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      allow_workflow_changes: >-
+        ${{ steps.validate.outputs.allow_workflow_changes }}
+      count: ${{ steps.validate.outputs.count }}
+      environment_name: ${{ steps.validate.outputs.environment_name }}
+      matrix: ${{ steps.validate.outputs.matrix }}
+      model: ${{ steps.validate.outputs.model }}
+      no_pr_label: ${{ steps.validate.outputs.no_pr_label }}
+      publication_actor: ${{ steps.publisher.outputs.publish_actor }}
+      reasoning_effort: ${{ steps.validate.outputs.reasoning_effort }}
+
+    steps:
+      - name: Load trusted reconciliation toolkit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          sparse-checkout: scripts/codex_issue_implementation.py
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Download authorized PR review work
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: >-
+            codex-review-work-items-${{ github.event.workflow_run.run_attempt }}
+          path: ${{ runner.temp }}/codex-pr-review-reconciliation
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ github.event.workflow_run.id }}
+
+      - name: Validate authorized PR review work
+        id: validate
+        env:
+          ALLOW_WORKFLOW_CHANGES: >-
+            ${{ inputs['allow-workflow-changes'] || false }}
+          CODEX_ENVIRONMENT_NAME: >-
+            ${{ inputs['environment-name'] ||
+                'ai-pr-review-runtime' }}
+          CODEX_MODEL: >-
+            ${{ inputs['model'] || env.DEFAULT_CODEX_MODEL }}
+          CODEX_REASONING_EFFORT: >-
+            ${{ inputs['reasoning-effort'] ||
+                env.DEFAULT_REASONING_EFFORT }}
+          NO_PR_LABEL: >-
+            ${{ inputs['no-pr-label'] || env.DEFAULT_NO_PR_LABEL }}
+          SOURCE_EVENT: ${{ github.event.workflow_run.event }}
+          SOURCE_REPOSITORY_ID: ${{ github.repository_id }}
+          SOURCE_RUN_ATTEMPT: >-
+            ${{ github.event.workflow_run.run_attempt }}
+          SOURCE_RUN_ID: ${{ github.event.workflow_run.id }}
+          SOURCE_WORK_SCOPE: review
+        run: >-
+          python3 scripts/codex_issue_implementation.py
+          validate-work-items
+          "${RUNNER_TEMP}/codex-pr-review-reconciliation/codex-work-items.json"
+
+      - name: Resolve publication actor
+        id: publisher
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          publish_actor="$(
+            gh api graphql \
+              --field query='query { viewer { login } }' \
+              --jq '.data.viewer.login'
+          )"
+          if [[ ! "$publish_actor" =~ ^[A-Za-z0-9-]+(\[bot\])?$ ]]; then
+            echo "::error::Could not resolve the automatic token actor."
+            exit 1
+          fi
+          echo "publish_actor=$publish_actor" >> "$GITHUB_OUTPUT"
+
+  address:
+    name: Address ${{ matrix.work_key }}
+    needs: load
+    if: >-
+      needs.load.result == 'success' &&
+      needs.load.outputs.count != '0'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.load.outputs.matrix) }}
+    permissions:
+      actions: read
+      contents: write
+      id-token: write
+      issues: write
+      pull-requests: write
+    uses: ./.github/workflows/codex-issue-worker.yml
+    with:
+      issue-number: ${{ matrix.issue_number }}
+      pull-request-number: ${{ matrix.pull_request_number }}
+      address-only: ${{ matrix.address_only }}
+      work-key: ${{ matrix.work_key }}
+      publication-actor: >-
+        ${{ needs.load.outputs.publication_actor }}
+      environment-name: ${{ needs.load.outputs.environment_name }}
+      no-pr-label: ${{ needs.load.outputs.no_pr_label }}
+      model: ${{ needs.load.outputs.model }}
+      reasoning-effort: ${{ needs.load.outputs.reasoning_effort }}
+      allow-workflow-changes: >-
+        ${{ needs.load.outputs.allow_workflow_changes == 'true' }}
+    secrets: inherit

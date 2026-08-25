@@ -1,14 +1,16 @@
-name: Codex Issue Implementation
+name: Codex PR Review Address
 
 on:
   issue_comment:
     types: [created]
+  pull_request_review_comment:
+    types: [created]
   schedule:
-    - cron: "17 3 * * *"
+    - cron: "29 3 * * *"
   workflow_dispatch:
     inputs:
-      issue-number:
-        description: Optional authorized issue number to implement
+      pull-request-number:
+        description: Optional pull request number with authorized feedback
         required: false
         type: string
         default: ""
@@ -18,12 +20,12 @@ on:
         type: string
         default: ai-pr-review-runtime
       no-pr-label:
-        description: Label applied when no pull request is required
+        description: Label used by the shared Codex worker
         required: false
         type: string
         default: codex:no-pr
-      max-issues:
-        description: Maximum discovered issues processed per run
+      max-pull-requests:
+        description: Maximum discovered pull requests processed per run
         required: false
         type: number
         default: 3
@@ -52,8 +54,8 @@ on:
         default: false
   workflow_call:
     inputs:
-      issue-number:
-        description: Optional authorized issue number to implement
+      pull-request-number:
+        description: Optional pull request number with authorized feedback
         required: false
         type: string
         default: ""
@@ -63,12 +65,12 @@ on:
         type: string
         default: ai-pr-review-runtime
       no-pr-label:
-        description: Label applied when no pull request is required
+        description: Label used by the shared Codex worker
         required: false
         type: string
         default: codex:no-pr
-      max-issues:
-        description: Maximum discovered issues processed per run
+      max-pull-requests:
+        description: Maximum discovered pull requests processed per run
         required: false
         type: number
         default: 3
@@ -87,34 +89,28 @@ on:
         required: false
         type: boolean
         default: false
-    secrets:
-      BEDROCK_ROLE_ARN:
-        description: IAM role used to invoke Codex on Amazon Bedrock
-        required: false
-      CODEX_WORKFLOW_PUSH_TOKEN:
-        description: Token allowed to push changes under .github/workflows
-        required: false
 
 permissions: {}
 
 jobs:
   resolve:
-    name: Resolve issue implementation
+    name: Resolve PR review feedback
     permissions:
       contents: read
       issues: read
       pull-requests: read
     uses: ./.github/workflows/codex-work-item-resolver.yml
     with:
-      work-scope: implementation
-      requested-issue-number: ${{ inputs['issue-number'] || '' }}
+      work-scope: review
+      requested-pull-request-number: >-
+        ${{ inputs['pull-request-number'] || '' }}
       environment-name: >-
         ${{ inputs['environment-name'] || 'ai-pr-review-runtime' }}
       no-pr-label: >-
         ${{ inputs['no-pr-label'] || 'codex:no-pr' }}
       max-items: >-
         ${{ fromJSON(
-            format('{0}', inputs['max-issues']) ||
+            format('{0}', inputs['max-pull-requests']) ||
             '3'
           ) }}
       model: ${{ inputs['model'] || 'openai.gpt-5.6-sol' }}
@@ -122,35 +118,4 @@ jobs:
         ${{ inputs['reasoning-effort'] || 'xhigh' }}
       allow-workflow-changes: >-
         ${{ inputs['allow-workflow-changes'] || false }}
-      upload-work-items: false
-
-  implement:
-    name: Implement ${{ matrix.work_key }}
-    needs: resolve
-    if: needs.resolve.outputs.count != '0'
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.resolve.outputs.matrix) }}
-    permissions:
-      contents: write
-      id-token: write
-      issues: write
-      pull-requests: write
-    uses: ./.github/workflows/codex-issue-worker.yml
-    with:
-      issue-number: ${{ matrix.issue_number }}
-      pull-request-number: ${{ matrix.pull_request_number }}
-      address-only: ${{ matrix.address_only }}
-      work-key: ${{ matrix.work_key }}
-      publication-actor: >-
-        ${{ needs.resolve.outputs.publication_actor }}
-      environment-name: >-
-        ${{ inputs['environment-name'] || 'ai-pr-review-runtime' }}
-      no-pr-label: >-
-        ${{ inputs['no-pr-label'] || 'codex:no-pr' }}
-      model: ${{ inputs['model'] || 'openai.gpt-5.6-sol' }}
-      reasoning-effort: >-
-        ${{ inputs['reasoning-effort'] || 'xhigh' }}
-      allow-workflow-changes: >-
-        ${{ inputs['allow-workflow-changes'] || false }}
-    secrets: inherit
+      upload-work-items: true
