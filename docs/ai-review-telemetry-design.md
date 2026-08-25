@@ -380,7 +380,7 @@ reject or explicitly support.
 | `finding_published` | finding/occurrence/review IDs, reviewer, severity, category, path/lines, comment ID, suggestion offered |
 | `finding_repeated` | finding ID, previous and current occurrence IDs and head SHAs |
 | `finding_resolved` | finding ID, last occurrence, resolved head SHA, corrective commit SHA, detection method |
-| `finding_verdict_recorded` | finding ID, outcome, actor, reviewed head SHA, command comment ID |
+| `finding_verdict_recorded` | finding ID, verdict, actor, reviewed head SHA, command comment ID |
 | `suggestion_applied` | finding/occurrence IDs, suggestion digest, applying commit SHA and timestamp, detection method |
 | `human_review_submitted` | review ID, actor, state, submitted timestamp, associated head SHA |
 | `human_review_dismissed` | review ID, actor, dismissed timestamp |
