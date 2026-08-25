@@ -34,15 +34,12 @@ name: Codex Issue Implementation
 on:
   issue_comment:
     types: [created]
-  schedule:
-    - cron: "17 3 * * *"
   workflow_dispatch:
     inputs:
       issue-number:
-        description: Optional authorized issue number to implement
-        required: false
+        description: Authorized issue number to implement
+        required: true
         type: string
-        default: ""
 
 permissions: {}
 
@@ -78,15 +75,12 @@ on:
     types: [created]
   pull_request_review_comment:
     types: [created]
-  schedule:
-    - cron: "29 3 * * *"
   workflow_dispatch:
     inputs:
       pull-request-number:
-        description: Optional pull request number with authorized feedback
-        required: false
+        description: Pull request number with authorized feedback
+        required: true
         type: string
-        default: ""
 
 permissions: {}
 
@@ -141,8 +135,12 @@ the validated work item. Repository checkout state does not determine
 environment eligibility.
 
 A reusable workflow does not add event triggers to its caller. Each consuming
-repository must declare the comment, review-comment, schedule, manual, and
-`workflow_run` events shown above.
+repository must declare the comment, review-comment, manual, and `workflow_run`
+events shown above.
+
+There is no scheduled recovery scan. Use GitHub's rerun action for missed or
+failed event runs. A manual dispatch must name the specific issue or pull
+request to reconcile.
 
 ## Commands
 
@@ -223,13 +221,11 @@ The reusable workflows support these common inputs:
 
 Issue implementation also accepts:
 
-- `issue-number`, an optional explicit issue for a manual run
-- `max-issues`, default 3 and limited to 10
+- `issue-number`, the explicit issue required for a manual run
 
 PR review intake also accepts:
 
-- `pull-request-number`, an optional explicit PR for a manual run
-- `max-pull-requests`, default 3 and limited to 10
+- `pull-request-number`, the explicit PR required for a manual run
 
 When customizing PR review configuration, pass the same values to both the
 intake and reconciliation callers:
@@ -247,12 +243,6 @@ For non-manual events, reconciliation rejects an artifact whose configuration
 does not match the trusted reconciliation inputs. A manual
 `workflow_dispatch` may preserve its validated intake configuration because
 starting that event already requires Actions write access.
-
-Issue and PR discovery use separate scoped cursors. Scheduled and manual issue
-discovery scans only implementation work. Scheduled and manual PR discovery
-scans only pending address commands. Each run evaluates at most 25 new
-candidates and persists the last evaluated number in the Actions cache so a
-later run can continue through older inactive items.
 
 ## Repository setup
 
@@ -285,8 +275,8 @@ pull requests.
 The issue implementation workflow creates the configured no-PR label when it
 needs to report that an issue requires no repository change. Creating the label
 in advance is recommended so its color and description follow repository
-conventions. Issues carrying that label are excluded from scheduled issue
-discovery.
+conventions. Remove the label before explicitly asking Codex to reconsider the
+issue.
 
 ## Execution and publication
 

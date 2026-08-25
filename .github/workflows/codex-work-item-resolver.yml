@@ -27,11 +27,6 @@ on:
         required: false
         type: string
         default: codex:no-pr
-      max-items:
-        description: Maximum discovered work items processed per run
-        required: false
-        type: number
-        default: 3
       model:
         description: Codex model ID to use through Amazon Bedrock
         required: false
@@ -106,21 +101,6 @@ jobs:
           fi
           echo "publish_actor=$publish_actor" >> "$GITHUB_OUTPUT"
 
-      - name: Restore discovery cursor
-        if: >-
-          (github.event_name == 'schedule' ||
-            github.event_name == 'workflow_dispatch') &&
-          inputs['requested-issue-number'] == '' &&
-          inputs['requested-pull-request-number'] == ''
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: >-
-            ${{ runner.temp }}/codex-${{ inputs['work-scope'] }}-discovery
-          key: >-
-            codex-${{ inputs['work-scope'] }}-discovery-${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: |
-            codex-${{ inputs['work-scope'] }}-discovery-${{ github.repository_id }}-
-
       - name: Resolve work items
         id: resolve
         env:
@@ -130,10 +110,7 @@ jobs:
           CODEX_PUBLISH_ACTOR: >-
             ${{ steps.publisher.outputs.publish_actor }}
           CODEX_REASONING_EFFORT: ${{ inputs['reasoning-effort'] }}
-          DISCOVERY_CURSOR_PATH: >-
-            ${{ runner.temp }}/codex-${{ inputs['work-scope'] }}-discovery/cursor.json
           GH_TOKEN: ${{ github.token }}
-          MAX_ISSUES: ${{ inputs['max-items'] }}
           NO_PR_LABEL: ${{ inputs['no-pr-label'] }}
           REQUESTED_ISSUE_NUMBER: >-
             ${{ inputs['requested-issue-number'] }}
@@ -146,21 +123,6 @@ jobs:
         run: >-
           python3 scripts/codex_issue_implementation.py
           resolve "$GITHUB_EVENT_PATH"
-
-      - name: Save discovery cursor
-        if: >-
-          always() &&
-          steps.resolve.outcome == 'success' &&
-          (github.event_name == 'schedule' ||
-            github.event_name == 'workflow_dispatch') &&
-          inputs['requested-issue-number'] == '' &&
-          inputs['requested-pull-request-number'] == ''
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: >-
-            ${{ runner.temp }}/codex-${{ inputs['work-scope'] }}-discovery
-          key: >-
-            codex-${{ inputs['work-scope'] }}-discovery-${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Upload authorized work items
         if: >-

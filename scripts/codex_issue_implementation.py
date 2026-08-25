@@ -45,13 +45,12 @@ AUTOMATION_TRAILER = "Codex-Automation: issue-implementation"
 ISSUE_SNAPSHOT_TRAILER = "Codex-Issue-Snapshot"
 MAX_CONTEXT_BYTES = 1_000_000
 MAX_AUTOMATION_COMMIT_CHAIN = 100
-MAX_DISCOVERY_CANDIDATES_PER_RUN = 25
-MAX_ISSUES_PER_RUN = 10
 MAX_PATCH_BYTES = 5_000_000
 MAX_REVIEW_COMMENTS = 1_000
 MAX_STAGED_BLOB_BYTES = 5_000_000
 MAX_STAGED_CONTENT_BYTES = 5_000_000
 MAX_TRUSTED_INSTRUCTION_BYTES = 500_000
+MAX_WORK_ITEMS_PER_RUN = 10
 WORK_ITEMS_VERSION = 1
 REASONING_EFFORTS = frozenset(
     ("none", "minimal", "low", "medium", "high", "xhigh", "max")
@@ -1519,7 +1518,7 @@ def validate_work_item_matrix(
     if not isinstance(value, dict) or set(value) != {"include"}:
         raise ImplementationError("work item matrix is invalid")
     include = value["include"]
-    if not isinstance(include, list) or len(include) > MAX_ISSUES_PER_RUN:
+    if not isinstance(include, list) or len(include) > MAX_WORK_ITEMS_PER_RUN:
         raise ImplementationError("work item matrix is invalid")
 
     validated: list[dict[str, Any]] = []
@@ -1767,197 +1766,6 @@ def issue_state_work_item(
     return work_item("pull_request", pull_request["number"])
 
 
-def read_discovery_cursor(
-    path: Path,
-    repository: str,
-) -> int:
-    if not path.exists():
-        return 0
-    cursor = read_json(path, "discovery cursor")
-    if (
-        not isinstance(cursor, dict)
-        or cursor.get("version") != 1
-        or cursor.get("repository") != repository
-        or type(cursor.get("after_number")) is not int
-        or cursor["after_number"] < 0
-    ):
-        raise ImplementationError("discovery cursor is invalid")
-    return cursor["after_number"]
-
-
-def write_discovery_cursor(
-    path: Path,
-    repository: str,
-    after_number: int,
-) -> None:
-    if type(after_number) is not int or after_number < 0:
-        raise ImplementationError("discovery cursor is invalid")
-    write_json(
-        path,
-        {
-            "version": 1,
-            "repository": repository,
-            "after_number": after_number,
-        },
-    )
-
-
-def configured_discovery_cursor_path() -> Path:
-    value = require_environment("DISCOVERY_CURSOR_PATH")
-    path = Path(value)
-    if not path.is_absolute():
-        raise ImplementationError(
-            "DISCOVERY_CURSOR_PATH must be an absolute path"
-        )
-    return path
-
-
-def discover_work_items(
-    repository: str,
-    excluded_label: str,
-    maximum: int,
-    actor: str,
-    cursor_path: Path | None = None,
-    scope: str = "all",
-) -> list[dict[str, Any]]:
-    if scope not in WORK_SCOPES:
-        raise ImplementationError("work discovery scope is invalid")
-    work_items: list[dict[str, Any]] = []
-    seen: set[tuple[str, int]] = set()
-    after_number = (
-        read_discovery_cursor(cursor_path, repository)
-        if cursor_path is not None
-        else 0
-    )
-    scanned_candidates = 0
-    page = 1
-    while True:
-        response = run_gh_json(
-            [
-                f"repos/{repository}/issues?state=open"
-                f"&sort=created&direction=asc&per_page=100&page={page}"
-            ]
-        )
-        if not isinstance(response, list):
-            raise ImplementationError("GitHub returned an invalid issue list")
-        for candidate in response:
-            if (
-                not isinstance(candidate, dict)
-                or type(candidate.get("number")) is not int
-            ):
-                continue
-            number = candidate["number"]
-            if number <= after_number:
-                continue
-            if (
-                cursor_path is not None
-                and scanned_candidates
-                >= MAX_DISCOVERY_CANDIDATES_PER_RUN
-            ):
-                return work_items
-            scanned_candidates += 1
-            if "pull_request" in candidate:
-                if scope == "implementation":
-                    if cursor_path is not None:
-                        write_discovery_cursor(
-                            cursor_path,
-                            repository,
-                            number,
-                        )
-                    continue
-                state = prepare_pull_request_state(
-                    repository,
-                    actor,
-                    fetch_pull_request(repository, number),
-                )
-                if state["action"] != "address":
-                    if cursor_path is not None:
-                        write_discovery_cursor(
-                            cursor_path,
-                            repository,
-                            number,
-                        )
-                    continue
-                item = work_item("pull_request", number)
-            else:
-                state = prepare_issue_state(
-                    repository,
-                    excluded_label,
-                    actor,
-                    candidate,
-                )
-                if (
-                    scope == "implementation"
-                    and state["action"] == "address"
-                ) or (
-                    scope == "review"
-                    and state["action"] != "address"
-                ):
-                    if cursor_path is not None:
-                        write_discovery_cursor(
-                            cursor_path,
-                            repository,
-                            number,
-                        )
-                    continue
-                item = issue_state_work_item(state, number)
-            if state["action"] == "skip":
-                if cursor_path is not None:
-                    write_discovery_cursor(
-                        cursor_path,
-                        repository,
-                        number,
-                    )
-                continue
-            notification_marker = state_notification_marker(state)
-            if notification_marker is not None:
-                if item["kind"] != "issue":
-                    raise ImplementationError(
-                        "pull request work has an issue notification"
-                    )
-                if issue_comment_marker_exists(
-                    repository,
-                    number,
-                    notification_marker,
-                    actor,
-                ):
-                    if cursor_path is not None:
-                        write_discovery_cursor(
-                            cursor_path,
-                            repository,
-                            number,
-                        )
-                    continue
-            item_key = (item["kind"], item["number"])
-            if item_key in seen:
-                if cursor_path is not None:
-                    write_discovery_cursor(
-                        cursor_path,
-                        repository,
-                        number,
-                    )
-                continue
-            seen.add(item_key)
-            work_items.append(item)
-            if cursor_path is not None:
-                write_discovery_cursor(
-                    cursor_path,
-                    repository,
-                    number,
-                )
-            if len(work_items) == maximum:
-                return work_items
-        if len(response) < 100:
-            if cursor_path is not None:
-                write_discovery_cursor(
-                    cursor_path,
-                    repository,
-                    0,
-                )
-            return work_items
-        page += 1
-
-
 def resolve_issue_comment_event(
     repository: str,
     event: dict[str, Any],
@@ -2035,14 +1843,6 @@ def resolve_work_items(
     scope = work_scope()
     repository = repository_name()
     excluded_label = no_pr_label()
-    maximum = positive_integer(
-        os.environ.get("MAX_ISSUES", "").strip() or "3",
-        "MAX_ISSUES",
-    )
-    if maximum > MAX_ISSUES_PER_RUN:
-        raise ImplementationError(
-            f"MAX_ISSUES must not exceed {MAX_ISSUES_PER_RUN}"
-        )
 
     explicit_issue = os.environ.get("REQUESTED_ISSUE_NUMBER", "").strip()
     explicit_pull_request = os.environ.get(
@@ -2093,6 +1893,11 @@ def resolve_work_items(
             return []
         return [work_item("pull_request", pull_request_number)]
 
+    if event_name == "workflow_dispatch":
+        raise ImplementationError(
+            "manual runs must specify an issue or pull request number"
+        )
+
     if event_name == "issue_comment":
         items = resolve_issue_comment_event(repository, event)
         if (
@@ -2129,16 +1934,6 @@ def resolve_work_items(
         return resolve_review_event(
             repository,
             event,
-        )
-
-    if event_name in ("schedule", "workflow_dispatch", "workflow_call"):
-        return discover_work_items(
-            repository,
-            excluded_label,
-            maximum,
-            publication_actor(),
-            configured_discovery_cursor_path(),
-            scope,
         )
 
     return []

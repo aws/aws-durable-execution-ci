@@ -5,15 +5,12 @@ on:
     types: [created]
   pull_request_review_comment:
     types: [created]
-  schedule:
-    - cron: "29 3 * * *"
   workflow_dispatch:
     inputs:
       pull-request-number:
-        description: Optional pull request number with authorized feedback
-        required: false
+        description: Pull request number with authorized feedback
+        required: true
         type: string
-        default: ""
       environment-name:
         description: GitHub environment used for the model job
         required: false
@@ -24,11 +21,6 @@ on:
         required: false
         type: string
         default: codex:no-pr
-      max-pull-requests:
-        description: Maximum discovered pull requests processed per run
-        required: false
-        type: number
-        default: 3
       model:
         description: Codex model ID to use through Amazon Bedrock
         required: false
@@ -69,11 +61,6 @@ on:
         required: false
         type: string
         default: codex:no-pr
-      max-pull-requests:
-        description: Maximum discovered pull requests processed per run
-        required: false
-        type: number
-        default: 3
       model:
         description: Codex model ID to use through Amazon Bedrock
         required: false
@@ -108,11 +95,6 @@ jobs:
         ${{ inputs['environment-name'] || 'ai-pr-review-runtime' }}
       no-pr-label: >-
         ${{ inputs['no-pr-label'] || 'codex:no-pr' }}
-      max-items: >-
-        ${{ fromJSON(
-            format('{0}', inputs['max-pull-requests']) ||
-            '3'
-          ) }}
       model: ${{ inputs['model'] || 'openai.gpt-5.6-sol' }}
       reasoning-effort: >-
         ${{ inputs['reasoning-effort'] || 'xhigh' }}

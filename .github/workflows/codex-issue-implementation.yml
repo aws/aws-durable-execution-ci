@@ -3,15 +3,12 @@ name: Codex Issue Implementation
 on:
   issue_comment:
     types: [created]
-  schedule:
-    - cron: "17 3 * * *"
   workflow_dispatch:
     inputs:
       issue-number:
-        description: Optional authorized issue number to implement
-        required: false
+        description: Authorized issue number to implement
+        required: true
         type: string
-        default: ""
       environment-name:
         description: GitHub environment used for the model job
         required: false
@@ -22,11 +19,6 @@ on:
         required: false
         type: string
         default: codex:no-pr
-      max-issues:
-        description: Maximum discovered issues processed per run
-        required: false
-        type: number
-        default: 3
       model:
         description: Codex model ID to use through Amazon Bedrock
         required: false
@@ -67,11 +59,6 @@ on:
         required: false
         type: string
         default: codex:no-pr
-      max-issues:
-        description: Maximum discovered issues processed per run
-        required: false
-        type: number
-        default: 3
       model:
         description: Codex model ID to use through Amazon Bedrock
         required: false
@@ -112,11 +99,6 @@ jobs:
         ${{ inputs['environment-name'] || 'ai-pr-review-runtime' }}
       no-pr-label: >-
         ${{ inputs['no-pr-label'] || 'codex:no-pr' }}
-      max-items: >-
-        ${{ fromJSON(
-            format('{0}', inputs['max-issues']) ||
-            '3'
-          ) }}
       model: ${{ inputs['model'] || 'openai.gpt-5.6-sol' }}
       reasoning-effort: >-
         ${{ inputs['reasoning-effort'] || 'xhigh' }}
