@@ -7,8 +7,6 @@ on:
     types: [opened, reopened]
   discussion:
     types: [created]
-  release:
-    types: [published]
   workflow_call:
     inputs:
       environment-name:
