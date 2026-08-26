@@ -84,17 +84,33 @@ class FakeGitHub:
         self,
         issues: IssueList,
         timelines: TimelineMap,
+        repository_labels: IssueList | None = None,
         patch_failures: set[int] | None = None,
         add_label_failures: set[int] | None = None,
+        remove_label_failures: set[int] | None = None,
+        create_label_failure: bool = False,
+        labels_after_create_failure: IssueList | None = None,
     ) -> None:
         self.issues: IssueList = issues
         self.timelines: TimelineMap = timelines
+        self.repository_labels: IssueList = (
+            repository_labels
+            if repository_labels is not None
+            else [{"name": "needs-triage"}]
+        )
         self.patch_failures: set[int] = patch_failures or set()
         self.add_label_failures: set[int] = add_label_failures or set()
+        self.remove_label_failures: set[int] = remove_label_failures or set()
+        self.create_label_failure: bool = create_label_failure
+        self.labels_after_create_failure: IssueList = (
+            labels_after_create_failure or []
+        )
         self.comments: list[tuple[int, JsonObject]] = []
         self.closed_issues: list[tuple[int, JsonObject]] = []
         self.removed_labels: list[tuple[int, str]] = []
         self.added_labels: list[tuple[int, str]] = []
+        self.created_labels: list[JsonObject] = []
+        self.repository_label_requests: int = 0
 
     def __call__(
         self, arguments: list[str], *, input_value: JsonObject | None = None
@@ -102,6 +118,18 @@ class FakeGitHub:
         head: str = arguments[0]
         if head == "--method":
             method, endpoint = arguments[1], arguments[2]
+            if method == "POST" and endpoint == f"repos/{REPO}/labels":
+                assert input_value is not None
+                if self.create_label_failure:
+                    self.repository_labels.extend(
+                        self.labels_after_create_failure
+                    )
+                    self.labels_after_create_failure = []
+                    raise CLOSER.StaleIssueError("create label failed")
+                self.created_labels.append(input_value)
+                self.repository_labels.append(input_value)
+                return {}
+
             number = int(endpoint.split("/issues/")[1].split("/")[0])
             if method == "POST" and endpoint.endswith("/comments"):
                 assert input_value is not None
@@ -120,6 +148,8 @@ class FakeGitHub:
             if method == "DELETE" and endpoint.endswith(
                 f"/labels/{CLOSER.TARGET_LABEL}"
             ):
+                if number in self.remove_label_failures:
+                    raise CLOSER.StaleIssueError("remove label failed")
                 self.removed_labels.append((number, CLOSER.TARGET_LABEL))
                 return []
             if method == "PATCH":
@@ -137,6 +167,12 @@ class FakeGitHub:
             assert page_match is not None
             page = int(page_match.group(1))
             return self.issues if page == 1 else []
+        if head.startswith(f"repos/{REPO}/labels?"):
+            self.repository_label_requests += 1
+            page_match = re.search(r"[?&]page=(\d+)", head)
+            assert page_match is not None
+            page = int(page_match.group(1))
+            return self.repository_labels if page == 1 else []
         raise AssertionError(f"unexpected request: {arguments}")
 
 
@@ -183,6 +219,95 @@ class StaleClosingTest(unittest.TestCase):
         self.assertEqual(fake.comments, [])
         self.assertEqual(fake.removed_labels, [(7, "needs-info")])
         self.assertEqual(fake.added_labels, [(7, "needs-triage")])
+        self.assertEqual(fake.created_labels, [])
+
+    def test_comment_after_label_creates_missing_triage_label(self) -> None:
+        fake = FakeGitHub(
+            [{"number": 7}],
+            {7: [labeled(days_ago=20), commented(days_ago=2)]},
+            repository_labels=[],
+        )
+
+        run_fake(fake)
+
+        self.assertEqual(
+            fake.created_labels,
+            [
+                {
+                    "name": "needs-triage",
+                    "color": "e11d48",
+                    "description": "Issue needs triage",
+                }
+            ],
+        )
+        self.assertEqual(fake.added_labels, [(7, "needs-triage")])
+        self.assertEqual(fake.removed_labels, [(7, "needs-info")])
+
+    def test_comment_after_label_uses_existing_triage_label_casing(self) -> None:
+        fake = FakeGitHub(
+            [{"number": 7}],
+            {7: [labeled(days_ago=20), commented(days_ago=2)]},
+            repository_labels=[{"name": "Needs-Triage"}],
+        )
+
+        run_fake(fake)
+
+        self.assertEqual(fake.created_labels, [])
+        self.assertEqual(fake.added_labels, [(7, "Needs-Triage")])
+        self.assertEqual(fake.removed_labels, [(7, "needs-info")])
+
+    def test_comment_after_label_fails_when_triage_label_create_fails(
+        self,
+    ) -> None:
+        fake = FakeGitHub(
+            [{"number": 7}],
+            {7: [labeled(days_ago=20), commented(days_ago=2)]},
+            repository_labels=[],
+            create_label_failure=True,
+        )
+
+        with self.assertRaises(CLOSER.StaleIssueError):
+            run_fake(fake)
+
+        self.assertEqual(fake.repository_label_requests, 2)
+        self.assertEqual(fake.added_labels, [])
+        self.assertEqual(fake.removed_labels, [])
+
+    def test_comment_after_label_handles_concurrent_triage_label_create(
+        self,
+    ) -> None:
+        fake = FakeGitHub(
+            [{"number": 7}],
+            {7: [labeled(days_ago=20), commented(days_ago=2)]},
+            repository_labels=[],
+            create_label_failure=True,
+            labels_after_create_failure=[{"name": "Needs-Triage"}],
+        )
+
+        run_fake(fake)
+
+        self.assertEqual(fake.repository_label_requests, 2)
+        self.assertEqual(fake.created_labels, [])
+        self.assertEqual(fake.added_labels, [(7, "Needs-Triage")])
+        self.assertEqual(fake.removed_labels, [(7, "needs-info")])
+
+    def test_comment_after_label_fails_when_concurrent_create_is_other_label(
+        self,
+    ) -> None:
+        fake = FakeGitHub(
+            [{"number": 7}],
+            {7: [labeled(days_ago=20), commented(days_ago=2)]},
+            repository_labels=[],
+            create_label_failure=True,
+            labels_after_create_failure=[{"name": "other-label"}],
+        )
+
+        with self.assertRaises(CLOSER.StaleIssueError):
+            run_fake(fake)
+
+        self.assertEqual(fake.repository_label_requests, 2)
+        self.assertEqual(fake.added_labels, [])
+        self.assertEqual(fake.removed_labels, [])
 
     def test_adds_triage_label_before_removing_needs_info(self) -> None:
         fake = FakeGitHub(
@@ -196,6 +321,28 @@ class StaleClosingTest(unittest.TestCase):
 
         self.assertEqual(fake.removed_labels, [])
         self.assertEqual(fake.added_labels, [])
+
+    def test_retry_removes_needs_info_after_remove_label_failure(self) -> None:
+        fake = FakeGitHub(
+            [{"number": 7}],
+            {7: [labeled(days_ago=20), commented(days_ago=2)]},
+            remove_label_failures={7},
+        )
+
+        with self.assertRaises(CLOSER.StaleIssueError):
+            run_fake(fake)
+
+        self.assertEqual(fake.added_labels, [(7, "needs-triage")])
+        self.assertEqual(fake.removed_labels, [])
+
+        fake.remove_label_failures.clear()
+        run_fake(fake)
+
+        self.assertEqual(
+            fake.added_labels,
+            [(7, "needs-triage"), (7, "needs-triage")],
+        )
+        self.assertEqual(fake.removed_labels, [(7, "needs-info")])
 
     def test_old_comment_before_label_does_not_reset(self) -> None:
         fake = run_with(

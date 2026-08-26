@@ -10,6 +10,8 @@ from typing import Any
 # Only issues with this label are considered by this workflow
 TARGET_LABEL: str = "needs-info"
 TRIAGE_LABEL: str = "needs-triage"
+TRIAGE_LABEL_COLOR: str = "e11d48"
+TRIAGE_LABEL_DESCRIPTION: str = "Issue needs triage"
 
 CLOSE_REASONS = frozenset({"completed", "not_planned", "duplicate"})
 GITHUB_PAGE_SIZE = 100
@@ -147,6 +149,72 @@ def gh_get_issue_events(repo: str, issue_number: int) -> list[dict[str, Any]]:
         if len(response) < GITHUB_PAGE_SIZE:
             return events
         page += 1
+
+
+def gh_get_repository_labels(repo: str) -> list[dict[str, Any]]:
+    labels: list[dict[str, Any]] = []
+    page = 1
+    while True:
+        response = gh_run_json(
+            [f"repos/{repo}/labels?per_page={GITHUB_PAGE_SIZE}&page={page}"]
+        )
+        if not isinstance(response, list):
+            raise StaleIssueError("GitHub returned an invalid label list")
+
+        labels.extend(label for label in response if isinstance(label, dict))
+
+        if len(response) < GITHUB_PAGE_SIZE:
+            return labels
+        page += 1
+
+
+def gh_create_triage_label(repo: str) -> None:
+    gh_run_json(
+        [
+            "--method",
+            "POST",
+            f"repos/{repo}/labels",
+            "--input",
+            "-",
+        ],
+        input_value={
+            "name": TRIAGE_LABEL,
+            "color": TRIAGE_LABEL_COLOR,
+            "description": TRIAGE_LABEL_DESCRIPTION,
+        },
+    )
+
+
+def existing_repository_label_name(
+    labels: list[dict[str, Any]], label_name: str
+) -> str | None:
+    names = {
+        label.get("name", "").casefold(): label.get("name")
+        for label in labels
+        if isinstance(label.get("name"), str)
+    }
+    return names.get(label_name.casefold())
+
+
+def ensure_triage_label_exists(repo: str) -> str:
+    existing_name = existing_repository_label_name(
+        gh_get_repository_labels(repo), TRIAGE_LABEL
+    )
+    if existing_name is not None:
+        return existing_name
+
+    try:
+        gh_create_triage_label(repo)
+    except StaleIssueError:
+        # A concurrent workflow may have created the shared label first.
+        existing_name = existing_repository_label_name(
+            gh_get_repository_labels(repo), TRIAGE_LABEL
+        )
+        if existing_name is None:
+            raise
+        return existing_name
+
+    return TRIAGE_LABEL
 
 
 def gh_close_issue(repo: str, issue_number: int, reason: str) -> None:
@@ -289,6 +357,7 @@ def run() -> None:
     print(f"Found {len(issues)} open issue(s) labeled '{TARGET_LABEL}' in {repo}.")
 
     closed = 0
+    triage_label: str | None = None
     for issue in issues:
         number = issue.get("number")
         if not isinstance(number, int):
@@ -302,12 +371,16 @@ def run() -> None:
 
         commented_time = latest_comment_at(events)
         if commented_time is not None and commented_time > label_applied_time:
-            gh_add_label(repo, number, TRIAGE_LABEL)
+            if triage_label is None:
+                triage_label = ensure_triage_label_exists(repo)
+
+            gh_add_label(repo, number, triage_label)
             gh_remove_label(repo, number, TARGET_LABEL)
+
             print(
                 f"#{number}: response received after '{TARGET_LABEL}' "
                 f"was applied; '{TARGET_LABEL}' removed and "
-                f"'{TRIAGE_LABEL}' added."
+                f"'{triage_label}' added."
             )
             continue
 
