@@ -191,16 +191,16 @@ and time from first human review to approval.
 
 ## Select reviewers
 
-Claude and Codex run by default. To run only one reviewer, disable the other
-one:
+Codex runs by default. To also run Claude, enable it explicitly:
 
 ```yaml
     uses: aws/aws-durable-execution-ci/.github/workflows/ai-pr-review.yml@<full-commit-sha>
     with:
-      run-claude: false
-      run-codex: true
+      run-claude: true
     secrets: inherit
 ```
+
+To run only Claude, also set `run-codex: false`.
 
 ## Models and reasoning
 
