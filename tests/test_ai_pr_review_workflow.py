@@ -66,6 +66,8 @@ class AiPrReviewWorkflowTest(unittest.TestCase):
     def test_public_reviewer_configuration_defaults(self):
         expected_defaults = {
             "environment-name": "ai-pr-review-runtime",
+            "run-claude": "false",
+            "run-codex": "true",
             "claude-model": "us.anthropic.claude-sonnet-5",
             "claude-reasoning-effort": "xhigh",
             "codex-model": "openai.gpt-5.6-sol",
