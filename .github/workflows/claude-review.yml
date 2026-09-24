@@ -176,7 +176,7 @@ jobs:
           sudo visudo -cf /etc/sudoers.d/claude-review-env
 
       - name: Configure AWS credentials for Claude
-        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           role-to-assume: ${{ secrets.BEDROCK_ROLE_ARN }}
           role-session-name: claude-pr-review-${{ github.run_id }}
@@ -198,7 +198,7 @@ jobs:
 
       - name: Review pull request with Claude on Amazon Bedrock
         id: review
-        uses: anthropics/claude-code-action@9c5ddab2e6d17b83ea679153b31f1d5f023cf636 # v1.0.217
+        uses: anthropics/claude-code-action@cfc3eb22bfed5c26ef66e3223c982af27e4524de # v1.0.231
         env:
           AWS_REGION: us-east-1
           CLAUDE_CODE_ATTRIBUTION_HEADER: "0"
