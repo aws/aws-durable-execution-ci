@@ -20,7 +20,7 @@ on:
         description: Codex model ID used through Amazon Bedrock
         required: false
         type: string
-        default: openai.gpt-6.0-luna
+        default: openai.gpt-6-luna
       region:
         description: AWS region used for Amazon Bedrock
         required: false
@@ -67,7 +67,7 @@ jobs:
       - name: Validate notification summary configuration
         id: summary-config
         env:
-          SUMMARY_MODEL: ${{ inputs['model'] || 'openai.gpt-6.0-luna' }}
+          SUMMARY_MODEL: ${{ inputs['model'] || 'openai.gpt-6-luna' }}
         run: |
           set -euo pipefail
 

@@ -331,10 +331,10 @@ class SlackNotificationWorkflowTest(unittest.TestCase):
     def test_exposes_model_input_with_default(self):
         self.assertRegex(
             WORKFLOW,
-            r"(?ms)^      model:\n.*?default: openai\.gpt-6\.0-luna",
+            r"(?ms)^      model:\n.*?default: openai\.gpt-6-luna",
         )
         self.assertIn(
-            "${{ inputs['model'] || 'openai.gpt-6.0-luna' }}",
+            "${{ inputs['model'] || 'openai.gpt-6-luna' }}",
             job_block(WORKFLOW, "summarize"),
         )
 
@@ -342,7 +342,7 @@ class SlackNotificationWorkflowTest(unittest.TestCase):
         summarize = job_block(WORKFLOW, "summarize")
 
         self.assertIn(
-            "${{ inputs['model'] || 'openai.gpt-6.0-luna' }}",
+            "${{ inputs['model'] || 'openai.gpt-6-luna' }}",
             summarize,
         )
         self.assertIn('--model "$SUMMARY_MODEL"', summarize)

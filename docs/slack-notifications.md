@@ -60,14 +60,14 @@ discussions can omit both the `discussion` trigger and
 
 ## Model and region configuration
 
-The default model is `openai.gpt-6.0-luna` in `us-east-1`, the region where
+The default model is `openai.gpt-6-luna` in `us-east-1`, the region where
 Luna is available. Callers can select another Codex model and AWS region
 available through Amazon Bedrock:
 
 ```yaml
     uses: aws/aws-durable-execution-ci/.github/workflows/notify.yml@<full-commit-sha>
     with:
-      model: openai.gpt-6.0-luna
+      model: openai.gpt-6-luna
       region: us-east-1
     secrets:
       BEDROCK_ROLE_ARN: ${{ secrets.BEDROCK_ROLE_ARN }}
