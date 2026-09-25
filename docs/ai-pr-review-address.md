@@ -197,7 +197,8 @@ The reusable workflow supports these inputs:
   `ai-pr-review-runtime`.
 - `no-pr-label`: shared worker label configuration; defaults to
   `codex:no-pr`.
-- `model`: Codex model ID; defaults to `openai.gpt-5.6-sol`.
+- `model`: Codex model ID; defaults to `openai.gpt-6-astra`.
+- `region`: AWS region used for Amazon Bedrock; defaults to `us-west-2`.
 - `reasoning-effort`: defaults to `xhigh`.
 - `allow-workflow-changes`: defaults to `false`.
 
@@ -208,7 +209,8 @@ The reusable workflow supports these inputs:
       # Keep the event-specific inputs from the caller examples above.
       environment-name: ai-runtime
       no-pr-label: automation:no-pr
-      model: openai.gpt-5.6-sol
+      model: openai.gpt-6-astra
+      region: us-west-2
       reasoning-effort: xhigh
       allow-workflow-changes: false
 ```
@@ -216,8 +218,8 @@ The reusable workflow supports these inputs:
 To override defaults, add the same runtime values to the `with` block of both
 privileged `address` jobs. Do not add them to the read-only `intake` job.
 The read-only intake artifact does not carry runtime configuration.
-Reconciliation always applies the model, environment, label, and workflow
-change policy from the trusted default-branch caller.
+Reconciliation always applies the model, region, environment, label, and
+workflow change policy from the trusted default-branch caller.
 
 ## Repository setup
 
