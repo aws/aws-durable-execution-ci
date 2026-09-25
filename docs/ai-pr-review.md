@@ -212,14 +212,18 @@ keeps the default model IDs while lowering their reasoning efforts:
     with:
       claude-model: us.anthropic.claude-sonnet-5
       claude-reasoning-effort: high
-      codex-model: openai.gpt-5.6-sol
+      codex-model: openai.gpt-6-astra
       codex-reasoning-effort: medium
+      region: us-west-2
     secrets: inherit
 ```
 
 Claude reasoning can be `low`, `medium`, `high`, `xhigh`, or `max`. Codex
 reasoning can be `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`.
 Both reviewers default to `xhigh`.
+
+Codex defaults to `us-west-2`. Use the `region` input to select another AWS
+region for the Codex review.
 
 Claude runs in bare mode with only the `Read`, `Grep`, and `Glob` built-in
 tools available.

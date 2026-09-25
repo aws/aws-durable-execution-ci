@@ -106,7 +106,8 @@ The reusable workflow accepts these optional inputs:
   `ai-pr-review-runtime`.
 - `no-pr-label`: label used when no repository change is required; defaults to
   `codex:no-pr`.
-- `model`: Codex model ID; defaults to `openai.gpt-5.6-sol`.
+- `model`: Codex model ID; defaults to `openai.gpt-6-astra`.
+- `region`: AWS region used for Amazon Bedrock; defaults to `us-west-2`.
 - `reasoning-effort`: defaults to `xhigh`.
 - `allow-workflow-changes`: workflow-wide administrative override; defaults
   to `false`.
@@ -118,7 +119,8 @@ Example:
       issue-number: ${{ inputs['issue-number'] || '' }}
       environment-name: ai-runtime
       no-pr-label: automation:no-pr
-      model: openai.gpt-5.6-sol
+      model: openai.gpt-6-astra
+      region: us-west-2
       reasoning-effort: xhigh
       allow-workflow-changes: false
 ```

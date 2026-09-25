@@ -45,7 +45,12 @@ on:
         description: Codex model ID to use through Amazon Bedrock
         required: false
         type: string
-        default: openai.gpt-5.6-sol
+        default: openai.gpt-6-astra
+      region:
+        description: AWS region used for Codex on Amazon Bedrock
+        required: false
+        type: string
+        default: us-west-2
       codex-reasoning-effort:
         description: Codex reasoning effort
         required: false
@@ -182,6 +187,7 @@ jobs:
       prompt-path: ${{ inputs['prompt-path'] }}
       environment-name: >-
         ${{ inputs['environment-name'] || 'ai-pr-review-runtime' }}
-      model: ${{ inputs['codex-model'] || 'openai.gpt-5.6-sol' }}
+      model: ${{ inputs['codex-model'] || 'openai.gpt-6-astra' }}
+      region: ${{ inputs['region'] || 'us-west-2' }}
       reasoning-effort: ${{ inputs['codex-reasoning-effort'] || 'xhigh' }}
     secrets: inherit

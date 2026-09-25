@@ -58,15 +58,16 @@ The discussion webhook is optional. Repositories that do not notify on
 discussions can omit both the `discussion` trigger and
 `SLACK_WEBHOOK_URL_DISCUSSION` secret mapping.
 
-## Model configuration
+## Model and region configuration
 
-The default model is `openai.gpt-5.6-luna`. Callers can select another Codex
-model available through Amazon Bedrock:
+The default model is `openai.gpt-6-astra` in `us-west-2`. Callers can select
+another Codex model and AWS region available through Amazon Bedrock:
 
 ```yaml
     uses: aws/aws-durable-execution-ci/.github/workflows/notify.yml@<full-commit-sha>
     with:
-      model: openai.gpt-5.6-luna
+      model: openai.gpt-6-astra
+      region: us-west-2
     secrets:
       BEDROCK_ROLE_ARN: ${{ secrets.BEDROCK_ROLE_ARN }}
       SLACK_WEBHOOK_URL_PR: ${{ secrets.SLACK_WEBHOOK_URL_PR }}
