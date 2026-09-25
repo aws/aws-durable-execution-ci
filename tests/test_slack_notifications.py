@@ -331,18 +331,18 @@ class SlackNotificationWorkflowTest(unittest.TestCase):
     def test_exposes_model_input_with_default(self):
         self.assertRegex(
             WORKFLOW,
-            r"(?ms)^      model:\n.*?default: openai\.gpt-6-astra",
+            r"(?ms)^      model:\n.*?default: openai\.gpt-6\.0-luna",
         )
         self.assertIn(
-            "${{ inputs['model'] || 'openai.gpt-6-astra' }}",
+            "${{ inputs['model'] || 'openai.gpt-6.0-luna' }}",
             job_block(WORKFLOW, "summarize"),
         )
 
-    def test_default_astra_model_uses_supported_reasoning_effort(self):
+    def test_default_luna_model_uses_supported_reasoning_effort(self):
         summarize = job_block(WORKFLOW, "summarize")
 
         self.assertIn(
-            "${{ inputs['model'] || 'openai.gpt-6-astra' }}",
+            "${{ inputs['model'] || 'openai.gpt-6.0-luna' }}",
             summarize,
         )
         self.assertIn('--model "$SUMMARY_MODEL"', summarize)
@@ -354,14 +354,14 @@ class SlackNotificationWorkflowTest(unittest.TestCase):
 
         self.assertRegex(
             WORKFLOW,
-            r"(?ms)^      region:\n.*?default: us-west-2",
+            r"(?ms)^      region:\n.*?default: us-east-1",
         )
         self.assertIn(
-            "aws-region: ${{ inputs['region'] || 'us-west-2' }}",
+            "aws-region: ${{ inputs['region'] || 'us-east-1' }}",
             summarize,
         )
         self.assertEqual(
-            summarize.count("${{ inputs['region'] || 'us-west-2' }}"),
+            summarize.count("${{ inputs['region'] || 'us-east-1' }}"),
             3,
         )
 
