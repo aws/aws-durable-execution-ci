@@ -36,6 +36,11 @@ on:
         description: Codex model ID to use through Amazon Bedrock
         required: true
         type: string
+      region:
+        description: AWS region used for Amazon Bedrock
+        required: false
+        type: string
+        default: us-west-2
       reasoning-effort:
         description: Codex reasoning effort
         required: true
@@ -72,7 +77,7 @@ env:
       "Resource":"*"
     }]}
   DEFAULT_NO_PR_LABEL: codex:no-pr
-  DEFAULT_CODEX_MODEL: openai.gpt-5.6-sol
+  DEFAULT_CODEX_MODEL: openai.gpt-6-astra
   DEFAULT_REASONING_EFFORT: xhigh
 
 jobs:
@@ -262,7 +267,7 @@ jobs:
           role-to-assume: ${{ secrets.BEDROCK_ROLE_ARN }}
           role-session-name: >-
             codex-${{ inputs['work-key'] }}-${{ github.run_id }}
-          aws-region: us-east-1
+          aws-region: ${{ inputs['region'] || 'us-west-2' }}
           audience: sts.amazonaws.com
           inline-session-policy: ${{ env.CODEX_BEDROCK_SESSION_POLICY }}
           mask-aws-account-id: true
@@ -285,8 +290,8 @@ jobs:
             ${{ steps.aws-credentials.outputs.aws-session-token }}
           AWS_CREDENTIAL_EXPIRATION: >-
             ${{ steps.aws-credentials.outputs.aws-expiration }}
-          AWS_REGION: us-east-1
-          AWS_DEFAULT_REGION: us-east-1
+          AWS_REGION: ${{ inputs['region'] || 'us-west-2' }}
+          AWS_DEFAULT_REGION: ${{ inputs['region'] || 'us-west-2' }}
           AWS_ROLE_ARN: ${{ secrets.BEDROCK_ROLE_ARN }}
           AWS_ROLE_SESSION_NAME: >-
             codex-${{ inputs['work-key'] }}-${{ github.run_id }}

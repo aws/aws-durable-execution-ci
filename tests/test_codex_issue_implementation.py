@@ -5619,6 +5619,7 @@ class WorkflowPolicyTest(unittest.TestCase):
             "environment-name:",
             "no-pr-label:",
             "model:",
+            "region:",
             "reasoning-effort:",
             "allow-workflow-changes:",
         ):
@@ -6023,6 +6024,35 @@ class WorkflowPolicyTest(unittest.TestCase):
             + PR_ADDRESS_WORKFLOW
             + RESOLVER_WORKFLOW
             + WORKER_WORKFLOW,
+        )
+
+    def test_gpt6_astra_and_region_defaults_reach_the_worker(self):
+        self.assertEqual(WORKFLOW.count("default: openai.gpt-6-astra"), 2)
+        self.assertEqual(PR_ADDRESS_WORKFLOW.count("default: openai.gpt-6-astra"), 1)
+        self.assertIn(
+            "DEFAULT_CODEX_MODEL: openai.gpt-6-astra",
+            WORKER_WORKFLOW,
+        )
+        self.assertEqual(WORKFLOW.count("default: us-west-2"), 2)
+        self.assertEqual(PR_ADDRESS_WORKFLOW.count("default: us-west-2"), 1)
+        self.assertEqual(WORKER_WORKFLOW.count("default: us-west-2"), 1)
+        for entry_workflow in (WORKFLOW, PR_ADDRESS_WORKFLOW):
+            with self.subTest(workflow=entry_workflow[:40]):
+                self.assertIn(
+                    "region: ${{ inputs['region'] || 'us-west-2' }}",
+                    entry_workflow,
+                )
+        self.assertIn(
+            "aws-region: ${{ inputs['region'] || 'us-west-2' }}",
+            WORKER_WORKFLOW,
+        )
+        self.assertIn(
+            "AWS_REGION: ${{ inputs['region'] || 'us-west-2' }}",
+            WORKER_WORKFLOW,
+        )
+        self.assertIn(
+            "AWS_DEFAULT_REGION: ${{ inputs['region'] || 'us-west-2' }}",
+            WORKER_WORKFLOW,
         )
 
     def test_entry_workflows_use_the_shared_scoped_resolver(self):

@@ -321,6 +321,30 @@ class IssueTriageWorkflowTest(unittest.TestCase):
             job_block(WORKFLOW, "classify"),
         )
 
+    def test_uses_gpt6_astra_in_configurable_bedrock_region(self):
+        classify = job_block(WORKFLOW, "classify")
+
+        self.assertRegex(
+            WORKFLOW,
+            r"(?ms)^      model:\n.*?default: openai\.gpt-6-astra",
+        )
+        self.assertRegex(
+            WORKFLOW,
+            r"(?ms)^      region:\n.*?default: us-west-2",
+        )
+        self.assertIn(
+            "${{ inputs['model'] || 'openai.gpt-6-astra' }}",
+            classify,
+        )
+        self.assertIn(
+            "aws-region: ${{ inputs['region'] || 'us-west-2' }}",
+            classify,
+        )
+        self.assertEqual(
+            classify.count("${{ inputs['region'] || 'us-west-2' }}"),
+            3,
+        )
+
     def test_workflow_defines_default_labels_and_override_input(self):
         self.assertIn("DEFAULT_ISSUE_TRIAGE_LABELS: |-", WORKFLOW)
         issue_labels = (

@@ -34,7 +34,7 @@ def prepared_review() -> dict:
                 "workflow_sha": "3" * 40,
                 "workflow_run_id": 100,
                 "workflow_run_attempt": 1,
-                "model": "openai.gpt-5.6-sol",
+                "model": "openai.gpt-6-astra",
                 "reasoning_effort": "xhigh",
                 "scope_id": "ars_v1_" + "b" * 26,
                 "scope_digest": "2" * 64,

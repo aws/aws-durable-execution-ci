@@ -331,10 +331,10 @@ class SlackNotificationWorkflowTest(unittest.TestCase):
     def test_exposes_model_input_with_default(self):
         self.assertRegex(
             WORKFLOW,
-            r"(?ms)^      model:\n.*?default: openai\.gpt-5\.6-luna",
+            r"(?ms)^      model:\n.*?default: openai\.gpt-6-luna",
         )
         self.assertIn(
-            "${{ inputs['model'] || 'openai.gpt-5.6-luna' }}",
+            "${{ inputs['model'] || 'openai.gpt-6-luna' }}",
             job_block(WORKFLOW, "summarize"),
         )
 
@@ -342,12 +342,28 @@ class SlackNotificationWorkflowTest(unittest.TestCase):
         summarize = job_block(WORKFLOW, "summarize")
 
         self.assertIn(
-            "${{ inputs['model'] || 'openai.gpt-5.6-luna' }}",
+            "${{ inputs['model'] || 'openai.gpt-6-luna' }}",
             summarize,
         )
         self.assertIn('--model "$SUMMARY_MODEL"', summarize)
         self.assertIn('model_reasoning_effort="low"', summarize)
         self.assertNotIn('model_reasoning_effort="none"', summarize)
+
+    def test_exposes_region_input_and_uses_it_for_bedrock(self):
+        summarize = job_block(WORKFLOW, "summarize")
+
+        self.assertRegex(
+            WORKFLOW,
+            r"(?ms)^      region:\n.*?default: us-east-1",
+        )
+        self.assertIn(
+            "aws-region: ${{ inputs['region'] || 'us-east-1' }}",
+            summarize,
+        )
+        self.assertEqual(
+            summarize.count("${{ inputs['region'] || 'us-east-1' }}"),
+            3,
+        )
 
     def test_model_job_uses_isolated_bedrock_credentials_and_no_webhooks(self):
         summarize = job_block(WORKFLOW, "summarize")

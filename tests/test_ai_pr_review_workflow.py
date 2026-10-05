@@ -70,8 +70,9 @@ class AiPrReviewWorkflowTest(unittest.TestCase):
             "run-codex": "true",
             "claude-model": "us.anthropic.claude-sonnet-5",
             "claude-reasoning-effort": "xhigh",
-            "codex-model": "openai.gpt-5.6-sol",
+            "codex-model": "openai.gpt-6-astra",
             "codex-reasoning-effort": "xhigh",
+            "region": "us-west-2",
         }
 
         for input_name, expected_default in expected_defaults.items():
@@ -133,7 +134,11 @@ class AiPrReviewWorkflowTest(unittest.TestCase):
             codex,
         )
         self.assertIn(
-            "model: ${{ inputs['codex-model'] || 'openai.gpt-5.6-sol' }}",
+            "model: ${{ inputs['codex-model'] || 'openai.gpt-6-astra' }}",
+            codex,
+        )
+        self.assertIn(
+            "region: ${{ inputs['region'] || 'us-west-2' }}",
             codex,
         )
         self.assertIn(
@@ -215,9 +220,22 @@ class AiPrReviewWorkflowTest(unittest.TestCase):
         self.assert_input_default(
             CODEX_WORKFLOW,
             "model",
-            "openai.gpt-5.6-sol",
+            "openai.gpt-6-astra",
         )
+        self.assert_input_default(CODEX_WORKFLOW, "region", "us-west-2")
         self.assert_input_default(CODEX_WORKFLOW, "reasoning-effort", "xhigh")
+        self.assertIn(
+            "aws-region: ${{ inputs['region'] }}",
+            CODEX_WORKFLOW,
+        )
+        self.assertIn(
+            "AWS_REGION: ${{ inputs['region'] }}",
+            CODEX_WORKFLOW,
+        )
+        self.assertIn(
+            "AWS_DEFAULT_REGION: ${{ inputs['region'] }}",
+            CODEX_WORKFLOW,
+        )
         self.assertIn('--model "$CODEX_MODEL"', CODEX_WORKFLOW)
         self.assertIn(
             '--config "model_reasoning_effort='
