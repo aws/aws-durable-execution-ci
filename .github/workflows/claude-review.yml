@@ -3,6 +3,11 @@ name: Claude PR Review
 on:
   workflow_call:
     inputs:
+      runs-on:
+        description: Runner label for every job in this workflow
+        required: false
+        type: string
+        default: ubuntu-latest
       pull-request-number:
         description: Pull request number to review
         required: true
@@ -62,7 +67,7 @@ concurrency:
 jobs:
   generate:
     name: Generate Claude review
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs['runs-on'] || 'ubuntu-latest' }}
     environment: >-
       ${{ inputs['environment-name'] || 'ai-pr-review-runtime' }}
     timeout-minutes: 30
@@ -260,7 +265,7 @@ jobs:
   post:
     name: Post Claude review
     needs: generate
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs['runs-on'] || 'ubuntu-latest' }}
     timeout-minutes: 10
     permissions:
       contents: write

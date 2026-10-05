@@ -3,6 +3,11 @@ name: AI Work Item Resolver
 on:
   workflow_call:
     inputs:
+      runs-on:
+        description: Runner label for every job in this workflow
+        required: false
+        type: string
+        default: ubuntu-latest
       work-scope:
         description: Resolve issue implementation or PR review work
         required: true
@@ -43,7 +48,7 @@ permissions: {}
 jobs:
   resolve:
     name: Resolve authorized work
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs['runs-on'] || 'ubuntu-latest' }}
     timeout-minutes: 10
     permissions:
       contents: read

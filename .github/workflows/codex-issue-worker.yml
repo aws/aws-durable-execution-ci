@@ -3,6 +3,11 @@ name: Codex Issue Worker
 on:
   workflow_call:
     inputs:
+      runs-on:
+        description: Runner label for every job in this workflow
+        required: false
+        type: string
+        default: ubuntu-latest
       issue-number:
         description: Issue number, or zero for PR-scoped review work
         required: true
@@ -78,7 +83,7 @@ env:
 jobs:
   reconcile:
     name: Reconcile ${{ inputs['work-key'] }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs['runs-on'] || 'ubuntu-latest' }}
     environment: >-
       ${{ inputs['environment-name'] || 'ai-pr-review-runtime' }}
     timeout-minutes: 140
@@ -546,7 +551,7 @@ jobs:
     if: >-
       always() &&
       needs.reconcile.result != 'cancelled'
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs['runs-on'] || 'ubuntu-latest' }}
     timeout-minutes: 20
     permissions:
       contents: write

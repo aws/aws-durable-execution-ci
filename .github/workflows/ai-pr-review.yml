@@ -11,6 +11,11 @@ on:
     types: [created]
   workflow_call:
     inputs:
+      runs-on:
+        description: Runner label for every job in this workflow
+        required: false
+        type: string
+        default: ubuntu-latest
       prompt-path:
         description: Optional prompt file relative to the caller repository
         required: false
@@ -69,7 +74,7 @@ jobs:
         github.event_name == 'issue_comment' &&
         github.event.issue.pull_request
       )
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs['runs-on'] || 'ubuntu-latest' }}
     permissions:
       contents: write
       pull-requests: write
@@ -100,7 +105,7 @@ jobs:
         contains(github.event.comment.body, '/ai') &&
         contains(github.event.comment.body, 'review')
       )
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs['runs-on'] || 'ubuntu-latest' }}
     permissions:
       contents: read
       pull-requests: read
@@ -144,6 +149,7 @@ jobs:
       pull-requests: write
     uses: ./.github/workflows/claude-review.yml
     with:
+      runs-on: ${{ inputs['runs-on'] || 'ubuntu-latest' }}
       pull-request-number: >-
         ${{ needs.resolve_review.outputs.pull-request-number }}
       base-sha: ${{ needs.resolve_review.outputs.base-sha }}
@@ -171,6 +177,7 @@ jobs:
       pull-requests: write
     uses: ./.github/workflows/codex-review.yml
     with:
+      runs-on: ${{ inputs['runs-on'] || 'ubuntu-latest' }}
       pull-request-number: >-
         ${{ needs.resolve_review.outputs.pull-request-number }}
       base-sha: ${{ needs.resolve_review.outputs.base-sha }}

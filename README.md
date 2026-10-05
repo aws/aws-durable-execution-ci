@@ -18,6 +18,25 @@ Shared GitHub Actions workflows for AWS Durable Execution repositories.
 - [Issue triage](docs/issue-triage.md): Uses AI to classify new issues with existing repository labels.
 - [Stale issue closer](docs/stale-issue-closer.md): Closes issues with a `needs-info` label after 14 days without a response. Clears the label if a response was posted within the 14 day window.
 
+### Runner selection
+
+Every shareable workflow accepts an optional `runs-on` input that sets the
+runner label for all of its jobs. It defaults to `ubuntu-latest`. A caller that
+hosts its own runners, for example through CodeBuild-hosted GitHub Actions
+runners, passes the label in the `with` block:
+
+```yaml
+    uses: aws/aws-durable-execution-ci/.github/workflows/ai-pr-review.yml@<full-commit-sha>
+    with:
+      runs-on: codebuild-github-actions-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    secrets: inherit
+```
+
+Workflows that run model jobs (`ai-pr-review`, `ai-pr-review-address`,
+`ai-issue-implementation`, `notify`, `issue-triage`) create an unprivileged
+user with `sudo`, so the selected runner must provide root access and allow
+the job to run for at least as long as the workflow's `timeout-minutes`.
+
 ## Dependency updates
 
 Dependabot checks the npm runtime dependencies and SHA-pinned GitHub Actions

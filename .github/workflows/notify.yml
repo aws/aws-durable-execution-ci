@@ -11,6 +11,11 @@ on:
     types: [published]
   workflow_call:
     inputs:
+      runs-on:
+        description: Runner label for every job in this workflow
+        required: false
+        type: string
+        default: ubuntu-latest
       environment-name:
         description: GitHub environment used for the model job
         required: false
@@ -46,7 +51,7 @@ jobs:
     if: >-
       github.event_name != 'pull_request_target' ||
       github.event.pull_request.draft == false
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs['runs-on'] || 'ubuntu-latest' }}
     environment: >-
       ${{ inputs['environment-name'] || 'ai-pr-review-runtime' }}
     timeout-minutes: 10
@@ -236,7 +241,7 @@ jobs:
       !cancelled() &&
       github.event_name == 'pull_request_target' &&
       github.event.pull_request.draft == false
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs['runs-on'] || 'ubuntu-latest' }}
     timeout-minutes: 5
     permissions: {}
     steps:
@@ -260,7 +265,7 @@ jobs:
       always() &&
       !cancelled() &&
       github.event_name == 'issues'
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs['runs-on'] || 'ubuntu-latest' }}
     timeout-minutes: 5
     permissions: {}
     steps:
@@ -284,7 +289,7 @@ jobs:
       always() &&
       !cancelled() &&
       github.event_name == 'discussion'
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs['runs-on'] || 'ubuntu-latest' }}
     timeout-minutes: 5
     permissions: {}
     steps:
@@ -308,7 +313,7 @@ jobs:
       always() &&
       !cancelled() &&
       github.event_name == 'release'
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs['runs-on'] || 'ubuntu-latest' }}
     timeout-minutes: 5
     permissions: {}
     steps:
