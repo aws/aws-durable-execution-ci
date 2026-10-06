@@ -155,15 +155,6 @@ jobs:
         run: |
           bash scripts/prepare_ai_triage_user.sh
 
-          # Codex runs through sudo, so preserve its AWS SDK credential chain
-          # for the account running the job (`runner` on hosted runners,
-          # `root` on CodeBuild). Never add AWS_CONTAINER_CREDENTIALS_RELATIVE_URI.
-          printf '%s\n' \
-            "Defaults:$(id -un) env_keep += \"AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_REGION AWS_DEFAULT_REGION\"" \
-            | sudo tee /etc/sudoers.d/codex-triage-env >/dev/null
-          sudo chmod 440 /etc/sudoers.d/codex-triage-env
-          sudo visudo -cf /etc/sudoers.d/codex-triage-env
-
           current_userns="$(
             sysctl -n kernel.unprivileged_userns_clone 2>/dev/null || true
           )"
@@ -250,24 +241,35 @@ jobs:
           # The unprivileged user cannot traverse the workspace. Run from /tmp;
           # stdin is opened by the runner before sudo drops privileges.
           cd /tmp
-          sudo -u codex-triage -- sh -c '
-            : "${AWS_ACCESS_KEY_ID:?AWS_ACCESS_KEY_ID was not preserved by sudo}"
-            : "${AWS_SECRET_ACCESS_KEY:?AWS_SECRET_ACCESS_KEY was not preserved by sudo}"
-            : "${AWS_SESSION_TOKEN:?AWS_SESSION_TOKEN was not preserved by sudo}"
-            : "${AWS_REGION:?AWS_REGION was not preserved by sudo}"
-          '
+          for required in AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_REGION; do
+            : "${!required:?${required} is not set in the job environment}"
+          done
 
           triage_ready=false
           for attempt in 1 2; do
             sudo -u codex-triage -- rm -f "$output_file"
             rm -f "$raw_result" "$validated_file"
 
-            if sudo -u codex-triage -- timeout \
+            # The model receives only this allowlist. `env -i` makes that true
+            # regardless of the runner image's sudo env_reset/env_keep policy.
+            if sudo -u codex-triage -- env -i \
+              AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \
+              AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" \
+              AWS_SESSION_TOKEN="$AWS_SESSION_TOKEN" \
+              AWS_REGION="$AWS_REGION" \
+              AWS_DEFAULT_REGION="$AWS_DEFAULT_REGION" \
+              AWS_EC2_METADATA_DISABLED=true \
+              CODEX_HOME=/home/codex-triage/.codex \
+              HOME=/home/codex-triage \
+              LANG=C.UTF-8 \
+              LOGNAME=codex-triage \
+              PATH="$PATH" \
+              SHELL=/bin/bash \
+              USER=codex-triage \
+              /usr/bin/timeout \
               --signal=TERM \
               --kill-after=30s \
               12m \
-              env \
-              CODEX_HOME=/home/codex-triage/.codex \
               "$codex_bin" \
               --ask-for-approval never \
               --sandbox read-only \

@@ -39,15 +39,15 @@ user and drop into it with `sudo`. The selected runner must therefore:
 - run jobs as an account with passwordless `sudo` (the account's name does not
   matter: `runner` on GitHub-hosted runners and `root` on CodeBuild-hosted
   runners are both resolved at runtime with `id -un`);
-- provide `adduser`, `visudo` and `setfacl`;
+- provide `adduser` and `setfacl`;
 - allow the job to run for at least as long as the workflow's
   `timeout-minutes`.
 
-The unprivileged user never receives the job's environment: `sudo` resets it
-and the workflows pass only the variables listed in their `env_keep` rules.
-On CodeBuild that reset is what keeps the project's service role out of the
-model's reach, so `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI` must never be added
-to those rules.
+The model process is started with `sudo -u <user> -- env -i` and an explicit
+allowlist of variables (its Bedrock credentials and the CLI's own settings), so
+it never sees the job's environment, whatever the runner image's `sudo`
+environment policy is. On CodeBuild that is what keeps the project's service
+role credentials out of the model's reach.
 
 ## Dependency updates
 

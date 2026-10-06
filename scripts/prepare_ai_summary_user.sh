@@ -23,16 +23,6 @@ sudo install \
   -g "$summary_user" \
   "${home_dir}/.codex"
 
-# Codex runs through sudo, so preserve its AWS SDK credential chain for the
-# account running the job (`runner` on hosted runners, `root` on CodeBuild).
-# Never add AWS_CONTAINER_CREDENTIALS_RELATIVE_URI here: on CodeBuild that
-# path is what keeps the project role out of the model's reach.
-printf '%s\n' \
-  "Defaults:$(id -un) env_keep += \"AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_REGION AWS_DEFAULT_REGION\"" \
-  | sudo tee /etc/sudoers.d/codex-summary-env >/dev/null
-sudo chmod 440 /etc/sudoers.d/codex-summary-env
-sudo visudo -cf /etc/sudoers.d/codex-summary-env
-
 current_userns="$(
   sysctl -n kernel.unprivileged_userns_clone 2>/dev/null || true
 )"

@@ -158,15 +158,6 @@ jobs:
         run: |
           bash .ai-review-toolkit/scripts/prepare_ai_review_user.sh codex-review
 
-          # Codex runs through sudo, so preserve its AWS SDK credential chain
-          # for the account running the job (`runner` on hosted runners,
-          # `root` on CodeBuild). Never add AWS_CONTAINER_CREDENTIALS_RELATIVE_URI.
-          printf '%s\n' \
-            "Defaults:$(id -un) env_keep += \"AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_REGION AWS_DEFAULT_REGION\"" \
-            | sudo tee /etc/sudoers.d/codex-review-env >/dev/null
-          sudo chmod 440 /etc/sudoers.d/codex-review-env
-          sudo visudo -cf /etc/sudoers.d/codex-review-env
-
           current_userns="$(
             sysctl -n kernel.unprivileged_userns_clone 2>/dev/null || true
           )"
@@ -239,24 +230,35 @@ jobs:
           output_schema="${GITHUB_WORKSPACE}/.ai-review-toolkit/.github/prompts/ai-pr-review-schema.json"
           trap 'sudo rm -rf "$output_dir"' EXIT
 
-          sudo -u codex-review -- sh -c '
-            : "${AWS_ACCESS_KEY_ID:?AWS_ACCESS_KEY_ID was not preserved by sudo}"
-            : "${AWS_SECRET_ACCESS_KEY:?AWS_SECRET_ACCESS_KEY was not preserved by sudo}"
-            : "${AWS_SESSION_TOKEN:?AWS_SESSION_TOKEN was not preserved by sudo}"
-            : "${AWS_REGION:?AWS_REGION was not preserved by sudo}"
-          '
+          for required in AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_REGION; do
+            : "${!required:?${required} is not set in the job environment}"
+          done
 
           review_ready=false
           for attempt in 1 2; do
             sudo -u codex-review -- rm -f "$output_file"
 
+            # The model receives only this allowlist. `env -i` makes that true
+            # regardless of the runner image's sudo env_reset/env_keep policy.
             # Keep enough of the job budget for a complete second attempt.
-            if sudo -u codex-review -- timeout \
+            if sudo -u codex-review -- env -i \
+              AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \
+              AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" \
+              AWS_SESSION_TOKEN="$AWS_SESSION_TOKEN" \
+              AWS_REGION="$AWS_REGION" \
+              AWS_DEFAULT_REGION="$AWS_DEFAULT_REGION" \
+              AWS_EC2_METADATA_DISABLED=true \
+              CODEX_HOME=/home/codex-review/.codex \
+              HOME=/home/codex-review \
+              LANG=C.UTF-8 \
+              LOGNAME=codex-review \
+              PATH="$PATH" \
+              SHELL=/bin/bash \
+              USER=codex-review \
+              /usr/bin/timeout \
               --signal=TERM \
               --kill-after=30s \
               20m \
-              env \
-              CODEX_HOME=/home/codex-review/.codex \
               "$codex_bin" exec \
               --skip-git-repo-check \
               --cd "$GITHUB_WORKSPACE" \
