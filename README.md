@@ -36,12 +36,23 @@ Workflows that run model jobs (`ai-pr-review`, `ai-pr-review-address`,
 `ai-issue-implementation`, `notify`, `issue-triage`) create an unprivileged
 user and drop into it with `sudo`. The selected runner must therefore:
 
+- be ephemeral, with a fresh environment for every job: GitHub-hosted runners
+  and CodeBuild-hosted runners both discard the container after one job. The
+  workflows create the unprivileged user and its home directory
+  unconditionally and never remove them, so a persistent self-hosted runner
+  fails on its second job and would carry the model's writable state from one
+  job to the next;
 - run jobs as an account with passwordless `sudo` (the account's name does not
   matter: `runner` on GitHub-hosted runners and `root` on CodeBuild-hosted
   runners are both resolved at runtime with `id -un`);
 - provide `adduser` and `setfacl`;
 - allow the job to run for at least as long as the workflow's
   `timeout-minutes`.
+
+A consuming repository that calls the same reusable workflow from more than one
+caller must pass `runs-on` in each of them. `ai-pr-review-address.yml` is
+called from both the intake/address caller and the `workflow_run`
+continuation; see `docs/ai-pr-review-address.md`.
 
 The model process is started with `sudo -u <user> -- env -i` and an explicit
 allowlist of variables (its Bedrock credentials and the CLI's own settings), so
