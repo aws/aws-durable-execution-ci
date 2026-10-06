@@ -158,11 +158,12 @@ jobs:
         run: |
           bash .ai-review-toolkit/scripts/prepare_ai_review_user.sh codex-review
 
-          # Codex runs through sudo, so preserve its AWS SDK credential chain.
-          sudo sh -c \
-            'printf "%s\n" \
-              "Defaults:runner env_keep += \"AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_REGION AWS_DEFAULT_REGION\"" \
-              > /etc/sudoers.d/codex-review-env'
+          # Codex runs through sudo, so preserve its AWS SDK credential chain
+          # for the account running the job (`runner` on hosted runners,
+          # `root` on CodeBuild). Never add AWS_CONTAINER_CREDENTIALS_RELATIVE_URI.
+          printf '%s\n' \
+            "Defaults:$(id -un) env_keep += \"AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_REGION AWS_DEFAULT_REGION\"" \
+            | sudo tee /etc/sudoers.d/codex-review-env >/dev/null
           sudo chmod 440 /etc/sudoers.d/codex-review-env
           sudo visudo -cf /etc/sudoers.d/codex-review-env
 
@@ -300,8 +301,8 @@ jobs:
 
           sudo install \
             -m 600 \
-            -o runner \
-            -g runner \
+            -o "$(id -un)" \
+            -g "$(id -gn)" \
             "$output_file" \
             "${RUNNER_TEMP}/codex-review.json"
 

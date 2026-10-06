@@ -504,12 +504,12 @@ jobs:
 
           sudo install \
             -m 600 \
-            -o runner \
-            -g runner \
+            -o "$(id -un)" \
+            -g "$(id -gn)" \
             "$output_file" \
             "${RUNNER_TEMP}/codex-implementation-result.json"
 
-          sudo chown -R runner:runner "$GITHUB_WORKSPACE"
+          sudo chown -R "$(id -un):$(id -gn)" "$GITHUB_WORKSPACE"
           sudo chmod -R u+rwX,go-rwx "$GITHUB_WORKSPACE"
 
           export AWS_CONTAINER_AUTHORIZATION_TOKEN="$credential_proxy_token"

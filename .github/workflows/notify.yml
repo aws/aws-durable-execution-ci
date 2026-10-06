@@ -219,8 +219,8 @@ jobs:
 
           sudo install \
             -m 600 \
-            -o runner \
-            -g runner \
+            -o "$(id -un)" \
+            -g "$(id -gn)" \
             "$model_output" \
             "${summary_dir}/raw-summary.txt"
 

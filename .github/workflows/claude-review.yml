@@ -170,13 +170,15 @@ jobs:
           bash .ai-review-toolkit/scripts/prepare_ai_review_user.sh claude-review
 
           # The Claude CLI runs through sudo. Preserve only its Bedrock
-          # credentials and the action's subprocess-isolation controls.
-          sudo sh -c \
-            'printf "%s\n" \
-              "Defaults:runner env_keep += \"AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_REGION AWS_DEFAULT_REGION AWS_BEARER_TOKEN_BEDROCK\"" \
-              "Defaults:runner env_keep += \"ANTHROPIC_BEDROCK_BASE_URL CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_ACTION CLAUDE_CODE_ATTRIBUTION_HEADER\"" \
-              "Defaults:runner env_keep += \"CLAUDE_CODE_SUBPROCESS_ENV_SCRUB CLAUDE_CODE_SCRIPT_CAPS DETAILED_PERMISSION_MESSAGES\"" \
-              > /etc/sudoers.d/claude-review-env'
+          # credentials and the action's subprocess-isolation controls for the
+          # account running the job (`runner` on hosted runners, `root` on
+          # CodeBuild). Never add AWS_CONTAINER_CREDENTIALS_RELATIVE_URI here.
+          job_user="$(id -un)"
+          printf '%s\n' \
+            "Defaults:${job_user} env_keep += \"AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_REGION AWS_DEFAULT_REGION AWS_BEARER_TOKEN_BEDROCK\"" \
+            "Defaults:${job_user} env_keep += \"ANTHROPIC_BEDROCK_BASE_URL CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_ACTION CLAUDE_CODE_ATTRIBUTION_HEADER\"" \
+            "Defaults:${job_user} env_keep += \"CLAUDE_CODE_SUBPROCESS_ENV_SCRUB CLAUDE_CODE_SCRIPT_CAPS DETAILED_PERMISSION_MESSAGES\"" \
+            | sudo tee /etc/sudoers.d/claude-review-env >/dev/null
           sudo chmod 440 /etc/sudoers.d/claude-review-env
           sudo visudo -cf /etc/sudoers.d/claude-review-env
 
