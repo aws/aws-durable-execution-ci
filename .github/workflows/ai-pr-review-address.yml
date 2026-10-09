@@ -13,6 +13,11 @@ on:
         type: string
   workflow_call:
     inputs:
+      runs-on:
+        description: Runner label for every job in this workflow
+        required: false
+        type: string
+        default: ubuntu-latest
       pull-request-number:
         description: Optional pull request number with authorized feedback
         required: false
@@ -67,7 +72,7 @@ jobs:
   validate-dispatch:
     name: Validate manual dispatch ref
     if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs['runs-on'] || 'ubuntu-latest' }}
     timeout-minutes: 5
 
     steps:
@@ -99,6 +104,7 @@ jobs:
       pull-requests: read
     uses: ./.github/workflows/ai-work-item-resolver.yml
     with:
+      runs-on: ${{ inputs['runs-on'] || 'ubuntu-latest' }}
       work-scope: review
       requested-pull-request-number: >-
         ${{ inputs['pull-request-number'] || '' }}
@@ -114,7 +120,7 @@ jobs:
       github.event.workflow_run.event ==
         'pull_request_review_comment' &&
       github.event.workflow_run.conclusion == 'success'
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs['runs-on'] || 'ubuntu-latest' }}
     timeout-minutes: 10
     permissions:
       actions: read
@@ -225,6 +231,7 @@ jobs:
       pull-requests: write
     uses: ./.github/workflows/codex-issue-worker.yml
     with:
+      runs-on: ${{ inputs['runs-on'] || 'ubuntu-latest' }}
       issue-number: ${{ matrix.issue_number }}
       pull-request-number: ${{ matrix.pull_request_number }}
       address-only: ${{ matrix.address_only }}

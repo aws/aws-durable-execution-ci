@@ -3,6 +3,11 @@ name: Claude PR Review
 on:
   workflow_call:
     inputs:
+      runs-on:
+        description: Runner label for every job in this workflow
+        required: false
+        type: string
+        default: ubuntu-latest
       pull-request-number:
         description: Pull request number to review
         required: true
@@ -62,7 +67,7 @@ concurrency:
 jobs:
   generate:
     name: Generate Claude review
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs['runs-on'] || 'ubuntu-latest' }}
     environment: >-
       ${{ inputs['environment-name'] || 'ai-pr-review-runtime' }}
     timeout-minutes: 30
@@ -161,19 +166,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Prepare unprivileged Claude user
-        run: |
-          bash .ai-review-toolkit/scripts/prepare_ai_review_user.sh claude-review
-
-          # The Claude CLI runs through sudo. Preserve only its Bedrock
-          # credentials and the action's subprocess-isolation controls.
-          sudo sh -c \
-            'printf "%s\n" \
-              "Defaults:runner env_keep += \"AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_REGION AWS_DEFAULT_REGION AWS_BEARER_TOKEN_BEDROCK\"" \
-              "Defaults:runner env_keep += \"ANTHROPIC_BEDROCK_BASE_URL CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_ACTION CLAUDE_CODE_ATTRIBUTION_HEADER\"" \
-              "Defaults:runner env_keep += \"CLAUDE_CODE_SUBPROCESS_ENV_SCRUB CLAUDE_CODE_SCRIPT_CAPS DETAILED_PERMISSION_MESSAGES\"" \
-              > /etc/sudoers.d/claude-review-env'
-          sudo chmod 440 /etc/sudoers.d/claude-review-env
-          sudo visudo -cf /etc/sudoers.d/claude-review-env
+        run: bash .ai-review-toolkit/scripts/prepare_ai_review_user.sh claude-review
 
       - name: Configure AWS credentials for Claude
         uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
@@ -260,7 +253,7 @@ jobs:
   post:
     name: Post Claude review
     needs: generate
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs['runs-on'] || 'ubuntu-latest' }}
     timeout-minutes: 10
     permissions:
       contents: write

@@ -61,6 +61,8 @@ jobs:
       issues: read
       pull-requests: read
     uses: aws/aws-durable-execution-ci/.github/workflows/ai-pr-review-address.yml@<full-commit-sha>
+    with:
+      runs-on: ubuntu-latest
 
   address:
     if: >-
@@ -75,6 +77,7 @@ jobs:
     uses: aws/aws-durable-execution-ci/.github/workflows/ai-pr-review-address.yml@<full-commit-sha>
     with:
       pull-request-number: ${{ inputs['pull-request-number'] || '' }}
+      runs-on: ubuntu-latest
     secrets: inherit
 ```
 
@@ -118,8 +121,16 @@ jobs:
         ${{ format('{0}', github.event.workflow_run.id || '') }}
       source-run-attempt: >-
         ${{ format('{0}', github.event.workflow_run.run_attempt || '') }}
+      runs-on: ubuntu-latest
     secrets: inherit
 ```
+
+Pass the same `runs-on` value to every call of `ai-pr-review-address.yml` in
+the consuming repository: the intake and address jobs above and the
+continuation's address job. The continuation is a separate workflow file, so a
+runner label set only in `ai-pr-review-address.yml` leaves inline-comment
+reconciliation on `ubuntu-latest`. The input and its runner requirements are
+described in the README under "Runner selection".
 
 The continuation has a different workflow name, so its completion cannot
 trigger itself. It does not filter completed runs by branch name; a fork pull

@@ -23,13 +23,6 @@ sudo install \
   -g "$summary_user" \
   "${home_dir}/.codex"
 
-sudo sh -c \
-  'printf "%s\n" \
-    "Defaults:runner env_keep += \"AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_REGION AWS_DEFAULT_REGION\"" \
-    > /etc/sudoers.d/codex-summary-env'
-sudo chmod 440 /etc/sudoers.d/codex-summary-env
-sudo visudo -cf /etc/sudoers.d/codex-summary-env
-
 current_userns="$(
   sysctl -n kernel.unprivileged_userns_clone 2>/dev/null || true
 )"

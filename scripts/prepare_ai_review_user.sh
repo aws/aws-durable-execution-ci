@@ -41,13 +41,23 @@ sudo install \
   -g "$review_user" \
   "${private_dirs[@]}"
 
-# Standard hosted runners make /home/runner traversable. Keep this exact ACL
-# fallback for images that use a private runner home instead.
-if ! sudo -u "$review_user" test -x /home/runner; then
-  sudo setfacl -m "u:${review_user}:--x" /home/runner
-fi
+# The review user must traverse every directory above the workspace. Hosted
+# runners keep it under a private /home/runner; CodeBuild runners keep it
+# under a world-traversable /codebuild tree. Grant execute-only ACLs on exactly
+# the ancestors that block traversal, checking top-down so each test only
+# depends on ancestors already handled.
+ancestor="/"
+IFS=/ read -r -a ancestor_parts <<< "$(dirname "${GITHUB_WORKSPACE#/}")"
+for part in "${ancestor_parts[@]}"; do
+  ancestor="${ancestor%/}/${part}"
+  if ! sudo -u "$review_user" test -x "$ancestor"; then
+    sudo setfacl -m "u:${review_user}:--x" "$ancestor"
+  fi
+done
 
-sudo chown -R "runner:${review_user}" "$GITHUB_WORKSPACE"
+# The workspace stays owned by the account running the job (`runner` on
+# hosted runners, `root` on CodeBuild); only group access is opened.
+sudo chown -R "$(id -un):${review_user}" "$GITHUB_WORKSPACE"
 sudo chmod -R g-w,o-rwx "$GITHUB_WORKSPACE"
 sudo chmod -R g+rX "$GITHUB_WORKSPACE"
 

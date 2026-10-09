@@ -44,6 +44,11 @@ on:
         default: false
   workflow_call:
     inputs:
+      runs-on:
+        description: Runner label for every job in this workflow
+        required: false
+        type: string
+        default: ubuntu-latest
       issue-number:
         description: Optional authorized issue number to implement
         required: false
@@ -93,6 +98,7 @@ jobs:
       pull-requests: read
     uses: ./.github/workflows/ai-work-item-resolver.yml
     with:
+      runs-on: ${{ inputs['runs-on'] || 'ubuntu-latest' }}
       work-scope: implementation
       requested-issue-number: ${{ inputs['issue-number'] || '' }}
       no-pr-label: >-
@@ -113,6 +119,7 @@ jobs:
       pull-requests: write
     uses: ./.github/workflows/codex-issue-worker.yml
     with:
+      runs-on: ${{ inputs['runs-on'] || 'ubuntu-latest' }}
       issue-number: ${{ matrix.issue_number }}
       pull-request-number: ${{ matrix.pull_request_number }}
       address-only: ${{ matrix.address_only }}
