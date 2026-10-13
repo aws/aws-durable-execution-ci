@@ -201,6 +201,16 @@ class AiPrReviewWorkflowTest(unittest.TestCase):
             generate,
         )
 
+    def test_claude_turn_limit_is_owned_by_the_cli_wrapper(self):
+        generate = job_block(CLAUDE_WORKFLOW, "generate")
+
+        self.assertIn(
+            "path_to_claude_code_executable: ${{ github.workspace }}"
+            "/.ai-review-toolkit/scripts/run_claude_isolated.sh",
+            generate,
+        )
+        self.assertNotIn("--max-turns", generate)
+
     def test_codex_workflow_uses_model_and_reasoning_inputs(self):
         self.assert_input_default(
             CODEX_WORKFLOW,
