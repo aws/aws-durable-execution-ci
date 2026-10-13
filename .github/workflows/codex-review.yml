@@ -3,6 +3,11 @@ name: Codex PR Review
 on:
   workflow_call:
     inputs:
+      runs-on:
+        description: Runner label for every job in this workflow
+        required: false
+        type: string
+        default: ubuntu-latest
       pull-request-number:
         description: Pull request number to review
         required: true
@@ -62,7 +67,7 @@ concurrency:
 jobs:
   generate:
     name: Generate Codex review
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs['runs-on'] || 'ubuntu-latest' }}
     environment: >-
       ${{ inputs['environment-name'] || 'ai-pr-review-runtime' }}
     timeout-minutes: 45
@@ -153,14 +158,6 @@ jobs:
         run: |
           bash .ai-review-toolkit/scripts/prepare_ai_review_user.sh codex-review
 
-          # Codex runs through sudo, so preserve its AWS SDK credential chain.
-          sudo sh -c \
-            'printf "%s\n" \
-              "Defaults:runner env_keep += \"AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_REGION AWS_DEFAULT_REGION\"" \
-              > /etc/sudoers.d/codex-review-env'
-          sudo chmod 440 /etc/sudoers.d/codex-review-env
-          sudo visudo -cf /etc/sudoers.d/codex-review-env
-
           current_userns="$(
             sysctl -n kernel.unprivileged_userns_clone 2>/dev/null || true
           )"
@@ -233,24 +230,35 @@ jobs:
           output_schema="${GITHUB_WORKSPACE}/.ai-review-toolkit/.github/prompts/ai-pr-review-schema.json"
           trap 'sudo rm -rf "$output_dir"' EXIT
 
-          sudo -u codex-review -- sh -c '
-            : "${AWS_ACCESS_KEY_ID:?AWS_ACCESS_KEY_ID was not preserved by sudo}"
-            : "${AWS_SECRET_ACCESS_KEY:?AWS_SECRET_ACCESS_KEY was not preserved by sudo}"
-            : "${AWS_SESSION_TOKEN:?AWS_SESSION_TOKEN was not preserved by sudo}"
-            : "${AWS_REGION:?AWS_REGION was not preserved by sudo}"
-          '
+          for required in AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_REGION; do
+            : "${!required:?${required} is not set in the job environment}"
+          done
 
           review_ready=false
           for attempt in 1 2; do
             sudo -u codex-review -- rm -f "$output_file"
 
+            # The model receives only this allowlist. `env -i` makes that true
+            # regardless of the runner image's sudo env_reset/env_keep policy.
             # Keep enough of the job budget for a complete second attempt.
-            if sudo -u codex-review -- timeout \
+            if sudo -u codex-review -- env -i \
+              AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \
+              AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" \
+              AWS_SESSION_TOKEN="$AWS_SESSION_TOKEN" \
+              AWS_REGION="$AWS_REGION" \
+              AWS_DEFAULT_REGION="$AWS_DEFAULT_REGION" \
+              AWS_EC2_METADATA_DISABLED=true \
+              CODEX_HOME=/home/codex-review/.codex \
+              HOME=/home/codex-review \
+              LANG=C.UTF-8 \
+              LOGNAME=codex-review \
+              PATH="$PATH" \
+              SHELL=/bin/bash \
+              USER=codex-review \
+              /usr/bin/timeout \
               --signal=TERM \
               --kill-after=30s \
               20m \
-              env \
-              CODEX_HOME=/home/codex-review/.codex \
               "$codex_bin" exec \
               --skip-git-repo-check \
               --cd "$GITHUB_WORKSPACE" \
@@ -295,8 +303,8 @@ jobs:
 
           sudo install \
             -m 600 \
-            -o runner \
-            -g runner \
+            -o "$(id -un)" \
+            -g "$(id -gn)" \
             "$output_file" \
             "${RUNNER_TEMP}/codex-review.json"
 
@@ -312,7 +320,7 @@ jobs:
   post:
     name: Post Codex review
     needs: generate
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs['runs-on'] || 'ubuntu-latest' }}
     timeout-minutes: 10
     permissions:
       contents: write

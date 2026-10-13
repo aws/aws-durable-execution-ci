@@ -6289,7 +6289,7 @@ class WorkflowPolicyTest(unittest.TestCase):
     def test_unprivileged_user_can_write_only_the_worktree(self):
         self.assertIn("codex-implement", USER_SCRIPT)
         self.assertIn(
-            'sudo chown -R "runner:${implementation_user}" '
+            'sudo chown -R "${job_user}:${implementation_user}" '
             '"$GITHUB_WORKSPACE/.git"',
             USER_SCRIPT,
         )

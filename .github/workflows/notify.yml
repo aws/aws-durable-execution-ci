@@ -11,6 +11,11 @@ on:
     types: [published]
   workflow_call:
     inputs:
+      runs-on:
+        description: Runner label for every job in this workflow
+        required: false
+        type: string
+        default: ubuntu-latest
       environment-name:
         description: GitHub environment used for the model job
         required: false
@@ -46,7 +51,7 @@ jobs:
     if: >-
       github.event_name != 'pull_request_target' ||
       github.event.pull_request.draft == false
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs['runs-on'] || 'ubuntu-latest' }}
     environment: >-
       ${{ inputs['environment-name'] || 'ai-pr-review-runtime' }}
     timeout-minutes: 10
@@ -167,19 +172,30 @@ jobs:
 
           trusted_prompt="$(cat "$prompt_file")"
           cd /tmp
-          sudo -u codex-summary -- sh -c '
-            : "${AWS_ACCESS_KEY_ID:?AWS_ACCESS_KEY_ID was not preserved by sudo}"
-            : "${AWS_SECRET_ACCESS_KEY:?AWS_SECRET_ACCESS_KEY was not preserved by sudo}"
-            : "${AWS_SESSION_TOKEN:?AWS_SESSION_TOKEN was not preserved by sudo}"
-            : "${AWS_REGION:?AWS_REGION was not preserved by sudo}"
-          '
+          for required in AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_REGION; do
+            : "${!required:?${required} is not set in the job environment}"
+          done
 
-          sudo -u codex-summary -- timeout \
+          # The model receives only this allowlist. `env -i` makes that true
+          # regardless of the runner image's sudo env_reset/env_keep policy.
+          sudo -u codex-summary -- env -i \
+            AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \
+            AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" \
+            AWS_SESSION_TOKEN="$AWS_SESSION_TOKEN" \
+            AWS_REGION="$AWS_REGION" \
+            AWS_DEFAULT_REGION="$AWS_DEFAULT_REGION" \
+            AWS_EC2_METADATA_DISABLED=true \
+            CODEX_HOME=/home/codex-summary/.codex \
+            HOME=/home/codex-summary \
+            LANG=C.UTF-8 \
+            LOGNAME=codex-summary \
+            PATH="$PATH" \
+            SHELL=/bin/bash \
+            USER=codex-summary \
+            /usr/bin/timeout \
             --signal=TERM \
             --kill-after=15s \
             2m \
-            env \
-            CODEX_HOME=/home/codex-summary/.codex \
             "$codex_bin" \
             --ask-for-approval never \
             --sandbox read-only \
@@ -214,8 +230,8 @@ jobs:
 
           sudo install \
             -m 600 \
-            -o runner \
-            -g runner \
+            -o "$(id -un)" \
+            -g "$(id -gn)" \
             "$model_output" \
             "${summary_dir}/raw-summary.txt"
 
@@ -236,7 +252,7 @@ jobs:
       !cancelled() &&
       github.event_name == 'pull_request_target' &&
       github.event.pull_request.draft == false
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs['runs-on'] || 'ubuntu-latest' }}
     timeout-minutes: 5
     permissions: {}
     steps:
@@ -260,7 +276,7 @@ jobs:
       always() &&
       !cancelled() &&
       github.event_name == 'issues'
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs['runs-on'] || 'ubuntu-latest' }}
     timeout-minutes: 5
     permissions: {}
     steps:
@@ -284,7 +300,7 @@ jobs:
       always() &&
       !cancelled() &&
       github.event_name == 'discussion'
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs['runs-on'] || 'ubuntu-latest' }}
     timeout-minutes: 5
     permissions: {}
     steps:
@@ -308,7 +324,7 @@ jobs:
       always() &&
       !cancelled() &&
       github.event_name == 'release'
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs['runs-on'] || 'ubuntu-latest' }}
     timeout-minutes: 5
     permissions: {}
     steps:
