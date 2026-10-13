@@ -49,6 +49,10 @@ for name in "${allowlist[@]}"; do
   fi
 done
 
+# Apply the round limit only to the CLI. The action compares num_turns (which
+# counts tool results) with its maxTurns option and can reject successful runs.
+# Keep this here until anthropics/claude-code-action#1795 is fixed; real CLI
+# error_max_turns results still propagate to the action as failures.
 exec sudo -u claude-review -- env -i \
   "${model_env[@]}" \
   AWS_EC2_METADATA_DISABLED=true \
@@ -59,4 +63,4 @@ exec sudo -u claude-review -- env -i \
   SHELL=/bin/bash \
   TMPDIR=/home/claude-review/tmp \
   USER=claude-review \
-  "$claude_bin" "$@"
+  "$claude_bin" --max-turns 20 "$@"

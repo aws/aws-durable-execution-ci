@@ -204,10 +204,11 @@ jobs:
           allowed_bots: dependabot
           classify_inline_comments: "false"
           prompt: ${{ steps.review-inputs.outputs.prompt }}
+          # The CLI wrapper enforces the 20-round limit directly to avoid the
+          # action's incorrect num_turns comparison. See anthropics/claude-code-action#1795.
           claude_args: |
             --model ${{ steps.review-config.outputs.model }}
             --effort ${{ steps.review-config.outputs.reasoning_effort }}
-            --max-turns 20
             --bare
             --tools "Read,Grep,Glob"
             --allowedTools "Read,Grep,Glob"

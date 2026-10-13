@@ -226,7 +226,13 @@ Codex defaults to `us-west-2`. Use the `region` input to select another AWS
 region for the Codex review.
 
 Claude runs in bare mode with only the `Read`, `Grep`, and `Glob` built-in
-tools available.
+tools available. Its CLI limits each review to 20 agentic rounds, and the
+generation job has a 30-minute timeout. The isolated CLI wrapper applies the
+turn limit directly to work around
+[anthropics/claude-code-action#1795](https://github.com/anthropics/claude-code-action/issues/1795),
+which can reject successful reviews by comparing tool-result counts with the
+round limit. Genuine CLI failures, including reaching the round limit, still
+fail the review.
 
 Model IDs must be available through the configured Amazon Bedrock provider.
 Not every model supports every reasoning level, so the selected model still
