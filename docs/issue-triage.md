@@ -53,15 +53,16 @@ jobs:
 
 Replace `<full-commit-sha>` with the 40-character commit SHA to use.
 
-## Models and reasoning
+## Model, reasoning, and region
 
-The default model is `openai.gpt-5.6-sol` with `medium` reasoning. Both can be
-overridden:
+The default model is `openai.gpt-6-astra` in `us-west-2` with `medium`
+reasoning. All three settings can be overridden:
 
 ```yaml
     uses: aws/aws-durable-execution-ci/.github/workflows/issue-triage.yml@<full-commit-sha>
     with:
-      model: openai.gpt-5.6-sol
+      model: openai.gpt-6-astra
+      region: us-west-2
       reasoning-effort: low
     secrets: inherit
 ```
