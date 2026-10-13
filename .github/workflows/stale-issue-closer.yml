@@ -10,6 +10,11 @@ on:
   workflow_dispatch:
   workflow_call:
     inputs:
+      runs-on:
+        description: Runner label for every job in this workflow
+        required: false
+        type: string
+        default: ubuntu-latest
       days-until-close:
         description: Days without a response before an issue is closed
         required: false
@@ -29,7 +34,7 @@ concurrency:
 jobs:
   close-stale:
     name: Close stale issues
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs['runs-on'] || 'ubuntu-latest' }}
     timeout-minutes: 15
     permissions:
       contents: read

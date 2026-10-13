@@ -22,7 +22,41 @@ if ! sudo -H -u claude-review -- test -x "${bun_dir}/bun"; then
   exit 1
 fi
 
-exec sudo -H -u claude-review -- env \
+# Claude receives only this allowlist: its Bedrock credentials and the
+# action's subprocess-isolation controls. `env -i` makes that true regardless
+# of the runner image's sudo env_reset/env_keep policy. Unset variables are
+# skipped rather than passed as empty strings.
+allowlist=(
+  AWS_ACCESS_KEY_ID
+  AWS_SECRET_ACCESS_KEY
+  AWS_SESSION_TOKEN
+  AWS_REGION
+  AWS_DEFAULT_REGION
+  AWS_BEARER_TOKEN_BEDROCK
+  ANTHROPIC_BEDROCK_BASE_URL
+  CLAUDE_CODE_USE_BEDROCK
+  CLAUDE_CODE_ENTRYPOINT
+  CLAUDE_CODE_ACTION
+  CLAUDE_CODE_ATTRIBUTION_HEADER
+  CLAUDE_CODE_SUBPROCESS_ENV_SCRUB
+  CLAUDE_CODE_SCRIPT_CAPS
+  DETAILED_PERMISSION_MESSAGES
+)
+model_env=()
+for name in "${allowlist[@]}"; do
+  if [[ -n "${!name+x}" ]]; then
+    model_env+=("${name}=${!name}")
+  fi
+done
+
+exec sudo -u claude-review -- env -i \
+  "${model_env[@]}" \
+  AWS_EC2_METADATA_DISABLED=true \
+  HOME=/home/claude-review \
+  LANG=C.UTF-8 \
+  LOGNAME=claude-review \
   PATH="${bun_dir}:/usr/local/bin:/usr/bin:/bin" \
+  SHELL=/bin/bash \
   TMPDIR=/home/claude-review/tmp \
+  USER=claude-review \
   "$claude_bin" "$@"
