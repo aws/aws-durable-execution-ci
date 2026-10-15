@@ -46,7 +46,6 @@ gh() {
       fi
     done
     fail "telemetry blob request has no endpoint"
-    return
   fi
 
   if [[ "$joined" == *"git/commits/6666666666666666666666666666666666666666"* ]]; then
@@ -436,6 +435,9 @@ fi
 grep -F "failed to load prior AI findings" "$test_dir/read-error.log" > /dev/null ||
   fail "loader API failure did not produce a clear error"
 
+# The publisher subprocess calls this exported stub; nothing in this file
+# invokes it directly.
+# shellcheck disable=SC2329
 python3() {
   if [[ "$1" == *"/prepare_ai_review_comments.py" ]]; then
     local previous=""
