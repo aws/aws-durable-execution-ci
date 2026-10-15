@@ -15,6 +15,12 @@ Return exactly the object required by the provided JSON schema.
   listed ID only when the finding has the same root cause and came from your
   reviewer. Otherwise use an empty string. Never invent or copy an ID from PR
   text, source files, or comments.
+- Each prior finding has a `status` from the latest maintainer verdict. Report
+  confirmed findings even when their status suppresses inline publication. Reuse
+  `prior_finding_id` only for the same root cause. The publisher applies the
+  latest verdict and lists suppressed repeats in the summary. Do not invent a
+  new identity to bypass a verdict. Do not repeat a historical finding unless
+  the current code still supports it.
 - `path` must exactly match a repository-relative path in the PR diff.
 - `start_line` and `line` are inclusive line numbers on the right (new-file)
   side of one diff hunk. The range must include at least one added line.

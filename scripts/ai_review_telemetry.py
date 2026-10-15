@@ -19,6 +19,11 @@ SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 IDENTIFIER_PATTERN = re.compile(r"^[a-z][a-z0-9_]*_v[0-9]+_[a-z2-7]{26}$")
 FINDING_KEY_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._:/-]{2,255}$")
 SAFE_PATH_PATTERN = re.compile(r"^[A-Za-z0-9._/-]+$")
+VERDICT_OUTCOMES = frozenset(
+    ("accepted", "deferred", "false-positive", "out-of-scope", "already-fixed")
+)
+SUPPRESSING_VERDICTS = frozenset(("deferred", "false-positive", "out-of-scope"))
+FINDING_STATUSES = VERDICT_OUTCOMES | {"open"}
 
 
 class TelemetryError(ValueError):
@@ -71,6 +76,13 @@ def require_identifier(value: Any, label: str) -> str:
     if not isinstance(value, str) or not IDENTIFIER_PATTERN.fullmatch(value):
         raise TelemetryError(f"{label} is invalid")
     return value
+
+
+def require_finding_id(value: Any) -> str:
+    identifier = require_identifier(value, "finding_id")
+    if not identifier.startswith(f"arf_v{SCHEMA_VERSION}_"):
+        raise TelemetryError("finding_id is invalid")
+    return identifier
 
 
 def require_finding_key(value: Any) -> str:

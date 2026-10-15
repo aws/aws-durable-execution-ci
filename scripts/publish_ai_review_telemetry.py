@@ -9,10 +9,12 @@ from typing import Any
 
 from ai_review_telemetry import (
     SCHEMA_VERSION,
+    SUPPRESSING_VERDICTS,
     TelemetryError,
     TelemetryStore,
     build_record,
     finding_path,
+    require_finding_id,
     require_identifier,
     require_pull_request_number,
     require_repository_id,
@@ -46,7 +48,9 @@ def read_json_lines(path: Path | None) -> list[Any]:
     return values
 
 
-def prepared_telemetry(prepared: Any) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+def prepared_telemetry(
+    prepared: Any,
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
     if not isinstance(prepared, dict) or set(prepared) != {
         "summary",
         "comments",
@@ -57,12 +61,23 @@ def prepared_telemetry(prepared: Any) -> tuple[dict[str, Any], list[dict[str, An
     if not isinstance(telemetry, dict) or set(telemetry) != {
         "review",
         "findings",
+        "suppressed_findings",
     }:
         raise TelemetryError("prepared review telemetry is invalid")
     review = telemetry["review"]
     findings = telemetry["findings"]
-    if not isinstance(review, dict) or not isinstance(findings, list):
+    suppressed_findings = telemetry["suppressed_findings"]
+    if (
+        not isinstance(review, dict)
+        or not isinstance(findings, list)
+        or not isinstance(suppressed_findings, list)
+    ):
         raise TelemetryError("prepared review telemetry has invalid types")
+    if (
+        not isinstance(prepared["comments"], list)
+        or len(prepared["comments"]) != len(findings)
+    ):
+        raise TelemetryError("prepared comments and findings are not aligned")
     required_review = {
         "review_id",
         "review_digest",
@@ -95,8 +110,9 @@ def prepared_telemetry(prepared: Any) -> tuple[dict[str, Any], list[dict[str, An
     if not isinstance(review["trigger"], dict):
         raise TelemetryError("review trigger metadata is invalid")
 
-    normalized_findings = []
-    for position, finding in enumerate(findings):
+    seen_finding_ids: set[str] = set()
+    seen_observation_ids: set[str] = set()
+    for position, finding in enumerate(findings + suppressed_findings):
         if not isinstance(finding, dict):
             raise TelemetryError(f"prepared finding {position + 1} is invalid")
         required_finding = {
@@ -116,12 +132,25 @@ def prepared_telemetry(prepared: Any) -> tuple[dict[str, Any], list[dict[str, An
             "suggestion_id",
             "suggestion_digest",
         }
+        suppressed = position >= len(findings)
+        if suppressed:
+            required_finding.add("suppression_status")
+            status = finding.get("suppression_status")
+            if not isinstance(status, str) or status not in SUPPRESSING_VERDICTS:
+                raise TelemetryError("prepared suppression status is invalid")
         if set(finding) != required_finding:
             raise TelemetryError(
                 f"prepared finding {position + 1} fields are invalid"
             )
-        require_identifier(finding["finding_id"], "finding_id")
+        require_finding_id(finding["finding_id"])
         require_identifier(finding["observation_id"], "observation_id")
+        if (
+            finding["finding_id"] in seen_finding_ids
+            or finding["observation_id"] in seen_observation_ids
+        ):
+            raise TelemetryError("prepared findings repeat an identity")
+        seen_finding_ids.add(finding["finding_id"])
+        seen_observation_ids.add(finding["observation_id"])
         if finding["suggestion_id"]:
             require_identifier(finding["suggestion_id"], "suggestion_id")
         if (
@@ -132,8 +161,7 @@ def prepared_telemetry(prepared: Any) -> tuple[dict[str, Any], list[dict[str, An
             raise TelemetryError(
                 f"prepared finding {position + 1} text fields are invalid"
             )
-        normalized_findings.append(finding)
-    return review, normalized_findings
+    return review, findings, suppressed_findings
 
 
 def content_digest(value: str) -> str:
@@ -184,6 +212,8 @@ def suggestion_file(
 
 def review_manifest(
     findings: list[dict[str, Any]],
+    *,
+    suppressed: bool = False,
 ) -> list[dict[str, Any]]:
     return [
         {
@@ -193,11 +223,16 @@ def review_manifest(
             "start_line": finding["start_line"],
             "line": finding["line"],
             "body_digest": content_digest(finding["body"]),
-            "suggestion_id": finding["suggestion_id"],
+            "suggestion_id": "" if suppressed else finding["suggestion_id"],
             "suggestion_digest": (
                 content_digest(finding["suggestion"])
                 if finding["has_suggestion"]
                 else ""
+            ),
+            **(
+                {"suppression_status": finding["suppression_status"]}
+                if suppressed
+                else {}
             ),
         }
         for finding in findings
@@ -210,7 +245,7 @@ def plan_review(
     *,
     recorded_at: str | None = None,
 ) -> dict[str, Any]:
-    review, findings = prepared_telemetry(prepared)
+    review, findings, suppressed_findings = prepared_telemetry(prepared)
     trigger_timestamp = review["trigger"].get("event_timestamp")
     planned_at = recorded_at or (
         require_timestamp(trigger_timestamp, "trigger event timestamp")
@@ -228,10 +263,14 @@ def plan_review(
             **review,
             "planned_at": planned_at,
             "findings": review_manifest(findings),
+            "suppressed_findings": review_manifest(
+                suppressed_findings,
+                suppressed=True,
+            ),
         },
     )
     extra_files: dict[str, Any] = {}
-    for finding in findings:
+    for finding in findings + suppressed_findings:
         extra_files[
             finding_path(
                 review["pull_request_number"],
@@ -297,7 +336,7 @@ def publish_review(
     comment_values: list[Any],
     summary_value: Any,
 ) -> list[dict[str, Any]]:
-    review, findings = prepared_telemetry(prepared)
+    review, findings, suppressed_findings = prepared_telemetry(prepared)
     comments = published_comments(comment_values, findings)
     if not isinstance(summary_value, dict) or set(summary_value) != {
         "comment_node_id",
@@ -334,11 +373,20 @@ def publish_review(
                 }
                 for manifest in review_manifest(findings)
             ],
+            "suppressed_findings": review_manifest(
+                suppressed_findings,
+                suppressed=True,
+            ),
         },
     )
     records = [review_record]
-    for finding in findings:
-        comment = comments[finding["observation_id"]]
+    for finding in findings + suppressed_findings:
+        suppressed = "suppression_status" in finding
+        comment = (
+            {"comment_node_id": "", "created_at": summary_created_at}
+            if suppressed
+            else comments[finding["observation_id"]]
+        )
         records.append(
             build_record(
                 record_type="finding_observed",
@@ -363,9 +411,19 @@ def publish_review(
                     "start_line": finding["start_line"],
                     "line": finding["line"],
                     "body": finding["body"],
-                    "suggestion_id": finding["suggestion_id"],
+                    "suggestion_id": (
+                        "" if suppressed else finding["suggestion_id"]
+                    ),
                     "comment_node_id": comment["comment_node_id"],
                     "published_at": comment["created_at"],
+                    **(
+                        {
+                            "suppressed": True,
+                            "suppression_status": finding["suppression_status"],
+                        }
+                        if suppressed
+                        else {}
+                    ),
                 },
             )
         )
@@ -393,7 +451,7 @@ def fail_review(
     *,
     recorded_at: str | None = None,
 ) -> dict[str, Any]:
-    review, findings = prepared_telemetry(prepared)
+    review, findings, _suppressed_findings = prepared_telemetry(prepared)
     failed_at = recorded_at or utc_now()
     partial_comments = []
     expected = {finding["observation_id"] for finding in findings}
@@ -446,7 +504,7 @@ def main() -> int:
     args = parse_args()
     try:
         prepared = read_json(args.prepared)
-        review, _findings = prepared_telemetry(prepared)
+        review, _findings, _suppressed_findings = prepared_telemetry(prepared)
         store = TelemetryStore(review["repository"])
         if args.operation == "plan":
             plan_review(store, prepared)

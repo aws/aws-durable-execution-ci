@@ -10,7 +10,11 @@ from pathlib import Path
 from typing import Any
 
 from ai_review_telemetry import (
+    FINDING_STATUSES,
+    SUPPRESSING_VERDICTS,
     TelemetryError,
+    VERDICT_OUTCOMES,
+    require_finding_id,
     require_finding_key,
     require_identifier,
     require_pull_request_number,
@@ -30,6 +34,12 @@ REVIEWER_TITLES = {
 }
 DEFAULT_BASE_SHA = "0" * 40
 DEFAULT_WORKFLOW_SHA = "0" * 40
+VERDICT_FOOTER = (
+    "To suppress repeats, reply `/ai verdict deferred`, "
+    "`/ai verdict false-positive`, or `/ai verdict out-of-scope` "
+    "on the first nonblank line. Add rationale on later lines. "
+    "A new `/ai verdict accepted` allows future repeats again."
+)
 
 
 class ReviewValidationError(ValueError):
@@ -138,6 +148,7 @@ def parse_prior_findings(value: Any) -> dict[str, dict[str, Any]]:
             "body",
             "reviewed_head_sha",
             "observed_at",
+            "status",
         }
         require_exact_keys(finding, expected, label)
         try:
@@ -157,12 +168,48 @@ def parse_prior_findings(value: Any) -> dict[str, dict[str, Any]]:
             minimum=1,
             maximum=64,
         )
+        if (
+            not isinstance(finding["status"], str)
+            or finding["status"] not in FINDING_STATUSES
+        ):
+            raise ReviewValidationError(f"{label}.status is invalid")
         if finding_id in findings:
             raise ReviewValidationError(
                 f"prior findings repeat finding ID {finding_id}"
             )
         findings[finding_id] = finding
     return findings
+
+
+def parse_finding_decisions(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict):
+        raise ReviewValidationError("finding decisions must be an object")
+    for finding_id, outcome in value.items():
+        try:
+            require_finding_id(finding_id)
+        except TelemetryError as error:
+            raise ReviewValidationError(str(error)) from error
+        if not isinstance(outcome, str) or outcome not in VERDICT_OUTCOMES:
+            raise ReviewValidationError("finding decision outcome is invalid")
+    return value
+
+
+def suppression_summary(
+    summary: str,
+    suppressed_findings: list[dict[str, Any]],
+) -> str:
+    if not suppressed_findings:
+        return summary
+    section = "\n\n### Suppressed repeats\n\n" + "\n".join(
+        f"- `{finding['finding_id']}` — "
+        f"{finding['suppression_status']} (maintainer verdict)"
+        for finding in suppressed_findings
+    )
+    overview_budget = 4000 - len(section)
+    if len(summary) > overview_budget:
+        notice = "\n\n[Review overview truncated.]"
+        summary = summary[: overview_budget - len(notice)].rstrip() + notice
+    return summary + section
 
 
 def decode_trigger_metadata(encoded: str) -> dict[str, Any]:
@@ -205,6 +252,7 @@ def prepare_review(
     run_attempt: str,
     expected_head_sha: str,
     *,
+    finding_decisions: Any,
     repository_id: int | str = 1,
     repository: str = "local/example",
     pull_request_number: int | str = 1,
@@ -250,7 +298,10 @@ def prepare_review(
     normalized_trigger = trigger_metadata or {}
     if not isinstance(normalized_trigger, dict):
         raise ReviewValidationError("trigger metadata must be an object")
-    normalized_prior = parse_prior_findings(prior_findings or [])
+    normalized_prior = parse_prior_findings(
+        [] if prior_findings is None else prior_findings
+    )
+    normalized_decisions = parse_finding_decisions(finding_decisions)
 
     if not isinstance(review, dict):
         raise ReviewValidationError("review must be an object")
@@ -299,6 +350,7 @@ def prepare_review(
     )
     prepared_comments: list[dict[str, Any]] = []
     telemetry_findings: list[dict[str, Any]] = []
+    suppressed_findings: list[dict[str, Any]] = []
     seen_comments: set[tuple[Any, ...]] = set()
     seen_finding_ids: set[str] = set()
     expected_keys = {
@@ -467,6 +519,29 @@ def prepare_review(
                 },
             )
 
+        prepared_finding = {
+            "finding_id": finding_id,
+            "finding_digest": finding_digest,
+            "finding_key": finding_key,
+            "identity_key": identity_key,
+            "prior_finding_id": prior_finding_id,
+            "observation_id": observation_id,
+            "observation_digest": observation_digest,
+            "path": path,
+            "start_line": start_line,
+            "line": end_line,
+            "body": body,
+            "has_suggestion": has_suggestion,
+            "suggestion": suggestion,
+            "suggestion_id": suggestion_id,
+            "suggestion_digest": suggestion_digest,
+        }
+        status = normalized_decisions.get(finding_id, "open")
+        if status in SUPPRESSING_VERDICTS:
+            prepared_finding["suppression_status"] = status
+            suppressed_findings.append(prepared_finding)
+            continue
+
         published_body = (
             f"{marker}\n"
             f"<!-- ai-pr-review:finding:{reviewer}:{finding_id} -->\n"
@@ -476,6 +551,7 @@ def prepare_review(
         )
         if has_suggestion:
             published_body += f"\n\n{suggestion_fence(suggestion)}"
+        published_body += f"\n\n{VERDICT_FOOTER}"
 
         payload: dict[str, Any] = {
             "body": published_body,
@@ -488,28 +564,10 @@ def prepare_review(
             payload["start_line"] = start_line
             payload["start_side"] = "RIGHT"
         prepared_comments.append(payload)
-        telemetry_findings.append(
-            {
-                "finding_id": finding_id,
-                "finding_digest": finding_digest,
-                "finding_key": finding_key,
-                "identity_key": identity_key,
-                "prior_finding_id": prior_finding_id,
-                "observation_id": observation_id,
-                "observation_digest": observation_digest,
-                "path": path,
-                "start_line": start_line,
-                "line": end_line,
-                "body": body,
-                "has_suggestion": has_suggestion,
-                "suggestion": suggestion,
-                "suggestion_id": suggestion_id,
-                "suggestion_digest": suggestion_digest,
-            }
-        )
+        telemetry_findings.append(prepared_finding)
 
     return {
-        "summary": summary,
+        "summary": suppression_summary(summary, suppressed_findings),
         "comments": prepared_comments,
         "telemetry": {
             "review": {
@@ -531,6 +589,7 @@ def prepare_review(
                 "trigger": normalized_trigger,
             },
             "findings": telemetry_findings,
+            "suppressed_findings": suppressed_findings,
         },
     }
 
@@ -555,6 +614,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--review-guidance-base64", default="")
     parser.add_argument("--trigger-metadata-base64", default="")
     parser.add_argument("--prior-findings", required=True, type=Path)
+    parser.add_argument("--finding-decisions", required=True, type=Path)
     return parser.parse_args()
 
 
@@ -576,6 +636,9 @@ def main() -> int:
         prior_findings_value = json.loads(
             args.prior_findings.read_text(encoding="utf-8")
         )
+        finding_decisions_value = json.loads(
+            args.finding_decisions.read_text(encoding="utf-8")
+        )
         prepared = prepare_review(
             review,
             files,
@@ -583,6 +646,7 @@ def main() -> int:
             args.run_id,
             args.run_attempt,
             args.expected_head_sha,
+            finding_decisions=finding_decisions_value,
             repository_id=args.repository_id,
             repository=args.repository,
             pull_request_number=args.pull_request_number,

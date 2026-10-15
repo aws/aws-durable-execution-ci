@@ -154,6 +154,69 @@ the maintainer identity, reviewed base and head SHA, current head SHA, command
 timestamp, and comment ID, then acknowledges the verdict. It stores
 superseding commands as new immutable events rather than editing history.
 
+The first nonblank line must contain only the command. Add rationale on later
+lines:
+
+```text
+/ai verdict deferred
+
+This behavior follows an earlier design decision.
+```
+
+For a conversation-level command, include the finding ID on that first line:
+
+```text
+/ai verdict arf_v1_... out-of-scope
+
+This change belongs in a separate pull request.
+```
+
+Later lines are ignored by command parsing and are not stored in telemetry.
+Editing or deleting a command does not revoke its recorded verdict.
+Post a new command to replace it.
+
+The publisher uses the latest command timestamp for each finding.
+Equal timestamps are ordered by record ID, with the greatest ID taking
+precedence.
+
+| Latest status | Publish a confirmed repeat? |
+| --- | --- |
+| `open` (no verdict) | Yes |
+| `accepted` | Yes |
+| `already-fixed` | Yes |
+| `deferred` | No |
+| `false-positive` | No |
+| `out-of-scope` | No |
+
+A fixed defect can regress, so `already-fixed` allows later observations.
+Resolving or reopening a GitHub thread has no suppression effect.
+Prose replies alone also have no suppression effect.
+A suppressing verdict remains effective across revisions until superseded.
+Post a new `/ai verdict accepted` to allow future repeats again.
+
+The model receives at most 100 prior findings, each with its latest status.
+It still reports confirmed findings and correlates them with prior identities.
+The publisher reloads a separate decision map immediately before preparing
+publication. That map includes verdicts for findings outside the model catalog.
+Therefore a reused key still enforces its verdict after the catalog entry expires.
+A verdict recorded after this reload applies on the next review.
+Verdict recording and publication are not atomic.
+
+The summary lists “Suppressed repeats” only for findings returned by that run.
+It is not an inventory of all suppressed historical findings.
+
+Each PR supports at most 2,000 observation records and 2,000 verdict records
+across both reviewers for these reads.
+API failures, malformed relevant verdicts, and exceeded storage bounds stop
+publication. A missing telemetry branch or an empty verdict history produces an
+empty decision map.
+
+The model controls semantic correlation through keys and prior IDs.
+The publisher validates identity references but cannot prove root-cause
+equivalence. A new key can bypass an old verdict, and an incorrect prior-ID
+association can suppress an unrelated finding.
+Maintain stable keys and replace verdicts when their rationale no longer applies.
+
 ## Measurement telemetry
 
 The workflow records:
@@ -162,7 +225,8 @@ The workflow records:
   and event revisions.
 - The resolved base and head SHA reviewed by each model.
 - Planned, published, and failed review executions.
-- Stable findings, repeated observations, and published GitHub comment IDs.
+- Stable findings, posted and suppressed observations, and published GitHub
+  comment IDs.
 - Structured maintainer verdicts.
 - Human reviews, approvals, inline comments, replies, and conversation
   response timestamps without their bodies.

@@ -448,6 +448,10 @@ class AiPrReviewWorkflowTest(unittest.TestCase):
             "line number, commit SHA, run ID, severity",
             REVIEW_OUTPUT,
         )
+        self.assertIn("`status` from the latest maintainer verdict", REVIEW_OUTPUT)
+        self.assertIn("Report\n  confirmed findings even", REVIEW_OUTPUT)
+        self.assertIn("The publisher applies the\n  latest verdict", REVIEW_OUTPUT)
+        self.assertIn("Do not invent a\n  new identity to bypass a verdict", REVIEW_OUTPUT)
 
 
 if __name__ == "__main__":
