@@ -9,6 +9,7 @@ from typing import Any
 
 from ai_review_telemetry import (
     GitHubApiError,
+    SCHEMA_VERSION,
     TelemetryError,
     TelemetryStore,
     VERDICT_OUTCOMES,
