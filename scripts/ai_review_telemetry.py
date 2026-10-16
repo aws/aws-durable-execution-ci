@@ -583,24 +583,51 @@ class TelemetryStore:
         *,
         maximum: int = 1000,
     ) -> list[Any]:
-        validate_storage_path(prefix.rstrip("/"))
+        return self.list_json_many((prefix,), maximum=maximum)[prefix]
+
+    def list_json_many(
+        self,
+        prefixes: Iterable[str],
+        *,
+        maximum: int = 1000,
+    ) -> dict[str, list[Any]]:
+        """Read each prefix from one fresh tree, with a separate limit per prefix.
+
+        Reuse the tree only within this call. Later calls must see new verdicts.
+        Return empty lists when the telemetry branch is absent.
+        """
+        values: dict[str, list[Any]] = {}
+        for prefix in prefixes:
+            validate_storage_path(prefix.rstrip("/"))
+            values[prefix] = []
+        if not values:
+            return values
         if maximum < 1:
             raise TelemetryError("maximum must be positive")
+
         current = self._load_tree()
         if current is None:
-            return []
-        paths = sorted(
-            path
-            for path in current.entries
-            if path.startswith(prefix) and path.endswith(".json")
-        )
-        if len(paths) > maximum:
-            raise TelemetryError(
-                f"telemetry prefix contains more than {maximum} records"
+            return values
+
+        paths_by_prefix: dict[str, list[str]] = {}
+        for prefix in values:
+            paths = sorted(
+                path
+                for path in current.entries
+                if path.startswith(prefix) and path.endswith(".json")
             )
-        values = []
-        for path in paths:
-            values.append(self._read_blob_json(current.entries[path]))
+            if len(paths) > maximum:
+                raise TelemetryError(
+                    f"telemetry prefix contains more than {maximum} records"
+                )
+
+            paths_by_prefix[prefix] = paths
+
+        for prefix, paths in paths_by_prefix.items():
+            values[prefix] = [
+                self._read_blob_json(current.entries[path]) for path in paths
+            ]
+
         return values
 
 

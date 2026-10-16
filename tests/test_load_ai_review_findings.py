@@ -243,18 +243,48 @@ class LoadAiReviewFindingsTest(unittest.TestCase):
                 stderr.getvalue(),
             )
 
-    def test_cli_writes_both_views_from_one_verdict_read(self):
+    def test_cli_writes_both_views_from_one_multi_prefix_read(self):
         record = verdict()
         store = Mock()
-        store.list_json.side_effect = [
-            [observation(record["data"]["finding_id"])], [record],
-        ]
+        store.list_json_many.return_value = {
+            "events/pr-42/finding_observed/": [observation(record["data"]["finding_id"])],
+            "events/pr-42/finding_verdict/": [record],
+        }
         status, catalog, decision_map, error = self.run_loader(store)
         self.assertEqual(status, 0, error)
         self.assertEqual(catalog[0]["status"], "deferred")
         self.assertEqual(decision_map, decisions([record]))
-        self.assertEqual(store.list_json.call_count, 2)
-        self.assertTrue(all(call.kwargs["maximum"] == 2000 for call in store.list_json.call_args_list))
+        store.list_json_many.assert_called_once_with(
+            ("events/pr-42/finding_observed/", "events/pr-42/finding_verdict/"),
+            maximum=2000,
+        )
+
+    def test_cli_reads_both_prefixes_from_one_tree(self):
+        record = verdict()
+        observation_prefix = "events/pr-42/finding_observed/"
+        verdict_prefix = "events/pr-42/finding_verdict/"
+        current = GitTree(
+            "1" * 40,
+            "2" * 40,
+            {
+                observation_prefix + "observation.json": "3" * 40,
+                verdict_prefix + "verdict.json": "4" * 40,
+            },
+        )
+        store = TelemetryStore("aws/example", api=Mock())
+        with (
+            patch.object(store, "_load_tree", return_value=current) as load_tree,
+            patch.object(
+                store,
+                "_read_blob_json",
+                side_effect=[observation(record["data"]["finding_id"]), record],
+            ),
+        ):
+            status, catalog, decision_map, error = self.run_loader(store)
+        self.assertEqual(status, 0, error)
+        self.assertEqual(catalog[0]["status"], "deferred")
+        self.assertEqual(decision_map, decisions([record]))
+        load_tree.assert_called_once_with()
 
     def test_missing_branch_writes_empty_outputs(self):
         api = Mock()
@@ -263,16 +293,22 @@ class LoadAiReviewFindingsTest(unittest.TestCase):
             TelemetryStore("aws/example", api=api)
         )
         self.assertEqual((status, catalog, decision_map), (0, [], {}), error)
+        api.request.assert_called_once_with(
+            "repos/aws/example/git/ref/heads/ai-review-telemetry-v1"
+        )
 
     def test_read_and_validation_errors_never_write_empty_outputs(self):
         for failure in (GitHubApiError("unavailable", 503), TelemetryError("bad blob")):
             store = Mock()
-            store.list_json.side_effect = [[], failure]
+            store.list_json_many.side_effect = failure
             result = self.run_loader(store)
             self.assertEqual(result[:3], (1, None, None))
             self.assertIn(str(failure), result[3])
         store = Mock()
-        store.list_json.side_effect = [[], [verdict(outcome="invalid")]]
+        store.list_json_many.return_value = {
+            "events/pr-42/finding_observed/": [],
+            "events/pr-42/finding_verdict/": [verdict(outcome="invalid")],
+        }
         self.assertEqual(self.run_loader(store)[:3], (1, None, None))
 
     def test_capacity_errors_for_either_prefix_stop_loading(self):

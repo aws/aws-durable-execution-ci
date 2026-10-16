@@ -169,22 +169,20 @@ def main() -> int:
     try:
         number = require_pull_request_number(args.pull_request_number)
         store = TelemetryStore(args.repository)
-        records = store.list_json(
-            f"events/pr-{number}/finding_observed/",
-            maximum=MAX_STORED_RECORDS,
-        )
-        verdicts = store.list_json(
-            f"events/pr-{number}/finding_verdict/",
+        observation_prefix = f"events/pr-{number}/finding_observed/"
+        verdict_prefix = f"events/pr-{number}/finding_verdict/"
+        records = store.list_json_many(
+            (observation_prefix, verdict_prefix),
             maximum=MAX_STORED_RECORDS,
         )
         decisions = finding_decisions(
-            verdicts,
+            records[verdict_prefix],
             repository=args.repository,
             pull_request_number=number,
             reviewer=args.reviewer,
         )
         findings = prior_findings(
-            records,
+            records[observation_prefix],
             reviewer=args.reviewer,
             decisions=decisions,
         )
