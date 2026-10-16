@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+import copy
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -14,7 +16,9 @@ from publish_ai_review_telemetry import (
     fail_review,
     plan_review,
     publish_review,
+    prepared_telemetry,
 )
+from ai_review_telemetry import TelemetryConflictError, TelemetryStore
 
 
 def prepared_review() -> dict:
@@ -62,8 +66,49 @@ def prepared_review() -> dict:
                     "suggestion_digest": "5" * 64,
                 }
             ],
+            "suppressed_findings": [],
         },
     }
+
+
+def suppressed_review(status="deferred") -> dict:
+    prepared = prepared_review()
+    finding = prepared["telemetry"]["findings"].pop()
+    finding["suppression_status"] = status
+    prepared["telemetry"]["suppressed_findings"].append(finding)
+    prepared["comments"] = []
+    return prepared
+
+
+def mixed_review() -> dict:
+    prepared = prepared_review()
+    suppressed = suppressed_review()["telemetry"]["suppressed_findings"][0]
+    suppressed["finding_id"] = "arf_v1_" + "g" * 26
+    suppressed["observation_id"] = "aro_v1_" + "h" * 26
+    prepared["telemetry"]["suppressed_findings"].append(suppressed)
+    return prepared
+
+
+SUMMARY = {"comment_node_id": "IC_summary", "created_at": "2026-08-25T12:01:10Z"}
+
+
+class ImmutableStore(TelemetryStore):
+    def __init__(self):
+        super().__init__("aws/example")
+        self.files = {}
+
+    def write_files(self, files, *, message):
+        for path, content in files.items():
+            if path in self.files and self.files[path] != content:
+                raise TelemetryConflictError(f"conflicting bytes at {path}")
+        self.files.update(files)
+
+    def records(self, record_type):
+        return [
+            json.loads(content)
+            for path, content in self.files.items()
+            if f"/{record_type}/" in path
+        ]
 
 
 class PublishAiReviewTelemetryTest(unittest.TestCase):
@@ -176,6 +221,142 @@ class PublishAiReviewTelemetryTest(unittest.TestCase):
                 }
             ],
         )
+
+    def test_suppressed_lifecycle_is_immutable_and_idempotent(self):
+        for status in ("deferred", "false-positive", "out-of-scope"):
+            with self.subTest(status=status):
+                store = ImmutableStore()
+                prepared = suppressed_review(status)
+                planned = plan_review(store, prepared, recorded_at="2026-08-25T12:00:00Z")
+                manifest = planned["data"]["suppressed_findings"][0]
+                self.assertEqual(manifest["suppression_status"], status)
+                self.assertEqual(manifest["suggestion_id"], "")
+                self.assertTrue(manifest["body_digest"].startswith("sha256:"))
+                self.assertTrue(manifest["suggestion_digest"].startswith("sha256:"))
+                self.assertNotIn("body", manifest)
+                self.assertNotIn("suggestion", manifest)
+                self.assertEqual(store.records("finding_observed"), [])
+                identity_files = [
+                    json.loads(content)
+                    for path, content in store.files.items()
+                    if path.startswith("findings/")
+                ]
+                self.assertEqual(len(identity_files), 1)
+                self.assertNotIn("body", identity_files[0])
+
+                records = publish_review(store, prepared, [], SUMMARY)
+                self.assertEqual([record["record_type"] for record in records], [
+                    "review_published", "finding_observed",
+                ])
+                self.assertEqual(records[0]["data"]["findings"], [])
+                self.assertEqual(records[0]["data"]["suppressed_findings"], [manifest])
+                observed = records[1]
+                finding = prepared["telemetry"]["suppressed_findings"][0]
+                self.assertEqual(observed["recorded_at"], SUMMARY["created_at"])
+                self.assertEqual(observed["data"]["published_at"], SUMMARY["created_at"])
+                self.assertEqual(observed["data"]["suppression_status"], status)
+                self.assertTrue(observed["data"]["suppressed"])
+                self.assertEqual(observed["data"]["comment_node_id"], "")
+                self.assertEqual(observed["data"]["suggestion_id"], "")
+                for field in ("finding_id", "observation_id", "path", "start_line", "line", "body"):
+                    self.assertEqual(observed["data"][field], finding[field])
+                self.assertEqual(observed["data"]["reviewed_head_sha"], "2" * 40)
+                self.assertFalse(any(path.startswith("suggestions/") for path in store.files))
+                before = dict(store.files)
+                self.assertEqual(publish_review(store, prepared, [], SUMMARY), records)
+                self.assertEqual(store.files, before)
+                self.assertEqual(len(store.records("finding_observed")), 1)
+                with self.assertRaises(TelemetryConflictError):
+                    publish_review(
+                        store, prepared, [],
+                        {**SUMMARY, "created_at": "2026-08-25T12:01:11Z"},
+                    )
+                self.assertEqual(store.files, before)
+
+    def test_failed_publication_writes_no_suppressed_observations(self):
+        store = ImmutableStore()
+        prepared = mixed_review()
+        plan_review(store, prepared, recorded_at="2026-08-25T12:00:00Z")
+        failure = fail_review(
+            store, prepared,
+            [{
+                "observation_id": prepared["telemetry"]["findings"][0]["observation_id"],
+                "comment_node_id": "PRRC_partial",
+            }],
+            recorded_at="2026-08-25T12:02:00Z",
+        )
+        self.assertEqual(len(failure["data"]["partial_comments"]), 1)
+        self.assertEqual(store.records("finding_observed"), [])
+        self.assertEqual(store.records("review_published"), [])
+        self.assertEqual(len(store.records("review_planned")[0]["data"]["suppressed_findings"]), 1)
+
+    def test_mixed_publication_preserves_posted_mapping_and_suggestions(self):
+        prepared = mixed_review()
+        store = ImmutableStore()
+        plan_review(store, prepared, recorded_at="2026-08-25T12:00:00Z")
+        records = publish_review(
+            store, prepared,
+            [{
+                "observation_id": prepared["telemetry"]["findings"][0]["observation_id"],
+                "comment_node_id": "PRRC_posted",
+                "created_at": "2026-08-25T12:01:00Z",
+            }],
+            SUMMARY,
+        )
+        posted, suppressed = records[1:]
+        self.assertEqual(posted["data"]["comment_node_id"], "PRRC_posted")
+        self.assertEqual(posted["recorded_at"], "2026-08-25T12:01:00Z")
+        self.assertNotIn("suppressed", posted["data"])
+        self.assertTrue(suppressed["data"]["suppressed"])
+        suggestions = [path for path in store.files if path.startswith("suggestions/")]
+        self.assertEqual(len(suggestions), 1)
+        self.assertIn(posted["data"]["suggestion_id"], suggestions[0])
+
+    def test_suppressed_observation_is_not_a_posted_mapping_target(self):
+        prepared = suppressed_review()
+        with self.assertRaisesRegex(TelemetryError, "unknown observation"):
+            publish_review(
+                Mock(), prepared,
+                [{
+                    "observation_id": prepared["telemetry"]["suppressed_findings"][0]["observation_id"],
+                    "comment_node_id": "PRRC_forged",
+                    "created_at": SUMMARY["created_at"],
+                }],
+                SUMMARY,
+            )
+        store = ImmutableStore()
+        with self.assertRaisesRegex(TelemetryError, "summary comment mapping"):
+            publish_review(store, prepared, [], None)
+        self.assertEqual(store.files, {})
+
+    def test_suppressed_telemetry_is_required_and_validated(self):
+        invalid = []
+        missing = prepared_review()
+        missing["telemetry"].pop("suppressed_findings")
+        invalid.append(missing)
+        wrong_type = prepared_review()
+        wrong_type["telemetry"]["suppressed_findings"] = {}
+        invalid.append(wrong_type)
+        for status in ("open", "accepted", "already-fixed", [], None):
+            invalid.append(suppressed_review(status))
+        missing_status = suppressed_review()
+        missing_status["telemetry"]["suppressed_findings"][0].pop("suppression_status")
+        invalid.append(missing_status)
+        extra_flag = suppressed_review()
+        extra_flag["telemetry"]["suppressed_findings"][0]["suppressed"] = True
+        invalid.append(extra_flag)
+        duplicate = mixed_review()
+        duplicate["telemetry"]["suppressed_findings"][0]["finding_id"] = (
+            duplicate["telemetry"]["findings"][0]["finding_id"]
+        )
+        invalid.append(duplicate)
+        bad_body = suppressed_review()
+        bad_body["telemetry"]["suppressed_findings"][0]["body"] = None
+        invalid.append(bad_body)
+        for position, prepared in enumerate(invalid):
+            with self.subTest(position=position):
+                with self.assertRaises(TelemetryError):
+                    prepared_telemetry(copy.deepcopy(prepared))
 
 
 if __name__ == "__main__":

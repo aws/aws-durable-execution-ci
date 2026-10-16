@@ -9,7 +9,12 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
-from prepare_ai_review_comments import ReviewValidationError, prepare_review
+from prepare_ai_review_comments import (
+    ReviewValidationError,
+    VERDICT_FOOTER,
+    parse_finding_decisions,
+    prepare_review,
+)
 
 
 HEAD_SHA = "a" * 40
@@ -51,14 +56,16 @@ def finding(**overrides):
     return value
 
 
-def prepare(comments, reviewer="claude"):
+def prepare(comments, reviewer="claude", *, decisions=None, prior=None, summary=None):
     return prepare_review(
-        {"summary": "One actionable finding.", "comments": comments},
+        {"summary": summary or "One actionable finding.", "comments": comments},
         PR_FILES,
         reviewer,
         "123",
         "2",
         HEAD_SHA,
+        finding_decisions={} if decisions is None else decisions,
+        prior_findings=prior,
     )
 
 
@@ -109,6 +116,7 @@ class PrepareAiReviewCommentsTest(unittest.TestCase):
             single["body"],
         )
         self.assertIn("```suggestion\nnew_value = 1\n```", single["body"])
+        self.assertTrue(single["body"].endswith(VERDICT_FOOTER))
         self.assertEqual(multiline["start_line"], 10)
         self.assertEqual(multiline["line"], 12)
         self.assertEqual(multiline["start_side"], "RIGHT")
@@ -130,7 +138,7 @@ class PrepareAiReviewCommentsTest(unittest.TestCase):
     def test_allows_empty_replacement_for_deletion(self):
         prepared = prepare([finding(suggestion="")])
 
-        self.assertTrue(prepared["comments"][0]["body"].endswith("```suggestion\n\n```"))
+        self.assertIn("```suggestion\n\n```", prepared["comments"][0]["body"])
 
     def test_rejects_untrusted_or_unpostable_comments(self):
         invalid_comments = {
@@ -157,20 +165,33 @@ class PrepareAiReviewCommentsTest(unittest.TestCase):
             ),
         }
 
-        for label, comment in invalid_comments.items():
-            with self.subTest(label=label):
-                with self.assertRaises(ReviewValidationError):
-                    prepare([comment])
+        finding_id = prepare([finding()])["telemetry"]["findings"][0]["finding_id"]
+        for decision_map in ({}, {finding_id: "deferred"}):
+            for label, comment in invalid_comments.items():
+                with self.subTest(label=label, decisions=decision_map):
+                    with self.assertRaises(ReviewValidationError):
+                        prepare([comment], decisions=decision_map)
 
     def test_rejects_duplicate_and_extra_fields(self):
         duplicate = finding()
         with self.assertRaises(ReviewValidationError):
             prepare([duplicate, copy.deepcopy(duplicate)])
+        finding_id = prepare([duplicate])["telemetry"]["findings"][0]["finding_id"]
+        with self.assertRaises(ReviewValidationError):
+            prepare(
+                [duplicate, copy.deepcopy(duplicate)],
+                decisions={finding_id: "deferred"},
+            )
 
         extra = finding()
         extra["severity"] = "P1"
         with self.assertRaises(ReviewValidationError):
             prepare([extra])
+        for field, value in (("suppressed", True), ("suppression_status", "deferred")):
+            forged = finding()
+            forged[field] = value
+            with self.assertRaises(ReviewValidationError):
+                prepare([forged])
 
     def test_rejects_invalid_top_level_shape(self):
         with self.assertRaises(ReviewValidationError):
@@ -181,6 +202,7 @@ class PrepareAiReviewCommentsTest(unittest.TestCase):
                 "123",
                 "1",
                 HEAD_SHA,
+                finding_decisions={},
             )
 
     def test_reuses_a_trusted_prior_finding_id(self):
@@ -193,6 +215,7 @@ class PrepareAiReviewCommentsTest(unittest.TestCase):
             "body": "Earlier wording.",
             "reviewed_head_sha": "b" * 40,
             "observed_at": "2026-08-25T11:00:00Z",
+            "status": "open",
         }
 
         prepared = prepare_review(
@@ -210,6 +233,7 @@ class PrepareAiReviewCommentsTest(unittest.TestCase):
             "124",
             "1",
             HEAD_SHA,
+            finding_decisions={},
             prior_findings=[prior],
         )
 
@@ -217,6 +241,160 @@ class PrepareAiReviewCommentsTest(unittest.TestCase):
         self.assertEqual(repeated["finding_id"], prior["finding_id"])
         self.assertEqual(repeated["identity_key"], prior["finding_key"])
         self.assertNotEqual(repeated["finding_key"], repeated["identity_key"])
+
+    def prior_catalog(self, *, status="open"):
+        initial = prepare([finding()])["telemetry"]["findings"][0]
+        return [{
+            "finding_id": initial["finding_id"],
+            "finding_key": initial["identity_key"],
+            "path": "src/example.py",
+            "body": "Earlier wording.",
+            "reviewed_head_sha": "b" * 40,
+            "observed_at": "2026-08-25T11:00:00Z",
+            "status": status,
+        }]
+
+    def test_all_statuses_in_both_identity_branches(self):
+        prior = self.prior_catalog()
+        finding_id = prior[0]["finding_id"]
+        for use_prior in (False, True):
+            for status in (
+                "open", "accepted", "already-fixed",
+                "deferred", "false-positive", "out-of-scope",
+            ):
+                with self.subTest(use_prior=use_prior, status=status):
+                    comment = finding()
+                    if use_prior:
+                        comment.update(
+                            finding_key="src/example.py::moved::incorrect-value",
+                            prior_finding_id=finding_id,
+                        )
+                    prepared = prepare(
+                        [comment],
+                        prior=prior if use_prior else [],
+                        decisions={} if status == "open" else {finding_id: status},
+                    )
+                    suppressed = status in {"deferred", "false-positive", "out-of-scope"}
+                    self.assertEqual(len(prepared["comments"]), 0 if suppressed else 1)
+                    self.assertEqual(len(prepared["telemetry"]["findings"]), 0 if suppressed else 1)
+                    self.assertEqual(
+                        len(prepared["telemetry"]["suppressed_findings"]),
+                        1 if suppressed else 0,
+                    )
+                    if suppressed:
+                        record = prepared["telemetry"]["suppressed_findings"][0]
+                        self.assertEqual(record["finding_id"], finding_id)
+                        self.assertEqual(record["suppression_status"], status)
+                        self.assertIn(f"`{finding_id}` — {status}", prepared["summary"])
+
+    def test_stale_catalog_status_never_overrides_decisions(self):
+        prior = self.prior_catalog(status="deferred")
+        finding_id = prior[0]["finding_id"]
+        comment = finding(prior_finding_id=finding_id)
+        for decision_map in ({}, {finding_id: "accepted"}, {finding_id: "already-fixed"}):
+            with self.subTest(decisions=decision_map):
+                self.assertEqual(len(prepare([comment], prior=prior, decisions=decision_map)["comments"]), 1)
+        prior[0]["status"] = "accepted"
+        self.assertEqual(
+            prepare([comment], prior=prior, decisions={finding_id: "deferred"})["comments"],
+            [],
+        )
+
+    def test_filtering_preserves_alignment_and_original_observation_ids(self):
+        comments = [
+            finding(finding_key=f"src/example.py::value::problem-{position}", body=f"Problem {position}.")
+            for position in range(3)
+        ]
+        original = prepare(comments)["telemetry"]["findings"]
+        prepared = prepare(comments, decisions={original[1]["finding_id"]: "false-positive"})
+        posted = prepared["telemetry"]["findings"]
+        suppressed = prepared["telemetry"]["suppressed_findings"]
+        self.assertEqual(
+            [item["observation_id"] for item in posted],
+            [original[0]["observation_id"], original[2]["observation_id"]],
+        )
+        self.assertEqual(suppressed[0]["observation_id"], original[1]["observation_id"])
+        for comment, observation in zip(prepared["comments"], posted):
+            self.assertIn(observation["body"], comment["body"])
+            self.assertIn(observation["observation_id"], comment["body"])
+
+    def test_summary_reserves_all_twenty_suppression_bullets(self):
+        comments = [
+            finding(finding_key=f"src/example.py::value::problem-{position}", body=f"Problem {position}.")
+            for position in range(20)
+        ]
+        original = prepare(comments)["telemetry"]["findings"]
+        prepared = prepare(
+            comments,
+            summary="x" * 4000,
+            decisions={item["finding_id"]: "out-of-scope" for item in original},
+        )
+        self.assertEqual(prepared["comments"], [])
+        self.assertLessEqual(len(prepared["summary"]), 4000)
+        self.assertIn("[Review overview truncated.]", prepared["summary"])
+        self.assertEqual(prepared["summary"].count("(maintainer verdict)"), 20)
+        self.assertLess(
+            prepared["summary"].index("truncated"),
+            prepared["summary"].index("Suppressed repeats"),
+        )
+        for item in original:
+            self.assertIn(
+                f"- `{item['finding_id']}` — out-of-scope (maintainer verdict)",
+                prepared["summary"],
+            )
+        self.assertEqual(
+            [item["finding_id"] for item in prepared["telemetry"]["suppressed_findings"]],
+            [item["finding_id"] for item in original],
+        )
+
+    def test_no_returned_repeat_preserves_summary_and_empty_suppression_list(self):
+        finding_id = self.prior_catalog()[0]["finding_id"]
+        for comments in ([], [finding()]):
+            prepared = prepare(
+                comments,
+                decisions={"arf_v1_" + "a" * 26: "deferred"},
+                summary="x" * 4000,
+            )
+            self.assertEqual(prepared["summary"], "x" * 4000)
+            self.assertEqual(prepared["telemetry"]["suppressed_findings"], [])
+        prepared = prepare([], decisions={finding_id: "deferred"})
+        self.assertNotIn("Suppressed repeats", prepared["summary"])
+
+    def test_invalid_decision_maps_and_catalog_statuses_fail(self):
+        for decision_map in (
+            None, [], "deferred", {"invalid": "deferred"},
+            {"art_v1_" + "a" * 26: "deferred"},
+            {"arf_v1_" + "a" * 26: "open"},
+            {"arf_v1_" + "a" * 26: []},
+        ):
+            with self.subTest(decisions=decision_map):
+                with self.assertRaises(ReviewValidationError):
+                    parse_finding_decisions(decision_map)
+        for status in (None, [], "resolved"):
+            prior = self.prior_catalog()
+            if status is None:
+                prior[0].pop("status")
+            else:
+                prior[0]["status"] = status
+            with self.subTest(status=status):
+                with self.assertRaises(ReviewValidationError):
+                    prepare([], prior=prior)
+
+    def test_decision_map_does_not_authorize_untrusted_prior_id(self):
+        finding_id = self.prior_catalog()[0]["finding_id"]
+        with self.assertRaisesRegex(ReviewValidationError, "trusted prior catalog"):
+            prepare(
+                [finding(prior_finding_id=finding_id)],
+                decisions={finding_id: "deferred"},
+            )
+        prior = self.prior_catalog()
+        prior[0]["finding_id"] = "arf_v1_" + "a" * 26
+        with self.assertRaisesRegex(ReviewValidationError, "trusted identity"):
+            prepare(
+                [finding(prior_finding_id=prior[0]["finding_id"])],
+                prior=prior,
+                decisions={prior[0]["finding_id"]: "deferred"},
+            )
 
     def test_rejects_reserved_summary_metadata(self):
         with self.assertRaisesRegex(ReviewValidationError, "reserved metadata"):
@@ -233,6 +411,7 @@ class PrepareAiReviewCommentsTest(unittest.TestCase):
                 "123",
                 "1",
                 HEAD_SHA,
+                finding_decisions={},
             )
 
 

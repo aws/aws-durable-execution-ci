@@ -196,6 +196,132 @@ class AiReviewTelemetryTest(unittest.TestCase):
         ):
             self.assertEqual(store.read_json(path), {"record": "value"})
 
+    def test_list_json_many_reads_two_prefixes_from_one_tree(self):
+        first = "events/pr-42/finding_observed/"
+        second = "events/pr-42/finding_verdict/"
+        api = Mock()
+        api.request.side_effect = [
+            {"object": {"sha": SHA_1}},
+            {"tree": {"sha": SHA_2}},
+            {
+                "truncated": False,
+                "tree": [
+                    {"type": "blob", "path": first + "b.json", "sha": SHA_3},
+                    {"type": "blob", "path": first + "a.json", "sha": SHA_1},
+                    {"type": "blob", "path": second + "a.json", "sha": SHA_2},
+                    {"type": "blob", "path": "events/pr-43/other.json", "sha": SHA_3},
+                    {"type": "blob", "path": first + "ignored.txt", "sha": SHA_3},
+                ],
+            },
+            {
+                "encoding": "base64",
+                "content": base64.b64encode(b'{"id":"a"}').decode(),
+            },
+            {
+                "encoding": "base64",
+                "content": base64.b64encode(b'{"id":"b"}').decode(),
+            },
+            {
+                "encoding": "base64",
+                "content": base64.b64encode(b'{"id":"verdict"}').decode(),
+            },
+        ]
+        store = TelemetryStore("aws/example", api=api)
+
+        self.assertEqual(
+            store.list_json_many((first, second), maximum=2),
+            {
+                first: [{"id": "a"}, {"id": "b"}],
+                second: [{"id": "verdict"}],
+            },
+        )
+        self.assertEqual(
+            [call.args[0] for call in api.request.call_args_list],
+            [
+                "repos/aws/example/git/ref/heads/ai-review-telemetry-v1",
+                f"repos/aws/example/git/commits/{SHA_1}",
+                f"repos/aws/example/git/trees/{SHA_2}?recursive=1",
+                f"repos/aws/example/git/blobs/{SHA_1}",
+                f"repos/aws/example/git/blobs/{SHA_3}",
+                f"repos/aws/example/git/blobs/{SHA_2}",
+            ],
+        )
+
+    def test_list_json_many_missing_branch_and_validation_do_not_read_blobs(self):
+        first = "events/pr-42/finding_observed/"
+        second = "events/pr-42/finding_verdict/"
+        store = TelemetryStore("aws/example", api=Mock())
+        with (
+            patch.object(store, "_load_tree", return_value=None) as load_tree,
+            patch.object(store, "_read_blob_json") as read_blob,
+        ):
+            self.assertEqual(
+                store.list_json_many((first, second)), {first: [], second: []}
+            )
+            load_tree.assert_called_once_with()
+            read_blob.assert_not_called()
+
+        with patch.object(store, "_load_tree") as load_tree:
+            for prefixes, maximum in (
+                ((first, "../invalid"), 2),
+                ((first, second), 0),
+            ):
+                with self.subTest(prefixes=prefixes, maximum=maximum):
+                    with self.assertRaises(TelemetryError):
+                        store.list_json_many(prefixes, maximum=maximum)
+            load_tree.assert_not_called()
+
+    def test_list_json_many_bounds_each_prefix_and_rejects_bad_blobs(self):
+        first = "events/pr-42/finding_observed/"
+        second = "events/pr-42/finding_verdict/"
+        store = TelemetryStore("aws/example", api=Mock())
+        for overflowing in (first, second):
+            other = second if overflowing == first else first
+            entries = {
+                overflowing + "a.json": SHA_1,
+                overflowing + "b.json": SHA_2,
+                other + "a.json": SHA_3,
+            }
+            with (
+                self.subTest(overflowing=overflowing),
+                patch.object(
+                    store, "_load_tree", return_value=GitTree(SHA_1, SHA_2, entries)
+                ),
+                patch.object(store, "_read_blob_json") as read_blob,
+            ):
+                with self.assertRaisesRegex(TelemetryError, "more than 1 records"):
+                    store.list_json_many((first, second), maximum=1)
+                read_blob.assert_not_called()
+
+        with (
+            patch.object(
+                store,
+                "_load_tree",
+                return_value=GitTree(SHA_1, SHA_2, {second + "a.json": SHA_3}),
+            ),
+            patch.object(
+                store, "_read_blob_json", side_effect=TelemetryError("bad blob")
+            ),
+        ):
+            with self.assertRaisesRegex(TelemetryError, "bad blob"):
+                store.list_json_many((first, second))
+
+    def test_list_json_many_loads_a_fresh_tree_each_call_and_preserves_list_json(self):
+        prefix = "events/pr-42/finding_observed/"
+        store = TelemetryStore("aws/example", api=Mock())
+        first = GitTree(SHA_1, SHA_2, {prefix + "a.json": SHA_3})
+        second = GitTree(SHA_2, SHA_3, {prefix + "b.json": SHA_1})
+
+        with (
+            patch.object(store, "_load_tree", side_effect=[first, second]) as load_tree,
+            patch.object(
+                store, "_read_blob_json", side_effect=[{"id": "a"}, {"id": "b"}]
+            ),
+        ):
+            self.assertEqual(store.list_json(prefix), [{"id": "a"}])
+            self.assertEqual(store.list_json_many((prefix,)), {prefix: [{"id": "b"}]})
+            self.assertEqual(load_tree.call_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

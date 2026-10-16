@@ -46,6 +46,7 @@ previous_inline_comments_file="${temp_dir}/previous-inline-comments"
 new_inline_comments_file="${temp_dir}/new-inline-comments"
 summary_file="${temp_dir}/summary.md"
 prior_findings_file="${temp_dir}/prior-findings.json"
+finding_decisions_file="${temp_dir}/finding-decisions.json"
 published_comments_file="${temp_dir}/published-comments.jsonl"
 summary_result_file="${temp_dir}/summary-result.json"
 comments_published=false
@@ -151,7 +152,8 @@ python3 "${script_dir}/load_ai_review_findings.py" \
   --repository "$GITHUB_REPOSITORY" \
   --pull-request-number "$PR_NUMBER" \
   --reviewer "$reviewer" \
-  --output "$prior_findings_file"
+  --output "$prior_findings_file" \
+  --decisions-output "$finding_decisions_file"
 
 python3 "${script_dir}/prepare_ai_review_comments.py" \
   --review "$review_file" \
@@ -171,7 +173,8 @@ python3 "${script_dir}/prepare_ai_review_comments.py" \
   --prompt-path "${PROMPT_PATH:-}" \
   --review-guidance-base64 "${REVIEW_GUIDANCE_BASE64:-}" \
   --trigger-metadata-base64 "${TRIGGER_METADATA_BASE64:-}" \
-  --prior-findings "$prior_findings_file"
+  --prior-findings "$prior_findings_file" \
+  --finding-decisions "$finding_decisions_file"
 
 python3 "${script_dir}/publish_ai_review_telemetry.py" \
   plan \

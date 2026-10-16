@@ -15,6 +15,7 @@ from ai_review_telemetry import (
     GitHubApiError,
     TelemetryError,
     TelemetryStore,
+    VERDICT_OUTCOMES,
     build_record,
     finding_path,
     require_identifier,
@@ -27,9 +28,6 @@ from ai_review_telemetry import (
 
 
 WRITE_PERMISSIONS = frozenset(("admin", "maintain", "write"))
-VERDICTS = frozenset(
-    ("accepted", "deferred", "false-positive", "out-of-scope", "already-fixed")
-)
 REPLY_VERDICT_PATTERN = re.compile(
     r"^[ \t]*/ai[ \t]+verdict[ \t]+"
     r"(accepted|deferred|false-positive|out-of-scope|already-fixed)[ \t]*$"
@@ -335,14 +333,17 @@ def parse_verdict_command(
         or is_bot_user(comment.get("user"))
     ):
         return None
-    body = comment["body"]
+    first_body_line = next(
+        (line for line in comment["body"].splitlines() if line.strip()),
+        "",
+    )
     if event_name == "pull_request_review_comment":
-        match = REPLY_VERDICT_PATTERN.fullmatch(body)
+        match = REPLY_VERDICT_PATTERN.fullmatch(first_body_line)
         if match is None:
             return None
         return None, match.group(1)
     if event_name == "issue_comment":
-        match = EXPLICIT_VERDICT_PATTERN.fullmatch(body)
+        match = EXPLICIT_VERDICT_PATTERN.fullmatch(first_body_line)
         if match is None:
             return None
         return match.group(1), match.group(2)
@@ -438,7 +439,7 @@ def verdict_record(
     if parsed is None:
         raise TelemetryError("event is not a verdict command")
     explicit_finding_id, outcome = parsed
-    if outcome not in VERDICTS:
+    if outcome not in VERDICT_OUTCOMES:
         raise TelemetryError("verdict outcome is invalid")
     number = pull_request_number(event)
     comment = event["comment"]

@@ -19,6 +19,11 @@ SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 IDENTIFIER_PATTERN = re.compile(r"^[a-z][a-z0-9_]*_v[0-9]+_[a-z2-7]{26}$")
 FINDING_KEY_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._:/-]{2,255}$")
 SAFE_PATH_PATTERN = re.compile(r"^[A-Za-z0-9._/-]+$")
+VERDICT_OUTCOMES = frozenset(
+    ("accepted", "deferred", "false-positive", "out-of-scope", "already-fixed")
+)
+SUPPRESSING_VERDICTS = frozenset(("deferred", "false-positive", "out-of-scope"))
+FINDING_STATUSES = VERDICT_OUTCOMES | {"open"}
 
 
 class TelemetryError(ValueError):
@@ -71,6 +76,13 @@ def require_identifier(value: Any, label: str) -> str:
     if not isinstance(value, str) or not IDENTIFIER_PATTERN.fullmatch(value):
         raise TelemetryError(f"{label} is invalid")
     return value
+
+
+def require_finding_id(value: Any) -> str:
+    identifier = require_identifier(value, "finding_id")
+    if not identifier.startswith(f"arf_v{SCHEMA_VERSION}_"):
+        raise TelemetryError("finding_id is invalid")
+    return identifier
 
 
 def require_finding_key(value: Any) -> str:
@@ -571,24 +583,51 @@ class TelemetryStore:
         *,
         maximum: int = 1000,
     ) -> list[Any]:
-        validate_storage_path(prefix.rstrip("/"))
+        return self.list_json_many((prefix,), maximum=maximum)[prefix]
+
+    def list_json_many(
+        self,
+        prefixes: Iterable[str],
+        *,
+        maximum: int = 1000,
+    ) -> dict[str, list[Any]]:
+        """Read each prefix from one fresh tree, with a separate limit per prefix.
+
+        Reuse the tree only within this call. Later calls must see new verdicts.
+        Return empty lists when the telemetry branch is absent.
+        """
+        values: dict[str, list[Any]] = {}
+        for prefix in prefixes:
+            validate_storage_path(prefix.rstrip("/"))
+            values[prefix] = []
+        if not values:
+            return values
         if maximum < 1:
             raise TelemetryError("maximum must be positive")
+
         current = self._load_tree()
         if current is None:
-            return []
-        paths = sorted(
-            path
-            for path in current.entries
-            if path.startswith(prefix) and path.endswith(".json")
-        )
-        if len(paths) > maximum:
-            raise TelemetryError(
-                f"telemetry prefix contains more than {maximum} records"
+            return values
+
+        paths_by_prefix: dict[str, list[str]] = {}
+        for prefix in values:
+            paths = sorted(
+                path
+                for path in current.entries
+                if path.startswith(prefix) and path.endswith(".json")
             )
-        values = []
-        for path in paths:
-            values.append(self._read_blob_json(current.entries[path]))
+            if len(paths) > maximum:
+                raise TelemetryError(
+                    f"telemetry prefix contains more than {maximum} records"
+                )
+
+            paths_by_prefix[prefix] = paths
+
+        for prefix, paths in paths_by_prefix.items():
+            values[prefix] = [
+                self._read_blob_json(current.entries[path]) for path in paths
+            ]
+
         return values
 
 

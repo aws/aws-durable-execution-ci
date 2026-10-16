@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 
 import base64
+import copy
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -19,6 +21,8 @@ from record_ai_review_activity import (
     suggestion_applied,
     verdict_record,
 )
+from ai_review_telemetry import build_record
+from load_ai_review_findings import finding_decisions
 
 
 BASE_SHA = "1" * 40
@@ -114,6 +118,53 @@ class RecordAiReviewActivityTest(unittest.TestCase):
             ("arf_v1_" + "a" * 26, "already-fixed"),
         )
 
+    def test_verdict_commands_allow_leading_blanks_and_later_rationale(self):
+        finding_id = "arf_v1_" + "a" * 26
+        for outcome in ("accepted", "deferred", "false-positive", "out-of-scope", "already-fixed"):
+            for event_name, command, expected in (
+                ("pull_request_review_comment", f"/ai verdict {outcome}", (None, outcome)),
+                ("issue_comment", f"/ai verdict {finding_id} {outcome}", (finding_id, outcome)),
+            ):
+                for prefix in ("", "\n \t\n"):
+                    with self.subTest(outcome=outcome, event_name=event_name, prefix=prefix):
+                        event = {
+                            "action": "created",
+                            "comment": {
+                                "body": (
+                                    f"{prefix}  {command}\t\r\n\r\n"
+                                    "Rationale stays in this thread.\n/ai verdict accepted"
+                                ),
+                                "user": {"login": "maintainer", "type": "User"},
+                            },
+                        }
+                        self.assertEqual(parse_verdict_command(event_name, event), expected)
+
+    def test_invalid_first_lines_actions_and_bot_commands_are_ignored(self):
+        finding_id = "arf_v1_" + "a" * 26
+        for event_name, command in (
+            ("pull_request_review_comment", "/ai verdict deferred"),
+            ("issue_comment", f"/ai verdict {finding_id} deferred"),
+        ):
+            bodies = (
+                "", "\n \n", f"Rationale first.\n{command}",
+                f"{command} because this is intended", command.replace("deferred", "unknown"),
+                command.replace("deferred", "open"),
+            )
+            for body in bodies:
+                with self.subTest(event_name=event_name, body=body):
+                    event = {
+                        "action": "created",
+                        "comment": {"body": body, "user": {"login": "maintainer", "type": "User"}},
+                    }
+                    self.assertIsNone(parse_verdict_command(event_name, event))
+            for action, user in (
+                ("edited", {"login": "maintainer", "type": "User"}),
+                ("deleted", {"login": "maintainer", "type": "User"}),
+                ("created", {"login": "github-actions[bot]", "type": "Bot"}),
+            ):
+                event = {"action": action, "comment": {"body": command, "user": user}}
+                self.assertIsNone(parse_verdict_command(event_name, event))
+
     def test_finding_marker_is_strict(self):
         self.assertEqual(
             parse_finding_marker(
@@ -166,7 +217,7 @@ class RecordAiReviewActivityTest(unittest.TestCase):
             "issue": {"number": 42, "pull_request": {}},
             "comment": {
                 "node_id": "IC_verdict",
-                "body": f"/ai verdict {finding_id} accepted",
+                "body": f"\n/ai verdict {finding_id} accepted\n\nPrivate rationale.",
                 "created_at": "2026-08-25T12:02:00Z",
                 "user": {
                     "login": "maintainer",
@@ -206,7 +257,20 @@ class RecordAiReviewActivityTest(unittest.TestCase):
                     "reviewed_head_sha": "3" * 40,
                     "published_at": "2026-08-25T12:01:00Z",
                 },
-            }
+            },
+            {
+                "record_id": "art_v1_" + "c" * 26,
+                "data": {
+                    "finding_id": finding_id,
+                    "reviewed_base_sha": BASE_SHA,
+                    "reviewed_head_sha": "4" * 40,
+                    "published_at": "2026-08-25T12:01:30Z",
+                    "suppressed": True,
+                    "suppression_status": "deferred",
+                    "comment_node_id": "",
+                    "suggestion_id": "",
+                },
+            },
         ]
 
         record, reply = verdict_record(
@@ -221,9 +285,81 @@ class RecordAiReviewActivityTest(unittest.TestCase):
         self.assertEqual(reply, ("issue_comment", 0))
         self.assertEqual(record["data"]["outcome"], "accepted")
         self.assertEqual(record["data"]["reviewer"], "codex")
-        self.assertEqual(record["data"]["reviewed_head_sha"], "3" * 40)
+        self.assertEqual(record["data"]["reviewed_head_sha"], "4" * 40)
         self.assertEqual(record["data"]["current_head_sha"], HEAD_SHA)
         self.assertEqual(record["data"]["maintainer"]["login"], "maintainer")
+        self.assertNotIn("Private rationale", json.dumps(record))
+        previous = build_record(
+            record_type="finding_verdict",
+            identity={"command": "older"},
+            repository_id=123,
+            repository="aws/example",
+            pull_request_number=42,
+            recorded_at="2026-08-25T12:01:00Z",
+            data={
+                "finding_id": finding_id,
+                "reviewer": "codex",
+                "outcome": "deferred",
+                "command_created_at": "2026-08-25T12:01:00Z",
+            },
+        )
+        self.assertEqual(
+            finding_decisions(
+                [record, previous],
+                repository="aws/example",
+                pull_request_number=42,
+                reviewer="codex",
+            ),
+            {finding_id: "accepted"},
+        )
+
+    def test_inline_verdict_requires_a_trusted_reply_target(self):
+        finding_id = "arf_v1_" + "a" * 26
+        event = {
+            "action": "created",
+            "pull_request": {"number": 42},
+            "comment": {
+                "in_reply_to_id": 7,
+                "body": "/ai verdict deferred\n\nRationale.",
+                "node_id": "PRRC_verdict",
+                "created_at": "2026-08-25T12:02:00Z",
+                "user": {"login": "maintainer", "type": "User"},
+            },
+        }
+        trusted_root = {
+            "user": {"login": "github-actions[bot]"},
+            "body": f"<!-- ai-pr-review:finding:codex:{finding_id} -->",
+        }
+        for root, message in (
+            ({**trusted_root, "user": {"login": "outside-user"}}, "GitHub Actions"),
+            ({**trusted_root, "body": "An ordinary review comment."}, "trusted finding"),
+        ):
+            api = Mock()
+            api.request.side_effect = [{"permission": "maintain"}, root]
+            with self.subTest(root=root):
+                with self.assertRaisesRegex(VerdictRejected, message):
+                    verdict_record(
+                        api, Mock(), "pull_request_review_comment", event,
+                        repository_id=123, repository="aws/example",
+                    )
+        no_reply = copy.deepcopy(event)
+        no_reply["comment"].pop("in_reply_to_id")
+        api = Mock()
+        api.request.return_value = {"permission": "admin"}
+        with self.assertRaisesRegex(VerdictRejected, "must reply"):
+            verdict_record(
+                api, Mock(), "pull_request_review_comment", no_reply,
+                repository_id=123, repository="aws/example",
+            )
+        store = Mock()
+        store.read_json.return_value = None
+        api = Mock()
+        api.request.side_effect = [{"permission": "write"}, trusted_root]
+        with self.assertRaisesRegex(VerdictRejected, "trusted AI finding"):
+            verdict_record(
+                api, store, "pull_request_review_comment", event,
+                repository_id=123, repository="aws/example",
+            )
 
     def test_verdict_rejects_a_non_collaborator_without_failing_activity(self):
         finding_id = "arf_v1_" + "a" * 26
