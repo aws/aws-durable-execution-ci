@@ -69,7 +69,7 @@ def finding_decisions(
             "verdict command timestamp",
         )
         record_id = validated["record_id"]
-        if not record_id.startswith("art_v1_"):
+        if not record_id.startswith(f"art_v{SCHEMA_VERSION}_"):
             raise TelemetryError("finding verdict record_id is invalid")
         candidate = (
             datetime.fromisoformat(timestamp.replace("Z", "+00:00")),
