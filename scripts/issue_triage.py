@@ -245,7 +245,6 @@ def output_schema(labels: list[dict[str, str]]) -> dict[str, Any]:
                 "type": "array",
                 "minItems": 1,
                 "maxItems": min(MAX_LABELS, len(label_names)),
-                "uniqueItems": True,
                 "description": (
                     "Existing repository labels that classify the issue"
                 ),
