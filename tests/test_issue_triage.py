@@ -151,6 +151,9 @@ class IssueTriagePolicyTest(unittest.TestCase):
             ["bug", "testing-sdk"],
         )
         self.assertEqual(schema["properties"]["labels"]["maxItems"], 2)
+        # Strict structured outputs reject uniqueItems; validate_result
+        # enforces unique labels instead.
+        self.assertNotIn("uniqueItems", schema["properties"]["labels"])
         self.assertFalse(schema["additionalProperties"])
 
     def test_allows_all_configured_label_facets(self):
