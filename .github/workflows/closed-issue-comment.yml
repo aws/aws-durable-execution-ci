@@ -8,67 +8,30 @@ on:
         required: false
         type: string
         default: ubuntu-latest
-      reply-after-days:
-        description: Days an issue must be closed before the bot replies to an outside comment
-        required: false
-        type: number
-        default: 7
     secrets:
       SLACK_WEBHOOK_URL_ISSUE:
         description: Incoming webhook for issue notifications
-        required: false
+        required: true
 
 permissions: {}
 
 jobs:
-  check:
-    name: Check closed issue comment
-    if: >-
-      github.event_name == 'issue_comment' &&
-      github.event.issue.state == 'closed' &&
-      !github.event.issue.pull_request
-    runs-on: ${{ inputs['runs-on'] || 'ubuntu-latest' }}
-    timeout-minutes: 5
-    outputs:
-      notify: ${{ steps.check.outputs.notify }}
-    permissions:
-      contents: read
-      issues: write
-
-    steps:
-      - name: Check out closed issue comment toolkit
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          # Use job.workflow_* so reusable calls fetch this workflow repo's
-          # script, not caller-owned code.
-          repository: ${{ job.workflow_repository }}
-          ref: ${{ job.workflow_sha }}
-          sparse-checkout: scripts/closed_issue_comment.py
-          sparse-checkout-cone-mode: false
-          persist-credentials: false
-
-      - name: Reply to outside comment on closed issue
-        id: check
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          # Stringify the numeric input before defaulting so an explicit 0 is
-          # kept instead of becoming 7.
-          CLOSED_ISSUE_REPLY_AFTER_DAYS: ${{ format('{0}', inputs['reply-after-days']) || '7' }}
-        run: python3 scripts/closed_issue_comment.py
-
   notify:
     name: Notify Slack - Closed issue comment
-    needs: check
-    if: needs.check.outputs.notify == 'true'
+    # Only new comments from outside users on closed issues. Pull request
+    # comments also arrive as issue_comment events and are skipped.
+    if: >-
+      github.event_name == 'issue_comment' &&
+      github.event.action == 'created' &&
+      github.event.issue.state == 'closed' &&
+      !github.event.issue.pull_request &&
+      github.event.comment.user.type != 'Bot' &&
+      !contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
     runs-on: ${{ inputs['runs-on'] || 'ubuntu-latest' }}
     timeout-minutes: 5
     permissions: {}
-    env:
-      SLACK_WEBHOOK_URL_ISSUE: ${{ secrets.SLACK_WEBHOOK_URL_ISSUE }}
     steps:
       - name: Send closed issue comment notification to Slack
-        if: env.SLACK_WEBHOOK_URL_ISSUE != ''
         uses: slackapi/slack-github-action@dcb1066f776dd043e64d0e8ba94ca15cc7e1875d # v4.0.0
         with:
           webhook: ${{ secrets.SLACK_WEBHOOK_URL_ISSUE }}
@@ -78,5 +41,5 @@ jobs:
               "action": "commented_on_closed",
               "issue_url": ${{ toJSON(github.event.comment.html_url) }},
               "package_name": ${{ toJSON(github.repository) }},
-              "summary": ${{ toJSON(format('New comment on closed issue #{0} by @{1}.', github.event.issue.number, github.event.comment.user.login)) }}
+              "summary": ${{ toJSON(format('New comment on closed issue #{0} by {1}.', github.event.issue.number, github.event.comment.user.login)) }}
             }

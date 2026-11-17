@@ -17,7 +17,7 @@ Shared GitHub Actions workflows for AWS Durable Execution repositories.
 - [Slack notifications](docs/slack-notifications.md): Sends notifications for pull request, issue, discussion, and release events.
 - [Issue triage](docs/issue-triage.md): Uses AI to classify new issues with existing repository labels.
 - [Stale issue closer](docs/stale-issue-closer.md): Closes issues with a `needs-info` label after 14 days without a response. Clears the label if a response was posted within the 14 day window.
-- [Closed issue comment](docs/closed-issue-comment.md): Replies to outside comments on closed issues and notifies Slack so the team sees them.
+- [Closed issue comment](docs/closed-issue-comment.md): Notifies Slack when an outside user comments on a closed issue.
 
 ### Runner selection
 
