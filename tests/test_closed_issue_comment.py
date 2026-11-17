@@ -22,6 +22,23 @@ def job_block(workflow: str, job_name: str) -> str:
 
 NOTIFY_JOB: str = job_block(WORKFLOW, "notify")
 
+EXPECTED_CONDITIONS: tuple[str, ...] = (
+    "github.event_name == 'issue_comment'",
+    "github.event.action == 'created'",
+    "github.event.issue.state == 'closed'",
+    "!github.event.issue.pull_request",
+    "github.event.comment.user.type != 'Bot'",
+    "!contains(fromJSON('[\"OWNER\",\"MEMBER\",\"COLLABORATOR\"]'), "
+    "github.event.comment.author_association)",
+)
+
+
+def job_condition(job: str) -> list[str]:
+    match = re.search(r"(?ms)^    if: >-\n(.*?)(?=^    [a-z-]+:)", job)
+    if match is None:
+        raise AssertionError("job has no folded if: >- block")
+    return [line.strip() for line in match.group(1).splitlines() if line.strip()]
+
 
 class WorkflowContractTest(unittest.TestCase):
     def test_is_reusable(self) -> None:
@@ -34,20 +51,15 @@ class WorkflowContractTest(unittest.TestCase):
         )
 
     def test_filters_to_new_outside_comments_on_closed_issues(self) -> None:
-        for condition in (
-            "github.event_name == 'issue_comment'",
-            "github.event.action == 'created'",
-            "github.event.issue.state == 'closed'",
-            "!github.event.issue.pull_request",
-            "github.event.comment.user.type != 'Bot'",
-            "!contains(fromJSON('[\"OWNER\",\"MEMBER\",\"COLLABORATOR\"]'), "
-            "github.event.comment.author_association)",
-        ):
-            self.assertIn(condition, NOTIFY_JOB, condition)
+        lines = job_condition(NOTIFY_JOB)
+        expected = [f"{c} &&" for c in EXPECTED_CONDITIONS[:-1]]
+        expected.append(EXPECTED_CONDITIONS[-1])
+        self.assertEqual(lines, expected)
 
     def test_has_no_token_permissions(self) -> None:
-        self.assertIn("permissions: {}", WORKFLOW)
-        self.assertNotIn("write", WORKFLOW)
+        self.assertRegex(WORKFLOW, r"(?m)^permissions: \{\}$")
+        self.assertRegex(NOTIFY_JOB, r"(?m)^    permissions: \{\}$")
+        self.assertNotRegex(WORKFLOW, r":\s*write\b")
 
     def test_does_not_check_out_code(self) -> None:
         self.assertNotIn("actions/checkout", WORKFLOW)
@@ -58,11 +70,12 @@ class WorkflowContractTest(unittest.TestCase):
         self.assertIn("webhook-type: incoming-webhook", NOTIFY_JOB)
 
     def test_payload_values_are_json_encoded(self) -> None:
-        for line in NOTIFY_JOB.splitlines():
-            if "${{ github.event" in line and '": ' in line:
-                self.assertIn("toJSON(", line, line)
+        expressions = re.findall(r'"\w+": \$\{\{ (.+?) \}\}', NOTIFY_JOB)
+        self.assertEqual(len(expressions), 3)
+        for expression in expressions:
+            self.assertTrue(expression.startswith("toJSON("), expression)
 
-    def test_summary_does_not_mention_users(self) -> None:
+    def test_summary_does_not_at_mention_author(self) -> None:
         self.assertNotIn("by @", NOTIFY_JOB)
 
     def test_actions_are_pinned_to_commit_sha(self) -> None:

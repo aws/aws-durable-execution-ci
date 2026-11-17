@@ -14,9 +14,18 @@ these are true:
 - the issue is not a pull request;
 - the author is not a bot and is not an `OWNER`, `MEMBER`, or `COLLABORATOR`.
 
-Otherwise the job is skipped. The notification uses the same payload keys as
-the issue notification in [Slack notifications](slack-notifications.md), with
-`action` set to `commented_on_closed` and `issue_url` set to the comment's URL.
+Otherwise the job is skipped. Every issue comment, including pull request
+comments, still creates a workflow run in the consuming repository. Runs for
+comments that don't match show a skipped job and use no runner.
+
+The notification uses the same payload keys as the issue notification in
+[Slack notifications](slack-notifications.md), with `action` set to
+`commented_on_closed` and `issue_url` set to the comment's URL. The Slack
+webhook workflow behind `SLACK_WEBHOOK_URL_ISSUE` has so far received only
+`opened` and `reopened`, so update it if it filters or branches on `action`.
+
+This pairs with the [stale issue closer](stale-issue-closer.md), whose close
+comment asks the author to reply so the issue can be reopened.
 
 ## Usage
 
