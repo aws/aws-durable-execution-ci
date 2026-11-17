@@ -1,6 +1,8 @@
 name: Closed Issue Comment
 
 on:
+  issue_comment:
+    types: [created]
   workflow_call:
     inputs:
       runs-on:

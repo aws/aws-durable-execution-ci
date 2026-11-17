@@ -44,6 +44,12 @@ class WorkflowContractTest(unittest.TestCase):
     def test_is_reusable(self) -> None:
         self.assertIn("workflow_call:", WORKFLOW)
 
+    def test_runs_on_own_issue_comments(self) -> None:
+        self.assertRegex(
+            WORKFLOW,
+            r"(?m)^on:\n  issue_comment:\n    types: \[created\]\n  workflow_call:",
+        )
+
     def test_slack_secret_is_required(self) -> None:
         self.assertRegex(
             WORKFLOW,

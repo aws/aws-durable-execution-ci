@@ -1,6 +1,6 @@
 # Closed issue comment
 
-The reusable closed-issue-comment workflow sends a Slack notification when an
+The closed-issue-comment workflow sends a Slack notification when an
 outside user comments on a closed issue, where the team is unlikely to see it.
 It posts nothing on GitHub.
 
@@ -26,6 +26,9 @@ webhook workflow behind `SLACK_WEBHOOK_URL_ISSUE` has so far received only
 
 This pairs with the [stale issue closer](stale-issue-closer.md), whose close
 comment asks the author to reply so the issue can be reopened.
+
+This repository runs the workflow on its own issues. Other repositories call it
+as a reusable workflow.
 
 ## Usage
 
