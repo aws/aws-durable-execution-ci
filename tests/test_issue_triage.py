@@ -5,6 +5,8 @@ import json
 import re
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
@@ -50,6 +52,72 @@ def issue_context(**overrides):
     }
     issue.update(overrides)
     return issue
+
+
+def apply_with_issue_labels(model_labels, issue_labels):
+    issue = issue_context()
+    github_issue = {**issue, "labels": issue_labels}
+    with tempfile.TemporaryDirectory() as directory:
+        result_path = Path(directory) / "triage.json"
+        result_path.write_text(
+            json.dumps(
+                {
+                    "issue_snapshot": ISSUE_TRIAGE.issue_snapshot(issue),
+                    "labels": model_labels,
+                }
+            ),
+            encoding="utf-8",
+        )
+        with patch.dict(
+            "os.environ",
+            {
+                "GITHUB_REPOSITORY": "aws/example",
+                "ISSUE_NUMBER": "17",
+                "DEFAULT_ISSUE_TRIAGE_LABELS": "bug\nneeds-triage",
+            },
+            clear=True,
+        ), patch.object(
+            ISSUE_TRIAGE,
+            "run_gh_json",
+            side_effect=[
+                github_issue,
+                [
+                    {"name": "bug", "description": ""},
+                    {"name": "needs-triage", "description": ""},
+                ],
+                github_issue,
+                [],
+            ],
+        ) as run_gh:
+            ISSUE_TRIAGE.apply_result(result_path)
+    return run_gh.call_args_list
+
+
+def fallback_with_issue_response(issue_response):
+    """Run the fallback; issue_response is the issue read's result or error."""
+    output = StringIO()
+    with patch.dict(
+        "os.environ",
+        {"GITHUB_REPOSITORY": "aws/example", "ISSUE_NUMBER": "17"},
+        clear=True,
+    ), patch.object(
+        ISSUE_TRIAGE,
+        "run_gh_json",
+        side_effect=[
+            issue_response,
+            [{"name": "needs-triage"}],
+            [{"name": "needs-triage"}],
+        ],
+    ) as run_gh, redirect_stdout(output):
+        ISSUE_TRIAGE.apply_fallback()
+    return run_gh.call_args_list, output.getvalue()
+
+
+def fallback_with_issue_labels(issue_labels):
+    calls, _ = fallback_with_issue_response(
+        {**issue_context(), "labels": issue_labels}
+    )
+    return calls
 
 
 class IssueTriagePolicyTest(unittest.TestCase):
@@ -271,6 +339,7 @@ class IssueTriagePolicyTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             result_path = Path(directory) / "triage.json"
             issue = issue_context()
+            github_issue = {**issue, "labels": []}
             result_path.write_text(
                 json.dumps(
                     {
@@ -293,9 +362,9 @@ class IssueTriagePolicyTest(unittest.TestCase):
                 ISSUE_TRIAGE,
                 "run_gh_json",
                 side_effect=[
-                    issue,
+                    github_issue,
                     [{"name": "bug", "description": "Something is broken"}],
-                    issue,
+                    github_issue,
                     [{"name": "bug"}],
                 ],
             ) as run_gh:
@@ -308,6 +377,98 @@ class IssueTriagePolicyTest(unittest.TestCase):
                 run_gh.call_args_list[3].kwargs["input_value"],
                 {"labels": ["bug"]},
             )
+
+    def test_reads_issue_label_names_case_insensitively(self):
+        self.assertEqual(
+            ISSUE_TRIAGE.issue_label_names(
+                {"labels": [{"name": "Project"}, {"name": "bug"}]}
+            ),
+            {"project", "bug"},
+        )
+
+    def test_rejects_issue_with_invalid_labels(self):
+        for issue in (
+            {},
+            {"labels": None},
+            {"labels": [{"name": 7}]},
+            {"labels": ["project"]},
+        ):
+            with self.subTest(issue=issue):
+                with self.assertRaisesRegex(
+                    ISSUE_TRIAGE.TriageError,
+                    "invalid labels",
+                ):
+                    ISSUE_TRIAGE.issue_label_names(issue)
+
+    def test_apply_omits_needs_triage_from_project_issues(self):
+        calls = apply_with_issue_labels(
+            ["bug", "needs-triage"],
+            [{"name": "Project"}],
+        )
+
+        self.assertEqual(len(calls), 4)
+        self.assertEqual(calls[3].kwargs["input_value"], {"labels": ["bug"]})
+
+    def test_apply_posts_nothing_when_project_issue_gets_only_needs_triage(
+        self,
+    ):
+        calls = apply_with_issue_labels(
+            ["needs-triage"],
+            [{"name": "project"}],
+        )
+
+        self.assertEqual(len(calls), 3)
+        self.assertFalse(any("POST" in call.args[0] for call in calls))
+
+    def test_apply_keeps_needs_triage_without_project_label(self):
+        calls = apply_with_issue_labels(["needs-triage"], [{"name": "bug"}])
+
+        self.assertEqual(
+            calls[3].kwargs["input_value"],
+            {"labels": ["needs-triage"]},
+        )
+
+    def test_fallback_skips_project_issues(self):
+        calls = fallback_with_issue_labels([{"name": "project"}])
+
+        self.assertEqual(
+            [call.args[0] for call in calls],
+            [["repos/aws/example/issues/17"]],
+        )
+
+    def test_fallback_adds_needs_triage_without_project_label(self):
+        calls = fallback_with_issue_labels([{"name": "bug"}])
+
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(
+            calls[2].args[0][2],
+            "repos/aws/example/issues/17/labels",
+        )
+        self.assertEqual(
+            calls[2].kwargs["input_value"],
+            {"labels": ["needs-triage"]},
+        )
+
+    def test_fallback_adds_needs_triage_when_issue_cannot_be_checked(self):
+        project = [{"name": "project"}]
+        for issue_response in (
+            ISSUE_TRIAGE.TriageError("gh: Bad Gateway (HTTP 502)"),
+            {**issue_context(number=18), "labels": project},
+            {**issue_context(), "pull_request": {}, "labels": project},
+            {**issue_context(), "labels": None},
+        ):
+            with self.subTest(issue_response=issue_response):
+                calls, output = fallback_with_issue_response(issue_response)
+
+                self.assertEqual(len(calls), 3)
+                self.assertEqual(
+                    calls[2].kwargs["input_value"],
+                    {"labels": ["needs-triage"]},
+                )
+                self.assertRegex(
+                    output,
+                    r"(?m)^::warning::Applying needs-triage because",
+                )
 
 
 class IssueTriageWorkflowTest(unittest.TestCase):

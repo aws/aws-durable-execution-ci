@@ -28,6 +28,14 @@ If model generation fails, the workflow preserves the manual-triage path by
 applying `needs-triage`. That fallback label is created when it does not
 already exist.
 
+The publication job does not add `needs-triage` to an issue that has the
+`project` label when the job applies labels, because maintainers use `project`
+for planned work they have already routed. The job reads the issue's labels
+just before it applies them, so a `project` label added while the issue is
+being created is honored. A `project` label added after that point does not
+remove `needs-triage`. Other labels the model selects are still applied. If
+the fallback cannot read the issue, it adds `needs-triage` anyway.
+
 ## Usage
 
 Add `.github/workflows/issue-triage.yml` to the consuming repository:
@@ -174,4 +182,5 @@ The short-lived artifact contains only validated labels and a digest of the
 exact issue content that was classified. The publication job has no AWS
 credentials, re-fetches the issue and allowed labels, validates the artifact,
 and checks the issue digest twice before applying labels. If generation or
-publication validation fails, `needs-triage` is applied for manual review.
+publication validation fails, `needs-triage` is applied for manual review,
+unless the fallback reads a `project` label on the issue.
