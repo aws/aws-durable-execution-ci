@@ -1,0 +1,1 @@
+{"finding_digest":"a0fcbf81deadafb1dd83c6da4e867c20806081cf565a00977988514102a1039d","finding_id":"arf_v1_ud6l7ao6vwx3dxmdy3ne5bt4ec","identity_key":"scripts/pr_status_labels.py::plan_label_change::stale-event-clears-newer-request","pull_request_number":88,"repository":{"full_name":"aws/aws-durable-execution-ci","id":1316519892},"reviewer":"codex","schema_version":1}
