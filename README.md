@@ -18,6 +18,7 @@ Shared GitHub Actions workflows for AWS Durable Execution repositories.
 - [Issue triage](docs/issue-triage.md): Uses AI to classify new issues with existing repository labels.
 - [Stale issue closer](docs/stale-issue-closer.md): Closes issues with a `needs-info` label after 14 days without a response. Clears the label if a response was posted within the 14 day window.
 - [Closed issue comment](docs/closed-issue-comment.md): Notifies Slack when an outside user comments on a closed issue.
+- [PR status labels](docs/pr-status-labels.md): Adds `needs-review` to new pull requests from authors without write access, and replaces `changes-requested` with `needs-review` when the author pushes an update or the pull request is marked ready for review.
 
 ### Runner selection
 
