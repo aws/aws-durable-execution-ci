@@ -15,6 +15,10 @@ MAX_CONFIGURED_LABELS = 50
 MAX_LABELS = MAX_CONFIGURED_LABELS
 MAX_JSON_FILE_BYTES = 1_000_000
 CONTEXT_DIRECTORY = ".ai-issue-triage-context"
+TRIAGE_LABEL = "needs-triage"
+# Maintainers file planned work with this label and have already routed it,
+# so triage never adds TRIAGE_LABEL to an issue that carries it.
+TRIAGE_EXEMPT_LABEL = "project"
 ISSUE_CONTEXT_FIELDS = frozenset(
     (
         "repository",
@@ -191,6 +195,31 @@ def normalize_issue(
             "GitHub returned an issue with an invalid author association"
         )
     return issue
+
+
+def issue_label_names(value: Any) -> set[str]:
+    labels = value.get("labels") if isinstance(value, dict) else None
+    if not isinstance(labels, list):
+        raise TriageError("GitHub returned an issue with invalid labels")
+
+    names: set[str] = set()
+    for label in labels:
+        name = label.get("name") if isinstance(label, dict) else None
+        if not isinstance(name, str):
+            raise TriageError("GitHub returned an issue with invalid labels")
+        names.add(name.casefold())
+    return names
+
+
+def is_triage_exempt(issue: Any) -> bool:
+    return TRIAGE_EXEMPT_LABEL.casefold() in issue_label_names(issue)
+
+
+def report_triage_exemption() -> None:
+    print(
+        f"Not applying {TRIAGE_LABEL}: the issue has the "
+        f"{TRIAGE_EXEMPT_LABEL} label."
+    )
 
 
 def validate_model_context(
@@ -405,12 +434,22 @@ def apply_result(result_path: Path) -> None:
         {"labels": raw_labels},
         candidates,
     )
-    current_issue = normalize_issue(
-        run_gh_json([f"repos/{repository}/issues/{issue_number}"]),
-        repository,
-        issue_number,
-    )
+    issue = run_gh_json([f"repos/{repository}/issues/{issue_number}"])
+    current_issue = normalize_issue(issue, repository, issue_number)
     require_matching_snapshot(snapshot, current_issue)
+
+    labels = result["labels"]
+    if is_triage_exempt(issue):
+        kept_labels = [
+            label
+            for label in labels
+            if label.casefold() != TRIAGE_LABEL.casefold()
+        ]
+        if len(kept_labels) < len(labels):
+            report_triage_exemption()
+        labels = kept_labels
+    if not labels:
+        return
 
     run_gh_json(
         [
@@ -420,13 +459,33 @@ def apply_result(result_path: Path) -> None:
             "--input",
             "-",
         ],
-        input_value=result,
+        input_value={"labels": labels},
     )
+
+
+def fallback_is_exempt(repository: str, issue_number: int) -> bool:
+    # The fallback is the manual-triage safety net, so an issue it cannot
+    # check still gets the triage label.
+    try:
+        issue = run_gh_json([f"repos/{repository}/issues/{issue_number}"])
+        normalize_issue(issue, repository, issue_number)
+        return is_triage_exempt(issue)
+    except TriageError as error:
+        reason = " ".join(str(error).split())
+        print(
+            f"::warning::Applying {TRIAGE_LABEL} because the issue could "
+            f"not be checked for the {TRIAGE_EXEMPT_LABEL} label: {reason}"
+        )
+        return False
 
 
 def apply_fallback() -> None:
     repository, issue_number = repository_and_issue_number()
-    label_name = "needs-triage"
+    if fallback_is_exempt(repository, issue_number):
+        report_triage_exemption()
+        return
+
+    label_name = TRIAGE_LABEL
     existing_names = {
         label.get("name", "").casefold(): label.get("name")
         for label in load_repository_labels(repository)
