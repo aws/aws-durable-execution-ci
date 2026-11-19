@@ -98,9 +98,18 @@ groups and cannot cancel an active review.
 The caller must declare the `issue_comment` event shown above. A reusable
 workflow does not add its own event triggers to the caller. The
 `pull_request_review` and `pull_request_review_comment` events retain human
-review workload and allow inline verdict replies. `contents: write` is the
-caller-level ceiling needed by trusted telemetry jobs; model jobs explicitly
-retain only `contents: read`.
+review workload and allow inline verdict replies when GitHub supplies a writable
+token. For fork pull requests in public repositories, GitHub restricts these
+events to a read-only token even if a maintainer approves or reruns the workflow.
+The activity recorder skips those events before making API calls and emits a
+warning: their human review and inline comment metadata and inline verdicts are
+not recorded. `pull_request_target` and PR conversation (`issue_comment`)
+activity still work for public fork pull requests. Private repositories may
+configure different fork token permissions, so their review events continue
+through the normal recorder and permission errors remain failures.
+
+`contents: write` is the caller-level ceiling needed by trusted telemetry jobs;
+model jobs explicitly retain only `contents: read`.
 
 ## Finding identity
 
@@ -140,6 +149,10 @@ The conversation-level form includes the finding ID:
 ```text
 /ai verdict arf_v1_... false-positive
 ```
+
+For fork pull requests in public repositories, use this conversation-level form.
+Inline verdict replies are skipped because their event token cannot persist or
+acknowledge a verdict.
 
 The allowed outcomes are:
 
@@ -232,6 +245,11 @@ The workflow records:
   response timestamps without their bodies.
 - Exact suggestion adoption when a later revision uniquely matches the
   published replacement and surrounding context.
+
+Human reviews, approvals, and inline comment activity from public fork review
+events are omitted as described above. Metrics derived from those events, such
+as time from first human review to approval, do not cover those pull requests.
+Conversation-level verdicts and other trusted-event telemetry remain available.
 
 Data is stored as immutable JSON files under `events/` on the orphan
 `ai-review-telemetry-v1` branch. Stable finding and suggestion metadata live

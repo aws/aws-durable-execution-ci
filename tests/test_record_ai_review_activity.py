@@ -2,11 +2,15 @@
 
 import base64
 import copy
+import io
 import json
+import os
 import sys
+import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -16,6 +20,7 @@ from record_ai_review_activity import (
     GitHubApiError,
     VerdictRejected,
     activity_records,
+    main,
     parse_finding_marker,
     parse_verdict_command,
     suggestion_applied,
@@ -392,6 +397,125 @@ class RecordAiReviewActivityTest(unittest.TestCase):
                 repository_id=123,
                 repository="aws/example",
             )
+
+
+class RecordAiReviewActivityMainTest(unittest.TestCase):
+    def review_event(self, event_name, *, head_id=456, private=False):
+        event = pull_request_event()
+        event["repository"] = {"id": 123, "private": private}
+        event["pull_request"]["head"]["repo"] = {"id": head_id, "fork": True}
+        event["action"] = "submitted" if event_name == "pull_request_review" else "created"
+        event["review"] = {
+            "id": 10,
+            "submitted_at": "2026-08-25T12:01:00Z",
+            "state": "APPROVED",
+            "commit_id": HEAD_SHA,
+            "user": {"login": "maintainer", "id": 8, "type": "User"},
+        }
+        event["comment"] = {
+            "id": 11,
+            "body": "Review comment",
+            "created_at": "2026-08-25T12:01:00Z",
+            "user": {"login": "maintainer", "id": 8, "type": "User"},
+        }
+        return event
+
+    def run_activity(self, event_name, event, *, write_error=None):
+        output, errors = io.StringIO(), io.StringIO()
+        with tempfile.TemporaryDirectory() as directory:
+            event_path = Path(directory) / "event.json"
+            event_path.write_text(json.dumps(event), encoding="utf-8")
+            with (
+                patch.dict(os.environ, {
+                    "GITHUB_EVENT_NAME": event_name,
+                    "GITHUB_REPOSITORY": "aws/example",
+                    "GITHUB_REPOSITORY_ID": "123",
+                    "GITHUB_EVENT_PATH": str(event_path),
+                }),
+                patch("record_ai_review_activity.GitHubApi") as api,
+                patch("record_ai_review_activity.TelemetryStore") as store,
+                redirect_stdout(output),
+                redirect_stderr(errors),
+            ):
+                store.return_value.write_records.side_effect = write_error
+                result = main()
+        return result, output.getvalue(), errors.getvalue(), api, store
+
+    def test_public_fork_reviews_skip_before_any_api_or_verdict_work(self):
+        for event_name in ("pull_request_review", "pull_request_review_comment"):
+            with self.subTest(event_name=event_name):
+                event = self.review_event(event_name)
+                event["comment"]["body"] = "/ai verdict accepted"
+                result, output, errors, api, store = self.run_activity(
+                    event_name, event,
+                    write_error=GitHubApiError("Resource not accessible by integration", 403),
+                )
+                self.assertEqual(result, 0)
+                self.assertIn("::warning::", output)
+                self.assertIn("read-only", output)
+                self.assertIn("not recorded", output)
+                self.assertIn("/ai verdict <finding-id> <outcome>", output)
+                self.assertEqual(errors, "")
+                api.assert_not_called()
+                store.assert_not_called()
+
+    def test_same_repository_and_private_fork_reviews_still_record(self):
+        for event_name, record_type in (
+            ("pull_request_review", "human_review"),
+            ("pull_request_review_comment", "human_inline_comment"),
+        ):
+            for options in ({"head_id": 123}, {"private": True}):
+                with self.subTest(event_name=event_name, options=options):
+                    result, output, errors, _, store = self.run_activity(
+                        event_name, self.review_event(event_name, **options)
+                    )
+                    self.assertEqual((result, output, errors), (0, "", ""))
+                    store.return_value.write_records.assert_called_once()
+                    record = store.return_value.write_records.call_args.args[0][0]
+                    self.assertEqual(record["record_type"], record_type)
+
+    def test_trusted_events_still_record_for_public_forks(self):
+        for event_name in ("pull_request_target", "issue_comment"):
+            with self.subTest(event_name=event_name):
+                event = self.review_event(event_name)
+                if event_name == "pull_request_target":
+                    event["action"] = "opened"
+                    event["pull_request"]["created_at"] = "2026-08-25T12:00:00Z"
+                else:
+                    event.pop("pull_request")
+                    event["issue"] = {"number": 42, "pull_request": {}}
+                result, output, errors, _, store = self.run_activity(event_name, event)
+                self.assertEqual((result, output, errors), (0, "", ""))
+                store.return_value.write_records.assert_called_once()
+
+    def test_missing_repository_identity_does_not_silently_skip(self):
+        for head_repo in (None, {}, {"id": True}, {"id": 0}):
+            with self.subTest(head_repo=head_repo):
+                event = self.review_event("pull_request_review")
+                event["pull_request"]["head"]["repo"] = head_repo
+                result, output, errors, _, store = self.run_activity(
+                    "pull_request_review", event
+                )
+                self.assertEqual((result, output, errors), (0, "", ""))
+                store.return_value.write_records.assert_called_once()
+        event = self.review_event("pull_request_review")
+        event.pop("repository")
+        result, output, errors, _, store = self.run_activity("pull_request_review", event)
+        self.assertEqual((result, output, errors), (0, "", ""))
+        store.return_value.write_records.assert_called_once()
+
+    def test_other_permission_errors_still_fail(self):
+        for options in ({"head_id": 123}, {"private": True}):
+            with self.subTest(options=options):
+                result, output, errors, _, store = self.run_activity(
+                    "pull_request_review",
+                    self.review_event("pull_request_review", **options),
+                    write_error=GitHubApiError("Resource not accessible by integration", 403),
+                )
+                self.assertEqual(result, 1)
+                self.assertEqual(output, "")
+                self.assertIn("Resource not accessible by integration", errors)
+                store.return_value.write_records.assert_called_once()
 
 
 if __name__ == "__main__":

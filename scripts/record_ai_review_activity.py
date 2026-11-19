@@ -791,6 +791,29 @@ def activity_records(
     raise TelemetryError(f"unsupported telemetry event: {event_name}")
 
 
+def is_public_fork_review(
+    event_name: str,
+    event: dict[str, Any],
+    repository_id: int,
+) -> bool:
+    if event_name not in ("pull_request_review", "pull_request_review_comment"):
+        return False
+    repository = event.get("repository")
+    pull_request = event.get("pull_request")
+    if (
+        not isinstance(repository, dict)
+        or repository.get("private") is not False
+        or not isinstance(pull_request, dict)
+    ):
+        return False
+    head = pull_request.get("head")
+    head_repository = head.get("repo") if isinstance(head, dict) else None
+    if not isinstance(head_repository, dict):
+        return False
+    head_id = head_repository.get("id")
+    return type(head_id) is int and head_id > 0 and head_id != repository_id
+
+
 def main() -> int:
     try:
         event_name = require_environment("GITHUB_EVENT_NAME")
@@ -805,6 +828,17 @@ def main() -> int:
         )
         if not isinstance(event, dict):
             raise TelemetryError("GitHub event payload must be an object")
+        # Public fork review events receive a read-only token even when the
+        # caller requests write permissions. Private fork policies can differ.
+        if is_public_fork_review(event_name, event, repository_id):
+            print(
+                "::warning::Skipping public fork review activity because "
+                "GITHUB_TOKEN is read-only. Human review and inline comment "
+                "metadata and inline verdicts are not recorded. Use "
+                "/ai verdict <finding-id> <outcome> in a pull request "
+                "conversation comment for fork verdicts."
+            )
+            return 0
         api = GitHubApi()
         store = TelemetryStore(repository, api=api)
         records = activity_records(
